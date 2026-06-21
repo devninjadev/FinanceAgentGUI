@@ -935,6 +935,14 @@ button {
   line-height: 1.42;
 }
 
+.user-bubble-with-context {
+  max-width: 92%;
+}
+
+.user-message-text {
+  margin: 0;
+}
+
 .chat-message-assistant {
   align-items: flex-start;
   gap: 8px;
@@ -961,6 +969,7 @@ button {
 .assistant-response {
   flex: 1 1 auto;
   min-width: 0;
+  color: #333333;
 }
 
 .response-meta {
@@ -968,8 +977,8 @@ button {
   align-items: center;
   gap: 7px;
   margin-bottom: 7px;
-  color: #9a9a9a;
-  font-size: 11px;
+  color: #777777;
+  font-size: 12px;
   font-weight: 560;
 }
 
@@ -1015,22 +1024,81 @@ button {
 .chat-status strong,
 .evidence-title strong {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 750;
   line-height: 1.25;
 }
 
 .chat-status p,
-.chat-paragraph,
 .chat-evidence p {
   margin: 3px 0 0;
-  color: #686868;
-  font-size: 12px;
+  color: #555555;
+  font-size: 13px;
   line-height: 1.45;
 }
 
 .chat-paragraph {
   white-space: pre-wrap;
+}
+
+.markdown-body {
+  display: grid;
+  gap: 11px;
+  color: #303030;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.64;
+}
+
+.markdown-paragraph {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.markdown-paragraph strong,
+.markdown-list strong,
+.markdown-quote strong {
+  color: #222222;
+  font-weight: 780;
+}
+
+.markdown-heading {
+  margin: 2px 0 0;
+  color: #202020;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.markdown-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 22px;
+  color: #3d3d3d;
+}
+
+.markdown-list li {
+  padding-left: 2px;
+}
+
+.markdown-quote {
+  margin: 0;
+  padding: 9px 11px;
+  border-left: 3px solid #d0d0d0;
+  border-radius: 0 8px 8px 0;
+  background: #fafafa;
+  color: #454545;
+}
+
+.markdown-link {
+  color: #245fa8;
+  font-weight: 680;
+  text-decoration: none;
+}
+
+.markdown-link:hover {
+  text-decoration: underline;
 }
 
 .inline-code {
@@ -1039,7 +1107,7 @@ button {
   background: #f1f1f1;
   color: #333333;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .chat-section {
@@ -1264,6 +1332,13 @@ button {
   border-radius: 22px 22px 10px 10px;
   background: #f8f8f8;
   color: #373737;
+}
+
+.article-context-message {
+  grid-template-columns: 28px minmax(0, 1fr);
+  margin: 0 0 9px;
+  border-radius: 14px;
+  background: #ffffff;
 }
 
 .article-context-error {

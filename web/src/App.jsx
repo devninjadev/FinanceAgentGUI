@@ -145,18 +145,181 @@ const leftSidebarSections = [
   },
 ];
 
-function textWithInlineCode(text) {
-  return String(text)
-    .split(/(`[^`]+`)/g)
-    .map((part, index) =>
-      part.startsWith("`") && part.endsWith("`") ? (
-        <code className="inline-code" key={`${part}-${index}`}>
-          {part.slice(1, -1)}
+function renderMarkdownInline(text, keyPrefix = "inline") {
+  const source = String(text || "");
+  const pattern = /(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+?\*\*|__[^_]+?__|\*[^*\s][^*]*?\*|_[^_\s][^_]*?_)/g;
+  const parts = [];
+  let cursor = 0;
+  let match;
+
+  while ((match = pattern.exec(source))) {
+    if (match.index > cursor) {
+      parts.push(
+        <React.Fragment key={`${keyPrefix}-text-${cursor}`}>
+          {source.slice(cursor, match.index)}
+        </React.Fragment>
+      );
+    }
+
+    const token = match[0];
+    const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (link) {
+      const href = /^https?:\/\//i.test(link[2]) ? link[2] : "#";
+      parts.push(
+        <a className="markdown-link" href={href} target="_blank" rel="noreferrer" key={`${keyPrefix}-link-${match.index}`}>
+          {link[1]}
+        </a>
+      );
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      parts.push(
+        <code className="inline-code" key={`${keyPrefix}-code-${match.index}`}>
+          {token.slice(1, -1)}
         </code>
-      ) : (
-        <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>
-      )
+      );
+    } else if ((token.startsWith("**") && token.endsWith("**")) || (token.startsWith("__") && token.endsWith("__"))) {
+      parts.push(
+        <strong key={`${keyPrefix}-strong-${match.index}`}>
+          {token.slice(2, -2)}
+        </strong>
+      );
+    } else {
+      parts.push(
+        <em key={`${keyPrefix}-em-${match.index}`}>
+          {token.slice(1, -1)}
+        </em>
+      );
+    }
+    cursor = match.index + token.length;
+  }
+
+  if (cursor < source.length) {
+    parts.push(
+      <React.Fragment key={`${keyPrefix}-text-${cursor}`}>
+        {source.slice(cursor)}
+      </React.Fragment>
     );
+  }
+  return parts.length ? parts : source;
+}
+
+function MarkdownText({ text }) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+  let codeLines = null;
+  let codeLanguage = "";
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    const value = paragraph.join("\n").trim();
+    if (value) {
+      blocks.push(
+        <p className="markdown-paragraph" key={`p-${blocks.length}`}>
+          {renderMarkdownInline(value, `p-${blocks.length}`)}
+        </p>
+      );
+    }
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!list) return;
+    const Tag = list.type === "ol" ? "ol" : "ul";
+    blocks.push(
+      <Tag className="markdown-list" key={`list-${blocks.length}`}>
+        {list.items.map((item, index) => (
+          <li key={`${item}-${index}`}>{renderMarkdownInline(item, `li-${blocks.length}-${index}`)}</li>
+        ))}
+      </Tag>
+    );
+    list = null;
+  }
+
+  function flushCode() {
+    if (!codeLines) return;
+    blocks.push(
+      <figure className="chat-code markdown-code-block" key={`code-${blocks.length}`}>
+        <figcaption>
+          <Terminal size={14} strokeWidth={2} />
+          <span>{codeLanguage || "text"}</span>
+        </figcaption>
+        <pre>{codeLines.join("\n")}</pre>
+      </figure>
+    );
+    codeLines = null;
+    codeLanguage = "";
+  }
+
+  for (const line of lines) {
+    const fence = line.match(/^```(\w+)?\s*$/);
+    if (fence) {
+      if (codeLines) {
+        flushCode();
+      } else {
+        flushParagraph();
+        flushList();
+        codeLines = [];
+        codeLanguage = fence[1] || "";
+      }
+      continue;
+    }
+
+    if (codeLines) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const Tag = `h${heading[1].length + 2}`;
+      blocks.push(
+        <Tag className="markdown-heading" key={`h-${blocks.length}`}>
+          {renderMarkdownInline(heading[2], `h-${blocks.length}`)}
+        </Tag>
+      );
+      continue;
+    }
+
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    if (ordered || unordered) {
+      flushParagraph();
+      const type = ordered ? "ol" : "ul";
+      if (!list || list.type !== type) flushList();
+      if (!list) list = { type, items: [] };
+      list.items.push((ordered || unordered)[1].trim());
+      continue;
+    }
+
+    const quote = line.match(/^>\s?(.+)$/);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      blocks.push(
+        <blockquote className="markdown-quote" key={`quote-${blocks.length}`}>
+          {renderMarkdownInline(quote[1], `quote-${blocks.length}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+  flushCode();
+
+  return <div className="markdown-body">{blocks}</div>;
 }
 
 function formatCount(value) {
@@ -412,12 +575,19 @@ function BoardPagination({ pages, onPage }) {
   );
 }
 
-function ArticleContextAttachment({ article, onClear }) {
+function ArticleContextAttachment({ article, onClear, placement = "composer" }) {
   if (!article) return null;
   const preview = articlePreviewText(article);
+  const className = [
+    "article-context-attachment",
+    article.error ? "article-context-error" : "",
+    placement === "message" ? "article-context-message" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <section
-      className={article.error ? "article-context-attachment article-context-error" : "article-context-attachment"}
+      className={className}
       aria-label="Codex 첨부 컨텍스트"
     >
       <div className="article-context-icon" aria-hidden="true">
@@ -433,9 +603,11 @@ function ArticleContextAttachment({ article, onClear }) {
         </a>
         <p>{preview}</p>
       </div>
-      <button className="article-context-clear" type="button" onClick={onClear} aria-label="첨부한 게시글 제거">
-        <X size={17} strokeWidth={2.2} />
-      </button>
+      {onClear ? (
+        <button className="article-context-clear" type="button" onClick={onClear} aria-label="첨부한 게시글 제거">
+          <X size={17} strokeWidth={2.2} />
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -456,7 +628,7 @@ function ChatBlock({ block }) {
   }
 
   if (block.type === "paragraph") {
-    return <p className="chat-paragraph">{textWithInlineCode(block.text)}</p>;
+    return <MarkdownText text={block.text} />;
   }
 
   if (block.type === "list") {
@@ -565,7 +737,10 @@ function ChatMessage({ message }) {
   if (message.role === "user") {
     return (
       <article className="chat-message chat-message-user">
-        <div className="user-bubble">{message.text}</div>
+        <div className={message.article ? "user-bubble user-bubble-with-context" : "user-bubble"}>
+          {message.article ? <ArticleContextAttachment article={message.article} placement="message" /> : null}
+          <p className="user-message-text">{message.text}</p>
+        </div>
       </article>
     );
   }
@@ -591,7 +766,7 @@ function ChatMessage({ message }) {
 }
 
 function messageToHistoryText(message) {
-  if (message.role === "user") return message.text;
+  if (message.role === "user") return buildPromptWithArticleContext(message.text, message.article);
   return (message.blocks || [])
     .filter((block) => block.type === "paragraph")
     .map((block) => block.text)
@@ -1078,11 +1253,13 @@ function App() {
     const trimmed = prompt.trim();
     if (!trimmed || isSending) return;
     const createdAt = Date.now();
-    const promptWithContext = buildPromptWithArticleContext(trimmed, attachedArticle);
+    const articleForMessage = attachedArticle;
+    const promptWithContext = buildPromptWithArticleContext(trimmed, articleForMessage);
     const userMessage = {
       id: `user-${createdAt}`,
       role: "user",
       text: trimmed,
+      article: articleForMessage,
       time: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }),
     };
     const assistantId = `assistant-${createdAt}`;
@@ -1093,6 +1270,7 @@ function App() {
 
     setChatMessages((messages) => [...messages, userMessage, buildPendingAssistant(assistantId)]);
     setPrompt("");
+    setAttachedArticle(null);
     setIsSending(true);
 
     try {
