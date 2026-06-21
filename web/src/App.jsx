@@ -1093,7 +1093,17 @@ function App() {
           <section className="stock-board" aria-labelledby="stock-board-title">
             <header className="stock-board-header">
               <div>
-                <h1 id="stock-board-title">아카라이브 주식채널</h1>
+                <h1 id="stock-board-title">
+                  <button
+                    className="board-title-refresh"
+                    type="button"
+                    onClick={refreshBoard}
+                    disabled={arcaBoardBusy}
+                    aria-label="아카라이브 주식채널 수동 갱신"
+                  >
+                    아카라이브 주식채널
+                  </button>
+                </h1>
                 <p>
                   {activeCategoryLabel} · {arcaBoard?.articles?.length ?? 0}개 글 · {arcaBoardBusy ? "불러오는 중" : "수동 조회 완료"}
                 </p>

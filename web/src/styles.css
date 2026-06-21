@@ -273,11 +273,32 @@ button {
 
 .stock-board-header h1 {
   margin: 0;
+}
+
+.board-title-refresh {
+  display: inline;
+  margin: 0;
+  padding: 0;
   color: #111111;
+  background: transparent;
   font-size: 24px;
   font-weight: 800;
   line-height: 1.15;
   letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.board-title-refresh:hover,
+.board-title-refresh:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.board-title-refresh:disabled {
+  cursor: default;
+  opacity: 0.72;
+  text-decoration: none;
 }
 
 .stock-board-header p {
@@ -1534,7 +1555,7 @@ textarea::placeholder {
     flex-direction: column;
   }
 
-  .stock-board-header h1 {
+  .board-title-refresh {
     font-size: 22px;
   }
 
