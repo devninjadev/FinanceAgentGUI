@@ -5,6 +5,10 @@ export function codexApiPlugin() {
   return {
     name: "finance-agent-codex-api",
     configureServer(server) {
+      server.middlewares.use("/api/arca/articles", async (req, res) => {
+        await handleArcaEndpoint("articles", req, res);
+      });
+
       server.middlewares.use("/api/arca/probe", async (req, res) => {
         await handleArcaEndpoint("probe", req, res);
       });

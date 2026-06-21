@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ChevronsRight,
   Circle,
   Database,
   ExternalLink,
@@ -16,15 +17,19 @@ import {
   Image as ImageIcon,
   LockKeyhole,
   LoaderCircle,
+  List,
   MessageSquare,
   Newspaper,
   PencilLine,
   PieChart,
   RefreshCw,
+  Search,
   Send,
   Settings,
   ShieldCheck,
+  Star,
   Terminal,
+  User,
   X,
 } from "lucide-react";
 import codexLogo from "./assets/codex-logo-transparent.png";
@@ -94,14 +99,46 @@ const initialArcaDraft = {
   title: "",
   content: "",
 };
+const initialBoardFilters = {
+  channel: "stock",
+  category: "",
+  page: 1,
+  best: false,
+  sort: "",
+  cutRate: "",
+  target: "all",
+  keyword: "",
+};
 const MIN_PROMPT_HEIGHT = 42;
 const MAX_PROMPT_HEIGHT = 132;
+
+const sortOptions = [
+  { id: "", label: "등록순" },
+  { id: "recentComment", label: "최근댓글" },
+  { id: "commentCount", label: "댓글순" },
+  { id: "rating", label: "추천순" },
+];
+
+const cutRateOptions = [
+  { id: "", label: "추천컷" },
+  { id: "5", label: "5컷" },
+  { id: "10", label: "10컷" },
+  { id: "20", label: "20컷" },
+];
+
+const searchTargetOptions = [
+  { id: "all", label: "전체" },
+  { id: "title_content", label: "제목+본문" },
+  { id: "title", label: "제목" },
+  { id: "content", label: "본문" },
+  { id: "nickname", label: "작성자" },
+];
 
 const leftSidebarSections = [
   {
     title: "작업",
     items: [
-      { label: "조종석", icon: Home, active: true },
+      { label: "주식채널", icon: Home, active: true },
       { label: "World Memory", icon: Database },
       { label: "News Feed", icon: Newspaper },
       { label: "포트폴리오", icon: PieChart },
@@ -159,6 +196,166 @@ function IssueList({ issues = [] }) {
               {item.recovery ? <small>{item.recovery}</small> : null}
             </span>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatCount(value) {
+  if (value === null || value === undefined) return "";
+  return Number(value).toLocaleString("ko-KR");
+}
+
+function BoardCategoryRail({ categories, activeCategory, onSelect }) {
+  const safeCategories = categories?.length ? categories : [{ name: "", label: "전체" }];
+  return (
+    <div className="board-category-shell" aria-label="게시판 카테고리">
+      <div className="board-category-rail">
+        {safeCategories.map((category) => (
+          <button
+            type="button"
+            className={category.name === activeCategory ? "board-category-tab is-active" : "board-category-tab"}
+            key={`${category.name || "all"}-${category.label}`}
+            onClick={() => onSelect(category.name)}
+          >
+            {category.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AuthorName({ row }) {
+  return (
+    <span className="board-author" title={row.author || ""}>
+      <span>{row.author || "-"}</span>
+      {row.authorFixed || row.authorManager ? <CheckCircle2 size={14} strokeWidth={2.2} /> : null}
+      {row.accountUser && !row.authorFixed && !row.authorManager ? <User size={14} strokeWidth={2.2} /> : null}
+    </span>
+  );
+}
+
+function BoardTitleCell({ row }) {
+  return (
+    <span className="board-title-cell">
+      {row.type === "article" && !row.categoryLabel ? (
+        <span className="board-comment-icon" aria-hidden="true">
+          <MessageSquare size={16} strokeWidth={2.4} />
+        </span>
+      ) : null}
+      {row.categoryLabel && row.type === "article" ? (
+        <span className="board-row-category">{row.categoryLabel}</span>
+      ) : null}
+      <a href={row.href} target="_blank" rel="noreferrer">
+        {row.title}
+      </a>
+      {row.commentCount ? <span className="board-comment-count">[{row.commentCount}]</span> : null}
+    </span>
+  );
+}
+
+function BoardRow({ row }) {
+  const rowClass =
+    row.type === "notice" ? "board-row board-row-notice" : row.type === "ad" ? "board-row board-row-ad" : "board-row";
+  return (
+    <tr className={rowClass}>
+      <td className="board-col-id">
+        {row.type === "ad" ? "광고" : row.type === "notice" ? "공지" : row.number || row.id}
+      </td>
+      <td className="board-col-title">
+        <BoardTitleCell row={row} />
+      </td>
+      <td className="board-col-author">
+        <AuthorName row={row} />
+      </td>
+      <td className="board-col-time">{row.timeLabel}</td>
+      <td className="board-col-view">{formatCount(row.view)}</td>
+      <td className="board-col-rate">{row.rate ?? ""}</td>
+    </tr>
+  );
+}
+
+function BoardTable({ board, showHiddenNotices, onToggleHidden }) {
+  const ads = board?.ads || [];
+  const notices = board?.notices || [];
+  const hiddenNotices = board?.hiddenNotices || [];
+  const articles = board?.articles || [];
+  const hasRows = ads.length || notices.length || hiddenNotices.length || articles.length;
+
+  return (
+    <div className="board-table-wrap">
+      <table className="board-table">
+        <thead>
+          <tr>
+            <th className="board-col-id">번호</th>
+            <th className="board-col-title">제목</th>
+            <th className="board-col-author">작성자</th>
+            <th className="board-col-time">작성일</th>
+            <th className="board-col-view">조회수</th>
+            <th className="board-col-rate">추천</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ads.map((row) => (
+            <BoardRow row={row} key={`${row.type}-${row.href}`} />
+          ))}
+          {notices.map((row) => (
+            <BoardRow row={row} key={`${row.type}-${row.id || row.href}`} />
+          ))}
+          {hiddenNotices.length ? (
+            <tr className="board-hidden-toggle-row">
+              <td colSpan={6}>
+                <button type="button" onClick={onToggleHidden}>
+                  <span>{showHiddenNotices ? "숨겨진 공지 접기" : `숨겨진 공지 펼치기(${hiddenNotices.length}개)`}</span>
+                  <ChevronDown size={17} strokeWidth={2.1} />
+                </button>
+              </td>
+            </tr>
+          ) : null}
+          {showHiddenNotices
+            ? hiddenNotices.map((row) => <BoardRow row={row} key={`${row.type}-hidden-${row.id || row.href}`} />)
+            : null}
+          {articles.map((row) => (
+            <BoardRow row={row} key={`${row.type}-${row.id || row.href}`} />
+          ))}
+          {!hasRows ? (
+            <tr className="board-empty-row">
+              <td colSpan={6}>표시할 게시글이 없습니다.</td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BoardPagination({ pages, onPage }) {
+  const safePages = (pages || []).filter((page) => page.label && !page.disabled);
+  if (!safePages.length) return null;
+  return (
+    <div className="board-pagination" aria-label="게시판 페이지">
+      {safePages.map((page, index) => {
+        const isNext = page.label === ">";
+        const isLast = page.label === ">>";
+        return (
+          <button
+            type="button"
+            className={page.active ? "is-active" : ""}
+            key={`${page.label}-${page.page || index}`}
+            onClick={() => page.page && onPage(page.page)}
+            disabled={!page.page}
+            aria-label={isNext ? "다음 페이지" : isLast ? "마지막 페이지" : `${page.label} 페이지`}
+          >
+            {isLast ? (
+              <ChevronsRight size={20} strokeWidth={2.2} />
+            ) : isNext ? (
+              <ChevronRight size={20} strokeWidth={2.2} />
+            ) : (
+              page.label
+            )}
+          </button>
         );
       })}
     </div>
@@ -549,6 +746,12 @@ function App() {
   const [arcaPublishResult, setArcaPublishResult] = useState(null);
   const [arcaBusy, setArcaBusy] = useState("");
   const [arcaConfirmation, setArcaConfirmation] = useState("");
+  const [boardFilters, setBoardFilters] = useState(initialBoardFilters);
+  const [boardSearchInput, setBoardSearchInput] = useState("");
+  const [arcaBoard, setArcaBoard] = useState(null);
+  const [arcaBoardBusy, setArcaBoardBusy] = useState(false);
+  const [arcaBoardError, setArcaBoardError] = useState("");
+  const [showHiddenNotices, setShowHiddenNotices] = useState(false);
   const messageStackRef = useRef(null);
   const promptRef = useRef(null);
   const selectedModelGroup = useMemo(
@@ -575,9 +778,32 @@ function App() {
     () => approvalOptions.find((item) => item.id === approval) ?? approvalOptions[0],
     [approval, approvalOptions]
   );
+  const activeCategoryLabel = useMemo(() => {
+    const selected = arcaBoard?.categories?.find((category) => category.name === boardFilters.category);
+    return selected?.label || "전체";
+  }, [arcaBoard, boardFilters.category]);
   const expectedArcaConfirmation = `POST ${arcaDraft.channel || "stock"}`;
   const isArcaConfirmed = arcaConfirmation.trim() === expectedArcaConfirmation;
   const arcaCanPublish = Boolean(arcaValidation?.ok && isArcaConfirmed && !arcaBusy);
+
+  function updateBoardFilters(nextPatch) {
+    setBoardFilters((filters) => ({ ...filters, ...nextPatch }));
+  }
+
+  function selectBoardCategory(category) {
+    setShowHiddenNotices(false);
+    updateBoardFilters({ category, page: 1 });
+    setArcaDraft((draft) => ({ ...draft, category }));
+  }
+
+  function refreshBoard() {
+    setBoardFilters((filters) => ({ ...filters }));
+  }
+
+  function submitBoardSearch(event) {
+    event.preventDefault();
+    updateBoardFilters({ keyword: boardSearchInput.trim(), page: 1 });
+  }
 
   function updateArcaDraft(field, value) {
     setArcaDraft((draft) => ({ ...draft, [field]: value }));
@@ -708,6 +934,41 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadArcaBoard() {
+      setArcaBoardBusy(true);
+      setArcaBoardError("");
+      try {
+        const response = await fetch("/api/arca/articles", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(boardFilters),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok && !payload.issues?.length) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setArcaBoard(payload);
+        if (!payload.ok && payload.issues?.length) {
+          setArcaBoardError(payload.issues.map((item) => item.message).join(" / "));
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setArcaBoardError(error.message);
+      } finally {
+        if (!cancelled) setArcaBoardBusy(false);
+      }
+    }
+
+    loadArcaBoard();
+    return () => {
+      cancelled = true;
+    };
+  }, [boardFilters]);
 
   useEffect(() => {
     if (!reasoningOptions.some((item) => item.id === reasoning)) {
@@ -951,31 +1212,124 @@ function App() {
         </nav>
       </aside>
 
-      <section className="workspace-canvas" aria-label="FinanceAgentGUI workspace">
-        <div className="workspace-shell">
-          <header className="workspace-header">
-            <div>
-              <h1>금융 에이전트 조종석</h1>
-              <p>로컬 작업 실행, 외부 채널 연결, 검증 결과를 한 화면에서 관리합니다.</p>
-            </div>
-            <div className="workspace-health">
-              <span className="health-dot" aria-hidden="true" />
-              <span>Local only</span>
-            </div>
-          </header>
+      <section className="workspace-canvas board-index-canvas" aria-label="아카라이브 주식채널 인덱스">
+        <div className="board-index-shell">
+          <section className="stock-board" aria-labelledby="stock-board-title">
+            <header className="stock-board-header">
+              <div>
+                <h1 id="stock-board-title">아카라이브 주식채널</h1>
+                <p>
+                  {activeCategoryLabel} · {arcaBoard?.articles?.length ?? 0}개 글 · {arcaBoardBusy ? "불러오는 중" : "수동 조회 완료"}
+                </p>
+              </div>
+              <button className="board-refresh-button" type="button" onClick={refreshBoard} disabled={arcaBoardBusy}>
+                <RefreshCw size={16} strokeWidth={2.2} />
+                <span>{arcaBoardBusy ? "조회 중" : "수동 갱신"}</span>
+              </button>
+            </header>
 
-          <div className="workspace-grid">
-            <section className="operation-panel arca-operation" aria-labelledby="arca-title">
-              <div className="panel-heading">
-                <div>
-                  <h2 id="arca-title">아카라이브 주식채널</h2>
-                  <p>CSRF 폼 기반으로 연결을 점검하고 승인된 초안만 게시합니다.</p>
-                </div>
-                <StatusBadge tone={arcaProbe ? (arcaProbe.ok ? "ok" : "error") : "idle"}>
-                  {arcaProbe ? (arcaProbe.ok ? "연결 가능" : "점검 필요") : "미진단"}
-                </StatusBadge>
+            <BoardCategoryRail
+              categories={arcaBoard?.categories}
+              activeCategory={boardFilters.category}
+              onSelect={selectBoardCategory}
+            />
+
+            <div className="board-meta-line">
+              <span>{arcaBoard?.pageTitle || "주식 채널"}</span>
+              <span>page {boardFilters.page}</span>
+              {arcaBoardError ? <strong>{arcaBoardError}</strong> : null}
+              {arcaBoard?.issues?.map((item) => (
+                <strong key={item.code}>{item.code}</strong>
+              ))}
+            </div>
+
+            <BoardTable
+              board={arcaBoard}
+              showHiddenNotices={showHiddenNotices}
+              onToggleHidden={() => setShowHiddenNotices((next) => !next)}
+            />
+
+            <div className="board-bottom-controls">
+              <div className="board-mode-controls">
+                <button
+                  type="button"
+                  className={!boardFilters.best ? "is-active" : ""}
+                  onClick={() => updateBoardFilters({ best: false, page: 1 })}
+                >
+                  <List size={15} strokeWidth={2.2} />
+                  <span>전체글</span>
+                </button>
+                <button
+                  type="button"
+                  className={boardFilters.best ? "is-hot is-active" : "is-hot"}
+                  onClick={() => updateBoardFilters({ best: true, page: 1 })}
+                >
+                  <Star size={15} strokeWidth={2.2} />
+                  <span>개념글</span>
+                </button>
+                <select
+                  value={boardFilters.sort}
+                  onChange={(event) => updateBoardFilters({ sort: event.target.value, page: 1 })}
+                  aria-label="정렬"
+                >
+                  {sortOptions.map((option) => (
+                    <option value={option.id} key={option.id || "default-sort"}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={boardFilters.cutRate}
+                  onChange={(event) => updateBoardFilters({ cutRate: event.target.value, page: 1 })}
+                  aria-label="추천컷"
+                >
+                  {cutRateOptions.map((option) => (
+                    <option value={option.id} key={option.id || "default-cut"}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
+              <form className="board-search" onSubmit={submitBoardSearch}>
+                <select
+                  value={boardFilters.target}
+                  onChange={(event) => updateBoardFilters({ target: event.target.value, page: 1 })}
+                  aria-label="검색 대상"
+                >
+                  {searchTargetOptions.map((option) => (
+                    <option value={option.id} key={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={boardSearchInput}
+                  onChange={(event) => setBoardSearchInput(event.target.value)}
+                  aria-label="검색어"
+                />
+                <button type="submit">
+                  <Search size={15} strokeWidth={2.2} />
+                  <span>검색</span>
+                </button>
+              </form>
+            </div>
+
+            <BoardPagination
+              pages={arcaBoard?.pagination}
+              onPage={(page) => updateBoardFilters({ page })}
+            />
+          </section>
+
+          <details className="write-drawer">
+            <summary>
+              <span>게시 초안 및 연결 진단</span>
+              <StatusBadge tone={arcaProbe ? (arcaProbe.ok ? "ok" : "error") : "idle"}>
+                {arcaProbe ? (arcaProbe.ok ? "연결 가능" : "점검 필요") : "미진단"}
+              </StatusBadge>
+            </summary>
+
+            <section className="operation-panel arca-operation board-write-panel" aria-label="게시 초안 및 연결 진단">
               <div className="arca-layout">
                 <div className="arca-form">
                   <div className="field-row">
@@ -990,18 +1344,20 @@ function App() {
                     </label>
                     <label className="field">
                       <span>카테고리</span>
-                      {arcaProbe?.categories?.length ? (
+                      {arcaBoard?.categories?.length ? (
                         <select
                           className="field-input"
                           value={arcaDraft.category}
                           onChange={(event) => updateArcaDraft("category", event.target.value)}
                         >
                           <option value="">선택 안 함</option>
-                          {arcaProbe.categories.map((category) => (
-                            <option value={category.name} key={category.name}>
-                              {category.label}
-                            </option>
-                          ))}
+                          {arcaBoard.categories
+                            .filter((category) => category.name)
+                            .map((category) => (
+                              <option value={category.name} key={category.name}>
+                                {category.label}
+                              </option>
+                            ))}
                         </select>
                       ) : (
                         <input
@@ -1050,30 +1406,15 @@ function App() {
                   </div>
 
                   <div className="action-row">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={runArcaProbe}
-                      disabled={Boolean(arcaBusy)}
-                    >
+                    <button className="secondary-button" type="button" onClick={runArcaProbe} disabled={Boolean(arcaBusy)}>
                       <RefreshCw size={16} strokeWidth={2.1} />
                       <span>{arcaBusy === "probe" ? "진단 중" : "연결 진단"}</span>
                     </button>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={validateArcaDraft}
-                      disabled={Boolean(arcaBusy)}
-                    >
+                    <button className="secondary-button" type="button" onClick={validateArcaDraft} disabled={Boolean(arcaBusy)}>
                       <ShieldCheck size={16} strokeWidth={2.1} />
                       <span>{arcaBusy === "validate" ? "검증 중" : "초안 검증"}</span>
                     </button>
-                    <button
-                      className="danger-button"
-                      type="button"
-                      onClick={publishArcaDraft}
-                      disabled={!arcaCanPublish}
-                    >
+                    <button className="danger-button" type="button" onClick={publishArcaDraft} disabled={!arcaCanPublish}>
                       <Send size={16} strokeWidth={2.1} />
                       <span>{arcaBusy === "publish" ? "게시 중" : "게시 실행"}</span>
                     </button>
@@ -1131,9 +1472,7 @@ function App() {
                             <dd>{arcaValidation.draft?.contentType || "html"}</dd>
                           </div>
                         </dl>
-                        {arcaValidation.previewText ? (
-                          <p className="draft-preview">{arcaValidation.previewText}</p>
-                        ) : null}
+                        {arcaValidation.previewText ? <p className="draft-preview">{arcaValidation.previewText}</p> : null}
                         <IssueList issues={arcaValidation.issues} />
                       </>
                     ) : (
@@ -1166,21 +1505,7 @@ function App() {
                 </aside>
               </div>
             </section>
-
-            <section className="operation-panel compact-panel" aria-labelledby="queue-title">
-              <div className="panel-heading">
-                <div>
-                  <h2 id="queue-title">실행 큐</h2>
-                  <p>장기 작업은 job id와 검증 배지로 추적됩니다.</p>
-                </div>
-                <StatusBadge tone="idle">준비 중</StatusBadge>
-              </div>
-              <div className="job-placeholder">
-                <Circle size={16} strokeWidth={2.1} />
-                <span>아카라이브 게시 흐름은 우선 동기 진단 API로 연결되었습니다.</span>
-              </div>
-            </section>
-          </div>
+          </details>
         </div>
       </section>
 
