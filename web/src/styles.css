@@ -201,8 +201,7 @@ button {
   letter-spacing: 0;
 }
 
-.workspace-header p,
-.panel-heading p {
+.workspace-header p {
   margin: 7px 0 0;
   color: #757575;
   font-size: 13px;
@@ -236,359 +235,6 @@ button {
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   min-width: 0;
-}
-
-.operation-panel {
-  min-width: 0;
-  padding: 18px;
-  border: 1px solid #e4e4e4;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.panel-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  min-width: 0;
-  margin-bottom: 16px;
-}
-
-.panel-heading h2 {
-  margin: 0;
-  color: #222222;
-  font-size: 18px;
-  font-weight: 760;
-  line-height: 1.22;
-}
-
-.status-badge {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 26px;
-  max-width: 100%;
-  padding: 0 9px;
-  border: 1px solid #e2e2e2;
-  border-radius: 7px;
-  background: #f7f7f7;
-  color: #666666;
-  font-size: 11px;
-  font-weight: 760;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.status-badge-ok {
-  border-color: #cfe7d4;
-  background: #eef8f0;
-  color: #2f7440;
-}
-
-.status-badge-error {
-  border-color: #f0d2d2;
-  background: #fff1f1;
-  color: #9c3f3f;
-}
-
-.arca-layout {
-  display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(270px, 340px);
-  gap: 16px;
-  align-items: start;
-  min-width: 0;
-}
-
-.arca-form {
-  display: grid;
-  gap: 13px;
-  min-width: 0;
-}
-
-.field-row,
-.confirmation-row,
-.action-row {
-  display: flex;
-  gap: 10px;
-  min-width: 0;
-}
-
-.field-row .field {
-  flex: 1 1 0;
-}
-
-.confirmation-row {
-  align-items: flex-end;
-}
-
-.confirmation-row .field {
-  flex: 1 1 auto;
-}
-
-.field {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.field span {
-  color: #5c5c5c;
-  font-size: 12px;
-  font-weight: 720;
-  line-height: 1.25;
-}
-
-.field-input,
-.field-textarea {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #dedede;
-  border-radius: 7px;
-  background: #fbfbfb;
-  color: #202020;
-  font-size: 13px;
-  font-weight: 520;
-  line-height: 1.42;
-  outline: 0;
-}
-
-.field-input {
-  height: 38px;
-  padding: 0 10px;
-}
-
-.field-input:focus,
-.field-textarea:focus {
-  border-color: #a7b6d8;
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(84, 112, 172, 0.12);
-}
-
-.field-textarea {
-  display: block;
-  min-height: 170px;
-  max-height: none;
-  margin: 0;
-  padding: 10px;
-  resize: vertical;
-  overflow: auto;
-  white-space: pre-wrap;
-}
-
-.action-row {
-  flex-wrap: wrap;
-  padding-top: 2px;
-}
-
-.secondary-button,
-.danger-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 38px;
-  padding: 0 12px;
-  border-radius: 7px;
-  font-size: 12px;
-  font-weight: 760;
-  line-height: 1.2;
-  cursor: pointer;
-}
-
-.secondary-button {
-  border: 1px solid #dedede;
-  background: #f8f8f8;
-  color: #343434;
-}
-
-.secondary-button:hover {
-  background: #eeeeee;
-}
-
-.danger-button {
-  background: #313131;
-  color: #ffffff;
-}
-
-.danger-button:hover {
-  background: #1f1f1f;
-}
-
-.secondary-button:disabled,
-.danger-button:disabled {
-  cursor: default;
-  opacity: 0.48;
-}
-
-.arca-status-panel {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.status-card {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 13px;
-  border: 1px solid #e9e9e9;
-  border-radius: 8px;
-  background: #fbfbfb;
-}
-
-.status-card-title {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  color: #2d2d2d;
-  font-size: 13px;
-  font-weight: 760;
-}
-
-.status-card-title svg {
-  flex: 0 0 auto;
-  color: #6d6d6d;
-}
-
-.diagnostic-list {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-}
-
-.diagnostic-list div {
-  display: grid;
-  grid-template-columns: 66px minmax(0, 1fr);
-  gap: 8px;
-  min-width: 0;
-}
-
-.diagnostic-list dt,
-.diagnostic-list dd {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.3;
-}
-
-.diagnostic-list dt {
-  color: #858585;
-  font-weight: 700;
-}
-
-.diagnostic-list dd {
-  min-width: 0;
-  overflow: hidden;
-  color: #333333;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-weight: 620;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-note,
-.draft-preview,
-.empty-state,
-.job-placeholder {
-  margin: 0;
-  color: #6b6b6b;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.draft-preview {
-  max-height: 94px;
-  overflow: auto;
-  padding: 9px;
-  border: 1px solid #ededed;
-  border-radius: 7px;
-  background: #ffffff;
-  color: #4a4a4a;
-}
-
-.issue-list {
-  display: grid;
-  gap: 6px;
-}
-
-.issue-list.is-empty,
-.issue-item {
-  display: flex;
-  gap: 7px;
-  min-width: 0;
-  color: #686868;
-  font-size: 12px;
-  line-height: 1.38;
-}
-
-.issue-list.is-empty svg,
-.issue-item svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
-.issue-list.is-empty svg,
-.issue-item-warn svg {
-  color: #6f8bca;
-}
-
-.issue-item-error svg {
-  color: #b95555;
-}
-
-.issue-item span {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.issue-item strong {
-  color: #3d3d3d;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 11px;
-  font-weight: 740;
-}
-
-.issue-item small {
-  color: #858585;
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.result-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  color: #2d5fa8;
-  font-size: 12px;
-  font-weight: 760;
-  text-decoration: none;
-}
-
-.result-link:hover {
-  text-decoration: underline;
-}
-
-.compact-panel {
-  padding-block: 15px;
-}
-
-.job-placeholder {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px;
-  border: 1px dashed #d9d9d9;
-  border-radius: 8px;
-  background: #fbfbfb;
-}
-
-.job-placeholder svg {
-  flex: 0 0 auto;
-  color: #9c9c9c;
 }
 
 .board-index-canvas {
@@ -634,6 +280,13 @@ button {
   line-height: 1.35;
 }
 
+.stock-board-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .board-refresh-button {
   flex: 0 0 auto;
   display: inline-flex;
@@ -658,6 +311,27 @@ button {
 .board-refresh-button:disabled {
   cursor: default;
   opacity: 0.55;
+}
+
+.board-write-link {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #222222;
+  border-radius: 4px;
+  background: #222222;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 780;
+  text-decoration: none;
+}
+
+.board-write-link:hover {
+  background: #111111;
 }
 
 .board-category-shell {
@@ -1019,6 +693,12 @@ button {
   padding-top: 12px;
 }
 
+.board-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
 .board-pagination button {
   display: inline-grid;
   place-items: center;
@@ -1040,33 +720,6 @@ button {
 .board-pagination button.is-active {
   border-color: #1aa69a;
   background: #f9ffff;
-}
-
-.write-drawer {
-  border-top: 1px solid #d2d2d2;
-  background: #ffffff;
-}
-
-.write-drawer summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 42px;
-  color: #222222;
-  font-size: 13px;
-  font-weight: 800;
-  cursor: pointer;
-  list-style: none;
-}
-
-.write-drawer summary::-webkit-details-marker {
-  display: none;
-}
-
-.board-write-panel {
-  margin-top: 0;
-  border-radius: 0;
 }
 
 .codex-sidebar {
@@ -1835,17 +1488,6 @@ textarea::placeholder {
   }
 }
 
-@media (max-width: 1200px) {
-  .arca-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .arca-status-panel {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: stretch;
-  }
-}
-
 @media (max-width: 980px) {
   .mockup-stage {
     grid-template-columns: minmax(0, 1fr) var(--sidebar-width);
@@ -1853,10 +1495,6 @@ textarea::placeholder {
 
   .app-sidebar {
     display: none;
-  }
-
-  .arca-status-panel {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -1873,16 +1511,9 @@ textarea::placeholder {
     padding: 22px 14px 28px;
   }
 
-  .workspace-header,
-  .panel-heading,
-  .field-row,
-  .confirmation-row {
+  .workspace-header {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .operation-panel {
-    padding: 14px;
   }
 
   .board-index-shell {
@@ -1934,16 +1565,6 @@ textarea::placeholder {
     justify-content: flex-start;
     overflow-x: auto;
     padding-bottom: 2px;
-  }
-
-  .action-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .secondary-button,
-  .danger-button {
-    width: 100%;
   }
 }
 

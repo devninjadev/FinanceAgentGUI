@@ -47,16 +47,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.url?.startsWith("/api/arca/draft/validate")) {
-    await handleArcaEndpoint("draft-validate", req, res);
-    return;
-  }
-
-  if (req.url?.startsWith("/api/arca/article/publish")) {
-    await handleArcaEndpoint("article-publish", req, res);
-    return;
-  }
-
   if (req.url?.startsWith("/api/codex/chat/stream")) {
     if (req.method !== "POST") {
       sendJson(res, { error: "method not allowed" }, 405);
@@ -93,6 +83,12 @@ const server = createServer(async (req, res) => {
     }
     return;
   }
+
+  if (req.url?.startsWith("/api/")) {
+    sendJson(res, { ok: false, error: "unknown api endpoint" }, 404);
+    return;
+  }
+
   serveStatic(req, res);
 });
 

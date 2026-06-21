@@ -9,13 +9,10 @@ import {
   ChevronsRight,
   Circle,
   Database,
-  ExternalLink,
   FileText,
   FolderOpen,
-  Globe2,
   Home,
   Image as ImageIcon,
-  LockKeyhole,
   LoaderCircle,
   List,
   MessageSquare,
@@ -24,9 +21,7 @@ import {
   PieChart,
   RefreshCw,
   Search,
-  Send,
   Settings,
-  ShieldCheck,
   Star,
   Terminal,
   User,
@@ -93,12 +88,7 @@ const fallbackModelGroups = [
 ];
 
 const initialChatMessages = [];
-const initialArcaDraft = {
-  channel: "stock",
-  category: "",
-  title: "",
-  content: "",
-};
+const ARCA_WRITE_URL = "https://arca.live/b/stock/write";
 const initialBoardFilters = {
   channel: "stock",
   category: "",
@@ -167,39 +157,6 @@ function textWithInlineCode(text) {
         <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>
       )
     );
-}
-
-function StatusBadge({ tone = "idle", children }) {
-  return <span className={`status-badge status-badge-${tone}`}>{children}</span>;
-}
-
-function IssueList({ issues = [] }) {
-  if (!issues.length) {
-    return (
-      <div className="issue-list is-empty">
-        <CheckCircle2 size={15} strokeWidth={2.1} />
-        <span>표시할 이슈가 없습니다.</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="issue-list">
-      {issues.map((item) => {
-        const Icon = item.status === "error" ? AlertTriangle : ShieldCheck;
-        return (
-          <div className={`issue-item issue-item-${item.status || "warn"}`} key={item.code}>
-            <Icon size={15} strokeWidth={2.1} />
-            <span>
-              <strong>{item.code}</strong>
-              {item.message}
-              {item.recovery ? <small>{item.recovery}</small> : null}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function formatCount(value) {
@@ -740,12 +697,6 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [promptHeight, setPromptHeight] = useState(MIN_PROMPT_HEIGHT);
   const [promptOverflow, setPromptOverflow] = useState(false);
-  const [arcaDraft, setArcaDraft] = useState(initialArcaDraft);
-  const [arcaProbe, setArcaProbe] = useState(null);
-  const [arcaValidation, setArcaValidation] = useState(null);
-  const [arcaPublishResult, setArcaPublishResult] = useState(null);
-  const [arcaBusy, setArcaBusy] = useState("");
-  const [arcaConfirmation, setArcaConfirmation] = useState("");
   const [boardFilters, setBoardFilters] = useState(initialBoardFilters);
   const [boardSearchInput, setBoardSearchInput] = useState("");
   const [arcaBoard, setArcaBoard] = useState(null);
@@ -782,9 +733,6 @@ function App() {
     const selected = arcaBoard?.categories?.find((category) => category.name === boardFilters.category);
     return selected?.label || "전체";
   }, [arcaBoard, boardFilters.category]);
-  const expectedArcaConfirmation = `POST ${arcaDraft.channel || "stock"}`;
-  const isArcaConfirmed = arcaConfirmation.trim() === expectedArcaConfirmation;
-  const arcaCanPublish = Boolean(arcaValidation?.ok && isArcaConfirmed && !arcaBusy);
 
   function updateBoardFilters(nextPatch) {
     setBoardFilters((filters) => ({ ...filters, ...nextPatch }));
@@ -793,7 +741,6 @@ function App() {
   function selectBoardCategory(category) {
     setShowHiddenNotices(false);
     updateBoardFilters({ category, page: 1 });
-    setArcaDraft((draft) => ({ ...draft, category }));
   }
 
   function refreshBoard() {
@@ -805,77 +752,6 @@ function App() {
     updateBoardFilters({ keyword: boardSearchInput.trim(), page: 1 });
   }
 
-  function updateArcaDraft(field, value) {
-    setArcaDraft((draft) => ({ ...draft, [field]: value }));
-    setArcaValidation(null);
-    setArcaPublishResult(null);
-    if (field === "channel") {
-      setArcaConfirmation("");
-    }
-  }
-
-  async function requestArca(path, payload, busyLabel) {
-    setArcaBusy(busyLabel);
-    try {
-      const response = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok && !data.issues?.length) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-      return data;
-    } finally {
-      setArcaBusy("");
-    }
-  }
-
-  async function runArcaProbe() {
-    try {
-      const data = await requestArca("/api/arca/probe", { channel: arcaDraft.channel }, "probe");
-      setArcaProbe(data);
-    } catch (error) {
-      setArcaProbe({
-        ok: false,
-        issues: [{ code: "ARCA_PROBE_FAILED", status: "error", message: error.message }],
-      });
-    }
-  }
-
-  async function validateArcaDraft() {
-    try {
-      const data = await requestArca("/api/arca/draft/validate", arcaDraft, "validate");
-      setArcaValidation(data);
-      return data;
-    } catch (error) {
-      const failed = {
-        ok: false,
-        issues: [{ code: "ARCA_VALIDATION_FAILED", status: "error", message: error.message }],
-      };
-      setArcaValidation(failed);
-      return failed;
-    }
-  }
-
-  async function publishArcaDraft() {
-    const validation = arcaValidation?.ok ? arcaValidation : await validateArcaDraft();
-    if (!validation.ok) return;
-    try {
-      const data = await requestArca(
-        "/api/arca/article/publish",
-        { ...arcaDraft, confirmation: arcaConfirmation },
-        "publish"
-      );
-      setArcaPublishResult(data);
-    } catch (error) {
-      setArcaPublishResult({
-        ok: false,
-        issues: [{ code: "ARCA_PUBLISH_FAILED", status: "error", message: error.message }],
-      });
-    }
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1222,10 +1098,16 @@ function App() {
                   {activeCategoryLabel} · {arcaBoard?.articles?.length ?? 0}개 글 · {arcaBoardBusy ? "불러오는 중" : "수동 조회 완료"}
                 </p>
               </div>
-              <button className="board-refresh-button" type="button" onClick={refreshBoard} disabled={arcaBoardBusy}>
-                <RefreshCw size={16} strokeWidth={2.2} />
-                <span>{arcaBoardBusy ? "조회 중" : "수동 갱신"}</span>
-              </button>
+              <div className="stock-board-actions">
+                <button className="board-refresh-button" type="button" onClick={refreshBoard} disabled={arcaBoardBusy}>
+                  <RefreshCw size={16} strokeWidth={2.2} />
+                  <span>{arcaBoardBusy ? "조회 중" : "수동 갱신"}</span>
+                </button>
+                <a className="board-write-link" href={ARCA_WRITE_URL} target="_blank" rel="noreferrer">
+                  <PencilLine size={16} strokeWidth={2.2} />
+                  <span>글쓰기</span>
+                </a>
+              </div>
             </header>
 
             <BoardCategoryRail
@@ -1319,193 +1201,14 @@ function App() {
               pages={arcaBoard?.pagination}
               onPage={(page) => updateBoardFilters({ page })}
             />
+
+            <div className="board-footer-actions">
+              <a className="board-write-link" href={ARCA_WRITE_URL} target="_blank" rel="noreferrer">
+                <PencilLine size={16} strokeWidth={2.2} />
+                <span>글쓰기</span>
+              </a>
+            </div>
           </section>
-
-          <details className="write-drawer">
-            <summary>
-              <span>게시 초안 및 연결 진단</span>
-              <StatusBadge tone={arcaProbe ? (arcaProbe.ok ? "ok" : "error") : "idle"}>
-                {arcaProbe ? (arcaProbe.ok ? "연결 가능" : "점검 필요") : "미진단"}
-              </StatusBadge>
-            </summary>
-
-            <section className="operation-panel arca-operation board-write-panel" aria-label="게시 초안 및 연결 진단">
-              <div className="arca-layout">
-                <div className="arca-form">
-                  <div className="field-row">
-                    <label className="field">
-                      <span>채널 ID</span>
-                      <input
-                        className="field-input"
-                        value={arcaDraft.channel}
-                        onChange={(event) => updateArcaDraft("channel", event.target.value)}
-                        placeholder="stock"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>카테고리</span>
-                      {arcaBoard?.categories?.length ? (
-                        <select
-                          className="field-input"
-                          value={arcaDraft.category}
-                          onChange={(event) => updateArcaDraft("category", event.target.value)}
-                        >
-                          <option value="">선택 안 함</option>
-                          {arcaBoard.categories
-                            .filter((category) => category.name)
-                            .map((category) => (
-                              <option value={category.name} key={category.name}>
-                                {category.label}
-                              </option>
-                            ))}
-                        </select>
-                      ) : (
-                        <input
-                          className="field-input"
-                          value={arcaDraft.category}
-                          onChange={(event) => updateArcaDraft("category", event.target.value)}
-                          placeholder="선택 사항"
-                        />
-                      )}
-                    </label>
-                  </div>
-
-                  <label className="field">
-                    <span>제목</span>
-                    <input
-                      className="field-input"
-                      value={arcaDraft.title}
-                      onChange={(event) => updateArcaDraft("title", event.target.value)}
-                      placeholder="게시글 제목"
-                    />
-                  </label>
-
-                  <label className="field">
-                    <span>본문 HTML 또는 일반 텍스트</span>
-                    <textarea
-                      className="field-textarea"
-                      value={arcaDraft.content}
-                      onChange={(event) => updateArcaDraft("content", event.target.value)}
-                      placeholder="본문을 입력하세요. 일반 텍스트는 서버에서 안전한 HTML로 변환됩니다."
-                    />
-                  </label>
-
-                  <div className="confirmation-row">
-                    <label className="field">
-                      <span>게시 확인 문구</span>
-                      <input
-                        className="field-input"
-                        value={arcaConfirmation}
-                        onChange={(event) => setArcaConfirmation(event.target.value)}
-                        placeholder={expectedArcaConfirmation}
-                      />
-                    </label>
-                    <StatusBadge tone={isArcaConfirmed ? "ok" : "idle"}>
-                      {isArcaConfirmed ? "확인됨" : expectedArcaConfirmation}
-                    </StatusBadge>
-                  </div>
-
-                  <div className="action-row">
-                    <button className="secondary-button" type="button" onClick={runArcaProbe} disabled={Boolean(arcaBusy)}>
-                      <RefreshCw size={16} strokeWidth={2.1} />
-                      <span>{arcaBusy === "probe" ? "진단 중" : "연결 진단"}</span>
-                    </button>
-                    <button className="secondary-button" type="button" onClick={validateArcaDraft} disabled={Boolean(arcaBusy)}>
-                      <ShieldCheck size={16} strokeWidth={2.1} />
-                      <span>{arcaBusy === "validate" ? "검증 중" : "초안 검증"}</span>
-                    </button>
-                    <button className="danger-button" type="button" onClick={publishArcaDraft} disabled={!arcaCanPublish}>
-                      <Send size={16} strokeWidth={2.1} />
-                      <span>{arcaBusy === "publish" ? "게시 중" : "게시 실행"}</span>
-                    </button>
-                  </div>
-                </div>
-
-                <aside className="arca-status-panel" aria-label="아카라이브 연결 상태">
-                  <div className="status-card">
-                    <div className="status-card-title">
-                      <Globe2 size={16} strokeWidth={2.1} />
-                      <span>연결 진단</span>
-                    </div>
-                    {arcaProbe ? (
-                      <>
-                        <dl className="diagnostic-list">
-                          <div>
-                            <dt>채널</dt>
-                            <dd>{arcaProbe.channel || arcaDraft.channel}</dd>
-                          </div>
-                          <div>
-                            <dt>HTTP</dt>
-                            <dd>{arcaProbe.status || "n/a"}</dd>
-                          </div>
-                          <div>
-                            <dt>쿠키</dt>
-                            <dd>{arcaProbe.config?.cookieConfigured ? "configured" : "missing"}</dd>
-                          </div>
-                        </dl>
-                        {arcaProbe.pageTitle ? <p className="status-note">{arcaProbe.pageTitle}</p> : null}
-                        <IssueList issues={arcaProbe.issues} />
-                      </>
-                    ) : (
-                      <p className="empty-state">아직 연결 진단을 실행하지 않았습니다.</p>
-                    )}
-                  </div>
-
-                  <div className="status-card">
-                    <div className="status-card-title">
-                      <LockKeyhole size={16} strokeWidth={2.1} />
-                      <span>초안 검증</span>
-                    </div>
-                    {arcaValidation ? (
-                      <>
-                        <dl className="diagnostic-list">
-                          <div>
-                            <dt>제목</dt>
-                            <dd>{arcaValidation.draft?.titleLength ?? 0}자</dd>
-                          </div>
-                          <div>
-                            <dt>본문</dt>
-                            <dd>{arcaValidation.draft?.contentLength ?? 0}자</dd>
-                          </div>
-                          <div>
-                            <dt>형식</dt>
-                            <dd>{arcaValidation.draft?.contentType || "html"}</dd>
-                          </div>
-                        </dl>
-                        {arcaValidation.previewText ? <p className="draft-preview">{arcaValidation.previewText}</p> : null}
-                        <IssueList issues={arcaValidation.issues} />
-                      </>
-                    ) : (
-                      <p className="empty-state">게시 전 초안 검증을 실행하세요.</p>
-                    )}
-                  </div>
-
-                  <div className="status-card">
-                    <div className="status-card-title">
-                      <Terminal size={16} strokeWidth={2.1} />
-                      <span>게시 결과</span>
-                    </div>
-                    {arcaPublishResult ? (
-                      <>
-                        <StatusBadge tone={arcaPublishResult.ok ? "ok" : "error"}>
-                          {arcaPublishResult.ok ? "게시 요청 완료" : "게시 차단"}
-                        </StatusBadge>
-                        {arcaPublishResult.location ? (
-                          <a className="result-link" href={arcaPublishResult.location} target="_blank" rel="noreferrer">
-                            <ExternalLink size={15} strokeWidth={2.1} />
-                            <span>게시글 열기</span>
-                          </a>
-                        ) : null}
-                        <IssueList issues={arcaPublishResult.issues} />
-                      </>
-                    ) : (
-                      <p className="empty-state">게시 실행 결과가 여기에 표시됩니다.</p>
-                    )}
-                  </div>
-                </aside>
-              </div>
-            </section>
-          </details>
         </div>
       </section>
 
