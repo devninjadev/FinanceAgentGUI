@@ -1,9 +1,22 @@
+import { handleArcaEndpoint } from "./arcaApi.mjs";
 import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
 
 export function codexApiPlugin() {
   return {
     name: "finance-agent-codex-api",
     configureServer(server) {
+      server.middlewares.use("/api/arca/probe", async (req, res) => {
+        await handleArcaEndpoint("probe", req, res);
+      });
+
+      server.middlewares.use("/api/arca/draft/validate", async (req, res) => {
+        await handleArcaEndpoint("draft-validate", req, res);
+      });
+
+      server.middlewares.use("/api/arca/article/publish", async (req, res) => {
+        await handleArcaEndpoint("article-publish", req, res);
+      });
+
       server.middlewares.use("/api/codex/chat/stream", async (req, res) => {
         if (req.method !== "POST") {
           sendJson(res, { error: "method not allowed" }, 405);

@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { handleArcaEndpoint } from "./arcaApi.mjs";
 import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -36,6 +37,21 @@ function serveStatic(req, res) {
 }
 
 const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/api/arca/probe")) {
+    await handleArcaEndpoint("probe", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/draft/validate")) {
+    await handleArcaEndpoint("draft-validate", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/article/publish")) {
+    await handleArcaEndpoint("article-publish", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/codex/chat/stream")) {
     if (req.method !== "POST") {
       sendJson(res, { error: "method not allowed" }, 405);

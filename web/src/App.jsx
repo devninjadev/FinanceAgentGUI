@@ -8,16 +8,22 @@ import {
   ChevronRight,
   Circle,
   Database,
+  ExternalLink,
   FileText,
   FolderOpen,
+  Globe2,
   Home,
   Image as ImageIcon,
+  LockKeyhole,
   LoaderCircle,
   MessageSquare,
   Newspaper,
   PencilLine,
   PieChart,
+  RefreshCw,
+  Send,
   Settings,
+  ShieldCheck,
   Terminal,
   X,
 } from "lucide-react";
@@ -82,6 +88,12 @@ const fallbackModelGroups = [
 ];
 
 const initialChatMessages = [];
+const initialArcaDraft = {
+  channel: "stock",
+  category: "",
+  title: "",
+  content: "",
+};
 const MIN_PROMPT_HEIGHT = 42;
 const MAX_PROMPT_HEIGHT = 132;
 
@@ -118,6 +130,39 @@ function textWithInlineCode(text) {
         <React.Fragment key={`${part}-${index}`}>{part}</React.Fragment>
       )
     );
+}
+
+function StatusBadge({ tone = "idle", children }) {
+  return <span className={`status-badge status-badge-${tone}`}>{children}</span>;
+}
+
+function IssueList({ issues = [] }) {
+  if (!issues.length) {
+    return (
+      <div className="issue-list is-empty">
+        <CheckCircle2 size={15} strokeWidth={2.1} />
+        <span>표시할 이슈가 없습니다.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="issue-list">
+      {issues.map((item) => {
+        const Icon = item.status === "error" ? AlertTriangle : ShieldCheck;
+        return (
+          <div className={`issue-item issue-item-${item.status || "warn"}`} key={item.code}>
+            <Icon size={15} strokeWidth={2.1} />
+            <span>
+              <strong>{item.code}</strong>
+              {item.message}
+              {item.recovery ? <small>{item.recovery}</small> : null}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function ChatBlock({ block }) {
@@ -498,6 +543,12 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [promptHeight, setPromptHeight] = useState(MIN_PROMPT_HEIGHT);
   const [promptOverflow, setPromptOverflow] = useState(false);
+  const [arcaDraft, setArcaDraft] = useState(initialArcaDraft);
+  const [arcaProbe, setArcaProbe] = useState(null);
+  const [arcaValidation, setArcaValidation] = useState(null);
+  const [arcaPublishResult, setArcaPublishResult] = useState(null);
+  const [arcaBusy, setArcaBusy] = useState("");
+  const [arcaConfirmation, setArcaConfirmation] = useState("");
   const messageStackRef = useRef(null);
   const promptRef = useRef(null);
   const selectedModelGroup = useMemo(
@@ -524,6 +575,81 @@ function App() {
     () => approvalOptions.find((item) => item.id === approval) ?? approvalOptions[0],
     [approval, approvalOptions]
   );
+  const expectedArcaConfirmation = `POST ${arcaDraft.channel || "stock"}`;
+  const isArcaConfirmed = arcaConfirmation.trim() === expectedArcaConfirmation;
+  const arcaCanPublish = Boolean(arcaValidation?.ok && isArcaConfirmed && !arcaBusy);
+
+  function updateArcaDraft(field, value) {
+    setArcaDraft((draft) => ({ ...draft, [field]: value }));
+    setArcaValidation(null);
+    setArcaPublishResult(null);
+    if (field === "channel") {
+      setArcaConfirmation("");
+    }
+  }
+
+  async function requestArca(path, payload, busyLabel) {
+    setArcaBusy(busyLabel);
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok && !data.issues?.length) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      return data;
+    } finally {
+      setArcaBusy("");
+    }
+  }
+
+  async function runArcaProbe() {
+    try {
+      const data = await requestArca("/api/arca/probe", { channel: arcaDraft.channel }, "probe");
+      setArcaProbe(data);
+    } catch (error) {
+      setArcaProbe({
+        ok: false,
+        issues: [{ code: "ARCA_PROBE_FAILED", status: "error", message: error.message }],
+      });
+    }
+  }
+
+  async function validateArcaDraft() {
+    try {
+      const data = await requestArca("/api/arca/draft/validate", arcaDraft, "validate");
+      setArcaValidation(data);
+      return data;
+    } catch (error) {
+      const failed = {
+        ok: false,
+        issues: [{ code: "ARCA_VALIDATION_FAILED", status: "error", message: error.message }],
+      };
+      setArcaValidation(failed);
+      return failed;
+    }
+  }
+
+  async function publishArcaDraft() {
+    const validation = arcaValidation?.ok ? arcaValidation : await validateArcaDraft();
+    if (!validation.ok) return;
+    try {
+      const data = await requestArca(
+        "/api/arca/article/publish",
+        { ...arcaDraft, confirmation: arcaConfirmation },
+        "publish"
+      );
+      setArcaPublishResult(data);
+    } catch (error) {
+      setArcaPublishResult({
+        ok: false,
+        issues: [{ code: "ARCA_PUBLISH_FAILED", status: "error", message: error.message }],
+      });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -825,7 +951,238 @@ function App() {
         </nav>
       </aside>
 
-      <section className="workspace-canvas" aria-label="FinanceAgentGUI workspace" />
+      <section className="workspace-canvas" aria-label="FinanceAgentGUI workspace">
+        <div className="workspace-shell">
+          <header className="workspace-header">
+            <div>
+              <h1>금융 에이전트 조종석</h1>
+              <p>로컬 작업 실행, 외부 채널 연결, 검증 결과를 한 화면에서 관리합니다.</p>
+            </div>
+            <div className="workspace-health">
+              <span className="health-dot" aria-hidden="true" />
+              <span>Local only</span>
+            </div>
+          </header>
+
+          <div className="workspace-grid">
+            <section className="operation-panel arca-operation" aria-labelledby="arca-title">
+              <div className="panel-heading">
+                <div>
+                  <h2 id="arca-title">아카라이브 주식채널</h2>
+                  <p>CSRF 폼 기반으로 연결을 점검하고 승인된 초안만 게시합니다.</p>
+                </div>
+                <StatusBadge tone={arcaProbe ? (arcaProbe.ok ? "ok" : "error") : "idle"}>
+                  {arcaProbe ? (arcaProbe.ok ? "연결 가능" : "점검 필요") : "미진단"}
+                </StatusBadge>
+              </div>
+
+              <div className="arca-layout">
+                <div className="arca-form">
+                  <div className="field-row">
+                    <label className="field">
+                      <span>채널 ID</span>
+                      <input
+                        className="field-input"
+                        value={arcaDraft.channel}
+                        onChange={(event) => updateArcaDraft("channel", event.target.value)}
+                        placeholder="stock"
+                      />
+                    </label>
+                    <label className="field">
+                      <span>카테고리</span>
+                      {arcaProbe?.categories?.length ? (
+                        <select
+                          className="field-input"
+                          value={arcaDraft.category}
+                          onChange={(event) => updateArcaDraft("category", event.target.value)}
+                        >
+                          <option value="">선택 안 함</option>
+                          {arcaProbe.categories.map((category) => (
+                            <option value={category.name} key={category.name}>
+                              {category.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          className="field-input"
+                          value={arcaDraft.category}
+                          onChange={(event) => updateArcaDraft("category", event.target.value)}
+                          placeholder="선택 사항"
+                        />
+                      )}
+                    </label>
+                  </div>
+
+                  <label className="field">
+                    <span>제목</span>
+                    <input
+                      className="field-input"
+                      value={arcaDraft.title}
+                      onChange={(event) => updateArcaDraft("title", event.target.value)}
+                      placeholder="게시글 제목"
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>본문 HTML 또는 일반 텍스트</span>
+                    <textarea
+                      className="field-textarea"
+                      value={arcaDraft.content}
+                      onChange={(event) => updateArcaDraft("content", event.target.value)}
+                      placeholder="본문을 입력하세요. 일반 텍스트는 서버에서 안전한 HTML로 변환됩니다."
+                    />
+                  </label>
+
+                  <div className="confirmation-row">
+                    <label className="field">
+                      <span>게시 확인 문구</span>
+                      <input
+                        className="field-input"
+                        value={arcaConfirmation}
+                        onChange={(event) => setArcaConfirmation(event.target.value)}
+                        placeholder={expectedArcaConfirmation}
+                      />
+                    </label>
+                    <StatusBadge tone={isArcaConfirmed ? "ok" : "idle"}>
+                      {isArcaConfirmed ? "확인됨" : expectedArcaConfirmation}
+                    </StatusBadge>
+                  </div>
+
+                  <div className="action-row">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={runArcaProbe}
+                      disabled={Boolean(arcaBusy)}
+                    >
+                      <RefreshCw size={16} strokeWidth={2.1} />
+                      <span>{arcaBusy === "probe" ? "진단 중" : "연결 진단"}</span>
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={validateArcaDraft}
+                      disabled={Boolean(arcaBusy)}
+                    >
+                      <ShieldCheck size={16} strokeWidth={2.1} />
+                      <span>{arcaBusy === "validate" ? "검증 중" : "초안 검증"}</span>
+                    </button>
+                    <button
+                      className="danger-button"
+                      type="button"
+                      onClick={publishArcaDraft}
+                      disabled={!arcaCanPublish}
+                    >
+                      <Send size={16} strokeWidth={2.1} />
+                      <span>{arcaBusy === "publish" ? "게시 중" : "게시 실행"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <aside className="arca-status-panel" aria-label="아카라이브 연결 상태">
+                  <div className="status-card">
+                    <div className="status-card-title">
+                      <Globe2 size={16} strokeWidth={2.1} />
+                      <span>연결 진단</span>
+                    </div>
+                    {arcaProbe ? (
+                      <>
+                        <dl className="diagnostic-list">
+                          <div>
+                            <dt>채널</dt>
+                            <dd>{arcaProbe.channel || arcaDraft.channel}</dd>
+                          </div>
+                          <div>
+                            <dt>HTTP</dt>
+                            <dd>{arcaProbe.status || "n/a"}</dd>
+                          </div>
+                          <div>
+                            <dt>쿠키</dt>
+                            <dd>{arcaProbe.config?.cookieConfigured ? "configured" : "missing"}</dd>
+                          </div>
+                        </dl>
+                        {arcaProbe.pageTitle ? <p className="status-note">{arcaProbe.pageTitle}</p> : null}
+                        <IssueList issues={arcaProbe.issues} />
+                      </>
+                    ) : (
+                      <p className="empty-state">아직 연결 진단을 실행하지 않았습니다.</p>
+                    )}
+                  </div>
+
+                  <div className="status-card">
+                    <div className="status-card-title">
+                      <LockKeyhole size={16} strokeWidth={2.1} />
+                      <span>초안 검증</span>
+                    </div>
+                    {arcaValidation ? (
+                      <>
+                        <dl className="diagnostic-list">
+                          <div>
+                            <dt>제목</dt>
+                            <dd>{arcaValidation.draft?.titleLength ?? 0}자</dd>
+                          </div>
+                          <div>
+                            <dt>본문</dt>
+                            <dd>{arcaValidation.draft?.contentLength ?? 0}자</dd>
+                          </div>
+                          <div>
+                            <dt>형식</dt>
+                            <dd>{arcaValidation.draft?.contentType || "html"}</dd>
+                          </div>
+                        </dl>
+                        {arcaValidation.previewText ? (
+                          <p className="draft-preview">{arcaValidation.previewText}</p>
+                        ) : null}
+                        <IssueList issues={arcaValidation.issues} />
+                      </>
+                    ) : (
+                      <p className="empty-state">게시 전 초안 검증을 실행하세요.</p>
+                    )}
+                  </div>
+
+                  <div className="status-card">
+                    <div className="status-card-title">
+                      <Terminal size={16} strokeWidth={2.1} />
+                      <span>게시 결과</span>
+                    </div>
+                    {arcaPublishResult ? (
+                      <>
+                        <StatusBadge tone={arcaPublishResult.ok ? "ok" : "error"}>
+                          {arcaPublishResult.ok ? "게시 요청 완료" : "게시 차단"}
+                        </StatusBadge>
+                        {arcaPublishResult.location ? (
+                          <a className="result-link" href={arcaPublishResult.location} target="_blank" rel="noreferrer">
+                            <ExternalLink size={15} strokeWidth={2.1} />
+                            <span>게시글 열기</span>
+                          </a>
+                        ) : null}
+                        <IssueList issues={arcaPublishResult.issues} />
+                      </>
+                    ) : (
+                      <p className="empty-state">게시 실행 결과가 여기에 표시됩니다.</p>
+                    )}
+                  </div>
+                </aside>
+              </div>
+            </section>
+
+            <section className="operation-panel compact-panel" aria-labelledby="queue-title">
+              <div className="panel-heading">
+                <div>
+                  <h2 id="queue-title">실행 큐</h2>
+                  <p>장기 작업은 job id와 검증 배지로 추적됩니다.</p>
+                </div>
+                <StatusBadge tone="idle">준비 중</StatusBadge>
+              </div>
+              <div className="job-placeholder">
+                <Circle size={16} strokeWidth={2.1} />
+                <span>아카라이브 게시 흐름은 우선 동기 진단 API로 연결되었습니다.</span>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
 
       <aside className="codex-sidebar">
         <header className="sidebar-header" aria-label="Codex controls">
