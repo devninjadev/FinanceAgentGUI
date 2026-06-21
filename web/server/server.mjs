@@ -42,6 +42,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/arca/article")) {
+    await handleArcaEndpoint("article", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/arca/probe")) {
     await handleArcaEndpoint("probe", req, res);
     return;

@@ -9,6 +9,10 @@ export function codexApiPlugin() {
         await handleArcaEndpoint("articles", req, res);
       });
 
+      server.middlewares.use("/api/arca/article", async (req, res) => {
+        await handleArcaEndpoint("article", req, res);
+      });
+
       server.middlewares.use("/api/arca/probe", async (req, res) => {
         await handleArcaEndpoint("probe", req, res);
       });

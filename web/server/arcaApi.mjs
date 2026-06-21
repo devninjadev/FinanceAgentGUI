@@ -3,6 +3,7 @@ import { readJsonBody, sendJson } from "./codexProbe.mjs";
 
 const DEFAULT_BASE_URL = "https://arca.live";
 const DEFAULT_CHANNEL = "stock";
+const MAX_ARTICLE_CONTEXT_LENGTH = 12000;
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -156,6 +157,33 @@ function extractPageTitle(html) {
   return match ? stripTags(match[1]) : "";
 }
 
+function metaContent(root, selectors) {
+  for (const selector of selectors) {
+    const value = root.querySelector(selector)?.getAttribute("content");
+    if (value) return decodeHtmlEntities(value);
+  }
+  return "";
+}
+
+function normalizeArticleUrl(payload = {}, config) {
+  const rawUrl = String(payload.url || payload.href || "").trim();
+  const channel = normalizeChannel(payload.channel) || config.defaultChannel;
+  const id = parseInteger(payload.id);
+  let url;
+
+  try {
+    url = rawUrl ? new URL(rawUrl, config.baseUrl) : id ? new URL(`/b/${channel}/${id}`, config.baseUrl) : null;
+  } catch {
+    return null;
+  }
+
+  if (!url) return null;
+  const baseUrl = new URL(config.baseUrl);
+  if (url.origin !== baseUrl.origin) return null;
+  if (!/^\/b\/[A-Za-z0-9_-]+\/\d+/.test(url.pathname)) return null;
+  return url;
+}
+
 function extractCategories(html, channel) {
   const categories = [];
   const seen = new Set();
@@ -261,6 +289,41 @@ function extractArticleRows(root, config, channel) {
   return rows;
 }
 
+function extractArticleDetail(root, config, url) {
+  const pageTitle = metaContent(root, ['meta[property="og:title"]', 'meta[name="title"]']) || "";
+  const description =
+    metaContent(root, ['meta[property="og:description"]', 'meta[name="description"]']) || "";
+  const author = metaContent(root, ['meta[name="author"]']) || nodeText(root.querySelector(".article-info .user-info"));
+  const contentNode = root.querySelector(".article-content") || root.querySelector(".article-body");
+  const contentTextFull = nodeText(contentNode) || description;
+  const imageUrls = (contentNode?.querySelectorAll("img") || [])
+    .map((image) => absoluteArcaUrl(image.getAttribute("data-originalurl") || image.getAttribute("src"), config.baseUrl))
+    .filter(Boolean)
+    .slice(0, 8);
+  const canonicalHref =
+    root.querySelector(".article-link a")?.getAttribute("href") ||
+    metaContent(root, ['meta[property="og:url"]']) ||
+    url.toString();
+  const title = pageTitle.replace(/\s+-\s+.+$/, "").trim() || extractPageTitle(root.toString()).replace(/\s+-\s+.+$/, "").trim();
+  const commentCount = parseInteger(nodeText(root.querySelector(".comment-count")));
+  const timeNode = root.querySelector(".article-info time") || root.querySelector("time");
+  const timeIso = timeNode?.getAttribute("datetime") || "";
+
+  return {
+    title,
+    author,
+    description,
+    contentText: contentTextFull.slice(0, MAX_ARTICLE_CONTEXT_LENGTH),
+    contentLength: contentTextFull.length,
+    contentTruncated: contentTextFull.length > MAX_ARTICLE_CONTEXT_LENGTH,
+    imageUrls,
+    imageCount: imageUrls.length,
+    commentCount,
+    timeIso,
+    url: absoluteArcaUrl(canonicalHref, config.baseUrl) || url.toString(),
+  };
+}
+
 function buildArticleListUrl(config, payload) {
   const channel = normalizeChannel(payload.channel) || config.defaultChannel;
   const url = new URL(`${config.baseUrl}/b/${channel}`);
@@ -360,6 +423,61 @@ async function listChannelArticles(payload = {}) {
   };
 }
 
+async function readArticleDetail(payload = {}) {
+  const config = getConfig();
+  const url = normalizeArticleUrl(payload, config);
+  const issues = [];
+
+  if (!url) {
+    return {
+      ok: false,
+      config,
+      issues: [issue("ARCA_ARTICLE_URL_INVALID", "error", "허용된 아카라이브 게시글 URL이 아닙니다.")],
+    };
+  }
+
+  let response;
+  let html = "";
+  try {
+    response = await fetchWithTimeout(url, {
+      headers: buildHeaders({ referer: `${config.baseUrl}/b/${config.defaultChannel}` }),
+      redirect: "follow",
+    });
+    html = await readTextSafely(response);
+  } catch (error) {
+    return {
+      ok: false,
+      config,
+      endpoint: url.toString(),
+      issues: [issue("ARCA_ARTICLE_NETWORK_FAILED", "error", `게시글 본문 조회 실패: ${error.message}`)],
+    };
+  }
+
+  if (isCloudflareChallenge(response, html)) {
+    issues.push(
+      issue(
+        "ARCA_CLOUDFLARE_CHALLENGE",
+        "error",
+        "Cloudflare challenge로 게시글 본문 조회가 차단되었습니다.",
+        "아카라이브 공식 페이지에서 직접 확인하거나 잠시 후 다시 시도하세요."
+      )
+    );
+  } else if (!response.ok) {
+    issues.push(issue("ARCA_HTTP_ERROR", "error", `아카라이브가 HTTP ${response.status}를 반환했습니다.`));
+  }
+
+  const root = parse(html);
+  return {
+    ok: response.ok && !issues.some((item) => item.status === "error"),
+    config,
+    endpoint: url.toString(),
+    status: response.status,
+    article: extractArticleDetail(root, config, url),
+    issues,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 async function readEndpointPayload(req) {
   if (req.method === "GET") {
     const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -434,6 +552,15 @@ export async function handleArcaEndpoint(endpoint, req, res) {
         return;
       }
       sendJson(res, await listChannelArticles(await readEndpointPayload(req)));
+      return;
+    }
+
+    if (endpoint === "article") {
+      if (!["GET", "POST"].includes(req.method || "")) {
+        sendJson(res, { ok: false, error: "method not allowed" }, 405);
+        return;
+      }
+      sendJson(res, await readArticleDetail(await readEndpointPayload(req)));
       return;
     }
 

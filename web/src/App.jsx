@@ -164,6 +164,38 @@ function formatCount(value) {
   return Number(value).toLocaleString("ko-KR");
 }
 
+function articlePreviewText(article) {
+  if (!article) return "";
+  if (article.error) return article.error;
+  return (
+    article.contentText ||
+    article.description ||
+    (article.imageCount ? `본문 텍스트 없이 이미지 ${article.imageCount}개가 포함된 글입니다.` : "본문 텍스트가 비어 있습니다.")
+  );
+}
+
+function buildPromptWithArticleContext(prompt, article) {
+  if (!article || article.error) return prompt;
+  const imageLine = article.imageCount
+    ? `이미지: ${article.imageCount}개${article.imageUrls?.length ? ` (${article.imageUrls.join(", ")})` : ""}`
+    : "이미지: 없음 또는 미확인";
+  const content = article.contentText || article.description || "(추출된 본문 텍스트 없음)";
+  return [
+    "다음 아카라이브 주식채널 게시글을 컨텍스트로 참고해서 사용자의 질문에 답하세요.",
+    "",
+    "[게시글 컨텍스트]",
+    `제목: ${article.title || "제목 없음"}`,
+    `작성자: ${article.author || "알 수 없음"}`,
+    `URL: ${article.url || article.href || ""}`,
+    imageLine,
+    `본문${article.contentTruncated ? " (일부만 포함)" : ""}:`,
+    content,
+    "",
+    "[사용자 질문]",
+    prompt,
+  ].join("\n");
+}
+
 function BoardCategoryRail({ categories, activeCategory, onSelect }) {
   const safeCategories = categories?.length ? categories : [{ name: "", label: "전체" }];
   return (
@@ -194,7 +226,7 @@ function AuthorName({ row }) {
   );
 }
 
-function BoardTitleCell({ row }) {
+function BoardTitleCell({ row, onAttachArticle, isAttaching }) {
   return (
     <span className="board-title-cell">
       {row.type === "article" && !row.categoryLabel ? (
@@ -209,20 +241,59 @@ function BoardTitleCell({ row }) {
         {row.title}
       </a>
       {row.commentCount ? <span className="board-comment-count">[{row.commentCount}]</span> : null}
+      {row.type === "article" ? (
+        <button
+          className={isAttaching ? "board-codex-context-button is-loading" : "board-codex-context-button"}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onAttachArticle(row);
+          }}
+          disabled={isAttaching}
+          aria-label={`${row.title} 글을 Codex 컨텍스트로 첨부`}
+          title="Codex 컨텍스트로 첨부"
+        >
+          {isAttaching ? <LoaderCircle size={15} strokeWidth={2.2} /> : <img src={codexLogo} alt="" />}
+        </button>
+      ) : null}
     </span>
   );
 }
 
-function BoardRow({ row }) {
+function openBoardRow(row, event) {
+  if (!row?.href || event.defaultPrevented || event.button > 0) return;
+  if (event.target.closest("a, button, input, select, textarea")) return;
+  window.open(row.href, "_blank", "noopener,noreferrer");
+}
+
+function handleBoardRowKeyDown(row, event) {
+  if (event.defaultPrevented || event.target !== event.currentTarget) return;
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  window.open(row.href, "_blank", "noopener,noreferrer");
+}
+
+function BoardRow({ row, onAttachArticle, attachingArticleHref }) {
   const rowClass =
     row.type === "notice" ? "board-row board-row-notice" : row.type === "ad" ? "board-row board-row-ad" : "board-row";
   return (
-    <tr className={rowClass}>
+    <tr
+      className={rowClass}
+      onClick={(event) => openBoardRow(row, event)}
+      onKeyDown={(event) => handleBoardRowKeyDown(row, event)}
+      role={row.href ? "link" : undefined}
+      tabIndex={row.href ? 0 : undefined}
+      aria-label={row.href ? `${row.title} 글 열기` : undefined}
+    >
       <td className="board-col-id">
         {row.type === "ad" ? "광고" : row.type === "notice" ? "공지" : row.number || row.id}
       </td>
       <td className="board-col-title">
-        <BoardTitleCell row={row} />
+        <BoardTitleCell
+          row={row}
+          onAttachArticle={onAttachArticle}
+          isAttaching={Boolean(attachingArticleHref && attachingArticleHref === row.href)}
+        />
       </td>
       <td className="board-col-author">
         <AuthorName row={row} />
@@ -234,7 +305,7 @@ function BoardRow({ row }) {
   );
 }
 
-function BoardTable({ board, showHiddenNotices, onToggleHidden }) {
+function BoardTable({ board, showHiddenNotices, onToggleHidden, onAttachArticle, attachingArticleHref }) {
   const ads = board?.ads || [];
   const notices = board?.notices || [];
   const hiddenNotices = board?.hiddenNotices || [];
@@ -256,10 +327,20 @@ function BoardTable({ board, showHiddenNotices, onToggleHidden }) {
         </thead>
         <tbody>
           {ads.map((row) => (
-            <BoardRow row={row} key={`${row.type}-${row.href}`} />
+            <BoardRow
+              row={row}
+              key={`${row.type}-${row.href}`}
+              onAttachArticle={onAttachArticle}
+              attachingArticleHref={attachingArticleHref}
+            />
           ))}
           {notices.map((row) => (
-            <BoardRow row={row} key={`${row.type}-${row.id || row.href}`} />
+            <BoardRow
+              row={row}
+              key={`${row.type}-${row.id || row.href}`}
+              onAttachArticle={onAttachArticle}
+              attachingArticleHref={attachingArticleHref}
+            />
           ))}
           {hiddenNotices.length ? (
             <tr className="board-hidden-toggle-row">
@@ -272,10 +353,22 @@ function BoardTable({ board, showHiddenNotices, onToggleHidden }) {
             </tr>
           ) : null}
           {showHiddenNotices
-            ? hiddenNotices.map((row) => <BoardRow row={row} key={`${row.type}-hidden-${row.id || row.href}`} />)
+            ? hiddenNotices.map((row) => (
+                <BoardRow
+                  row={row}
+                  key={`${row.type}-hidden-${row.id || row.href}`}
+                  onAttachArticle={onAttachArticle}
+                  attachingArticleHref={attachingArticleHref}
+                />
+              ))
             : null}
           {articles.map((row) => (
-            <BoardRow row={row} key={`${row.type}-${row.id || row.href}`} />
+            <BoardRow
+              row={row}
+              key={`${row.type}-${row.id || row.href}`}
+              onAttachArticle={onAttachArticle}
+              attachingArticleHref={attachingArticleHref}
+            />
           ))}
           {!hasRows ? (
             <tr className="board-empty-row">
@@ -316,6 +409,34 @@ function BoardPagination({ pages, onPage }) {
         );
       })}
     </div>
+  );
+}
+
+function ArticleContextAttachment({ article, onClear }) {
+  if (!article) return null;
+  const preview = articlePreviewText(article);
+  return (
+    <section
+      className={article.error ? "article-context-attachment article-context-error" : "article-context-attachment"}
+      aria-label="Codex 첨부 컨텍스트"
+    >
+      <div className="article-context-icon" aria-hidden="true">
+        {article.error ? <AlertTriangle size={16} strokeWidth={2.2} /> : <img src={codexLogo} alt="" />}
+      </div>
+      <div className="article-context-copy">
+        <div className="article-context-kicker">
+          <span>아카라이브 글 컨텍스트</span>
+          {article.number ? <span>#{article.number}</span> : null}
+        </div>
+        <a href={article.url || article.href} target="_blank" rel="noreferrer" title={article.title}>
+          {article.title || "게시글"}
+        </a>
+        <p>{preview}</p>
+      </div>
+      <button className="article-context-clear" type="button" onClick={onClear} aria-label="첨부한 게시글 제거">
+        <X size={17} strokeWidth={2.2} />
+      </button>
+    </section>
   );
 }
 
@@ -703,6 +824,8 @@ function App() {
   const [arcaBoardBusy, setArcaBoardBusy] = useState(false);
   const [arcaBoardError, setArcaBoardError] = useState("");
   const [showHiddenNotices, setShowHiddenNotices] = useState(false);
+  const [attachedArticle, setAttachedArticle] = useState(null);
+  const [attachingArticleHref, setAttachingArticleHref] = useState("");
   const messageStackRef = useRef(null);
   const promptRef = useRef(null);
   const selectedModelGroup = useMemo(
@@ -752,6 +875,40 @@ function App() {
     updateBoardFilters({ keyword: boardSearchInput.trim(), page: 1 });
   }
 
+  async function attachArticleContext(row) {
+    if (!row?.href || attachingArticleHref) return;
+    setAttachingArticleHref(row.href);
+    try {
+      const response = await fetch(`/api/arca/article?url=${encodeURIComponent(row.href)}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        const issueMessage = payload.issues?.[0]?.message || payload.error || `HTTP ${response.status}`;
+        throw new Error(issueMessage);
+      }
+      setAttachedArticle({
+        ...payload.article,
+        id: row.id,
+        number: row.number,
+        title: payload.article?.title || row.title,
+        author: payload.article?.author || row.author,
+        url: payload.article?.url || row.href,
+        href: row.href,
+      });
+      promptRef.current?.focus();
+    } catch (error) {
+      setAttachedArticle({
+        id: row.id,
+        number: row.number,
+        title: row.title,
+        author: row.author,
+        url: row.href,
+        href: row.href,
+        error: `본문을 가져오지 못했습니다: ${error.message}`,
+      });
+    } finally {
+      setAttachingArticleHref("");
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -921,6 +1078,7 @@ function App() {
     const trimmed = prompt.trim();
     if (!trimmed || isSending) return;
     const createdAt = Date.now();
+    const promptWithContext = buildPromptWithArticleContext(trimmed, attachedArticle);
     const userMessage = {
       id: `user-${createdAt}`,
       role: "user",
@@ -942,7 +1100,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          prompt: trimmed,
+          prompt: promptWithContext,
           messages: history,
           model: selectedModelGroup?.slug,
           reasoning: selectedReasoning?.id,
@@ -1139,6 +1297,8 @@ function App() {
               board={arcaBoard}
               showHiddenNotices={showHiddenNotices}
               onToggleHidden={() => setShowHiddenNotices((next) => !next)}
+              onAttachArticle={attachArticleContext}
+              attachingArticleHref={attachingArticleHref}
             />
 
             <div className="board-bottom-controls">
@@ -1232,7 +1392,10 @@ function App() {
               className="icon-button"
               type="button"
               aria-label="새 Codex 진단"
-              onClick={() => setChatMessages(initialChatMessages)}
+              onClick={() => {
+                setChatMessages(initialChatMessages);
+                setAttachedArticle(null);
+              }}
             >
               <PencilLine size={22} />
             </button>
@@ -1260,6 +1423,7 @@ function App() {
           className="composer-shell"
           style={{ "--prompt-height": `${promptHeight}px` }}
         >
+          <ArticleContextAttachment article={attachedArticle} onClear={() => setAttachedArticle(null)} />
           <label className="prompt-label sr-only" htmlFor="codex-prompt">
             무엇이든 물어보세요
           </label>
