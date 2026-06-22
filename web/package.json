@@ -9,6 +9,7 @@
     "serve": "node server/server.mjs"
   },
   "dependencies": {
+    "fast-xml-parser": "^5.9.3",
     "lucide-react": "^0.468.0",
     "node-html-parser": "^8.0.2",
     "react": "^19.1.0",

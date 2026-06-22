@@ -1,10 +1,29 @@
 import { handleArcaEndpoint } from "./arcaApi.mjs";
 import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
+import { handleNewsFeedEndpoint, startNewsFeedCollector } from "./newsFeedApi.mjs";
 
 export function codexApiPlugin() {
   return {
     name: "finance-agent-codex-api",
     configureServer(server) {
+      startNewsFeedCollector();
+
+      server.middlewares.use("/api/news-feed/settings", async (req, res) => {
+        await handleNewsFeedEndpoint("settings", req, res);
+      });
+
+      server.middlewares.use("/api/news-feed/status", async (req, res) => {
+        await handleNewsFeedEndpoint("status", req, res);
+      });
+
+      server.middlewares.use("/api/news-feed/items", async (req, res) => {
+        await handleNewsFeedEndpoint("items", req, res);
+      });
+
+      server.middlewares.use("/api/news-feed/refresh", async (req, res) => {
+        await handleNewsFeedEndpoint("refresh", req, res);
+      });
+
       server.middlewares.use("/api/arca/articles", async (req, res) => {
         await handleArcaEndpoint("articles", req, res);
       });

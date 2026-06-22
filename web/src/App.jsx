@@ -13,6 +13,7 @@ import {
   FolderOpen,
   Home,
   Image as ImageIcon,
+  Languages,
   LoaderCircle,
   List,
   MessageSquare,
@@ -28,11 +29,15 @@ import {
   X,
 } from "lucide-react";
 import codexLogo from "./assets/codex-logo-transparent.png";
+import financialjuiceIcon from "./assets/financialjuice-icon.png";
+import walterBloombergIcon from "./assets/walter-bloomberg-icon.png";
+import firstSquawkIcon from "./assets/first-squawk-icon.png";
+import unusualWhalesIcon from "./assets/unusual-whales-icon.png";
 
 const fallbackApprovalOptions = [
   {
     id: "on-request",
-    label: "요청 시 승인",
+    label: "요청시 승인",
     cli: "--ask-for-approval on-request",
     detail: "Codex가 필요하다고 판단한 작업에 대해 사용자 승인을 요청합니다.",
   },
@@ -50,13 +55,20 @@ const fallbackApprovalOptions = [
   },
 ];
 
+const standardSpeedOption = {
+  id: "standard",
+  label: "표준",
+  cli: "",
+  detail: "기본 Codex CLI 속도입니다.",
+};
+
 const fallbackModelGroups = [
   {
     id: "gpt-5.5",
     slug: "gpt-5.5",
     label: "5.5",
     displayName: "GPT-5.5",
-    defaultReasoningLevel: "xhigh",
+    defaultReasoningLevel: "high",
     reasoningLevels: [
       {
         id: "low",
@@ -83,9 +95,23 @@ const fallbackModelGroups = [
         detail: "Extra high reasoning depth for complex problems",
       },
     ],
-    speedOptions: [],
+    speedOptions: [standardSpeedOption],
   },
 ];
+
+function getSpeedOptions(modelGroup) {
+  const options = Array.isArray(modelGroup?.speedOptions) ? modelGroup.speedOptions : [];
+  const seen = new Set(["standard"]);
+  return [
+    standardSpeedOption,
+    ...options.filter((option) => {
+      const id = String(option?.id || "").trim();
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }),
+  ];
+}
 
 const initialChatMessages = [];
 const ARCA_WRITE_URL = "https://arca.live/b/stock/write";
@@ -101,6 +127,7 @@ const initialBoardFilters = {
 };
 const MIN_PROMPT_HEIGHT = 42;
 const MAX_PROMPT_HEIGHT = 132;
+const NEWS_FEED_PAGE_SIZE = 30;
 
 const sortOptions = [
   { id: "", label: "등록순" },
@@ -128,9 +155,9 @@ const leftSidebarSections = [
   {
     title: "작업",
     items: [
-      { label: "주식채널", icon: Home, active: true },
+      { label: "주식채널", icon: Home, view: "stock" },
       { label: "World Memory", icon: Database },
-      { label: "News Feed", icon: Newspaper },
+      { label: "News Feed", icon: Newspaper, view: "news-feed", statusKey: "newsFeed" },
       { label: "포트폴리오", icon: PieChart },
       { label: "보고서", icon: FileText },
     ],
@@ -140,9 +167,12 @@ const leftSidebarSections = [
     items: [
       { label: "산출물", icon: FolderOpen },
       { label: "실행 로그", icon: Terminal },
-      { label: "설정", icon: Settings },
     ],
   },
+];
+
+const sidebarUtilityItems = [
+  { label: "설정", icon: Settings, view: "settings" },
 ];
 
 function renderMarkdownInline(text, keyPrefix = "inline") {
@@ -325,6 +355,65 @@ function MarkdownText({ text }) {
 function formatCount(value) {
   if (value === null || value === undefined) return "";
   return Number(value).toLocaleString("ko-KR");
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function newsFeedStatusLabel(status) {
+  const collector = status?.collector || {};
+  if (collector.inFlight) return "수집 중";
+  if (collector.healthy) return "수집 정상";
+  if (collector.lastError) return "수집 오류";
+  return "대기";
+}
+
+function newsFeedDotTitle(status) {
+  const collector = status?.collector || {};
+  if (collector.healthy) return "News Feed 수집 정상";
+  if (collector.lastError) return `News Feed 수집 오류: ${collector.lastError}`;
+  return "News Feed 수집 대기";
+}
+
+function translationStatusLabel(status) {
+  if (status === "translated") return "번역 완료";
+  if (status === "failed") return "번역 실패";
+  return "번역 대기";
+}
+
+function feedIconFor(feedId, title) {
+  const key = `${feedId || ""} ${title || ""}`.toLowerCase();
+  if (key.includes("financialjuice")) return financialjuiceIcon;
+  if (key.includes("walter-bloomberg") || key.includes("walter bloomberg") || key.includes("deitaone")) {
+    return walterBloombergIcon;
+  }
+  if (key.includes("first-squawk") || key.includes("first squawk") || key.includes("firstsquawk")) {
+    return firstSquawkIcon;
+  }
+  if (key.includes("unusual-whales") || key.includes("unusual whales") || key.includes("unusual_whales")) {
+    return unusualWhalesIcon;
+  }
+  return "";
+}
+
+function FeedSourceLabel({ feedId, title, className = "" }) {
+  const label = title || feedId || "출처";
+  const icon = feedIconFor(feedId, label);
+  return (
+    <span className={["feed-source-label", className].filter(Boolean).join(" ")}>
+      {icon ? <img className="feed-source-icon" src={icon} alt="" /> : null}
+      <span className="feed-source-name">{label}</span>
+    </span>
+  );
 }
 
 function articlePreviewText(article) {
@@ -612,6 +701,307 @@ function ArticleContextAttachment({ article, onClear, placement = "composer" }) 
   );
 }
 
+function NewsFeedView({
+  status,
+  items,
+  busy,
+  loadingMore,
+  error,
+  hasMore,
+  onRefresh,
+}) {
+  const collector = status?.collector || {};
+  const feeds = status?.feeds?.length ? status.feeds : status?.configuredFeeds || [];
+  const healthy = Boolean(collector.healthy);
+
+  return (
+    <div className="news-feed-shell">
+      <section className="news-feed-board" aria-labelledby="news-feed-title">
+        <header className="news-feed-header">
+          <div>
+            <h1 id="news-feed-title">News Feed</h1>
+            <p>
+              {newsFeedStatusLabel(status)} · {formatCount(status?.itemCount || 0)}개 저장 · {collector.retentionHours || 24}시간 보관
+            </p>
+          </div>
+          <div className={healthy ? "news-feed-health is-online" : "news-feed-health"} title={newsFeedDotTitle(status)}>
+            <span className="status-dot" />
+            <span>{healthy ? "정상" : "대기/오류"}</span>
+          </div>
+          <button className="board-refresh-button" type="button" onClick={onRefresh} disabled={busy || collector.inFlight}>
+            {busy || collector.inFlight ? <LoaderCircle size={16} strokeWidth={2.2} /> : <RefreshCw size={16} strokeWidth={2.2} />}
+            <span>{busy || collector.inFlight ? "수집 중" : "수동 수집"}</span>
+          </button>
+        </header>
+
+        <div className="news-feed-meta-line">
+          <span>최근 수집 {formatDateTime(collector.lastPollFinishedAt)}</span>
+          <span>다음 수집 {formatDateTime(collector.nextPollAt)}</span>
+          <span>{collector.translationModel ? `${collector.translationModel} · ${collector.translationReasoning}` : "번역 모델 대기"}</span>
+          <span>{collector.dataPath || "data/news-feed.json"}</span>
+        </div>
+
+        {error || collector.lastError ? (
+          <div className="news-feed-alert">
+            <AlertTriangle size={16} strokeWidth={2.2} />
+            <span>{error || collector.lastError}</span>
+          </div>
+        ) : null}
+
+        <div className="news-feed-sources" aria-label="등록된 RSS 피드">
+          {feeds.map((feed) => {
+            const feedOk = feed.lastFetchStatus === "ok";
+            return (
+              <div className={feedOk ? "news-feed-source is-online" : "news-feed-source"} key={feed.id}>
+                <span className="status-dot" />
+                <FeedSourceLabel feedId={feed.id} title={feed.title} />
+                <span>{feed.enabled === false ? "비활성" : feed.lastFetchStatus || "대기"}</span>
+                {feed.itemCount !== undefined ? <span>{formatCount(feed.itemCount)}개</span> : null}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="news-feed-list" aria-label="수집된 News Feed 항목">
+          {items.map((item) => {
+            const bodyText =
+              item.translatedText ||
+              item.translatedTitle ||
+              item.originalText ||
+              item.title ||
+              "내용 없음";
+            const originalTitle = String(item.title || "").trim();
+            const originalBody = String(item.originalText || "").trim();
+            const showOriginalTitle = originalTitle && originalTitle !== originalBody;
+
+            return (
+              <article className="news-feed-item" key={item.id}>
+                <div className="news-feed-item-meta">
+                  <FeedSourceLabel feedId={item.feedId} title={item.feedTitle} />
+                  <span className="news-feed-item-time">{formatDateTime(item.publishedAt || item.fetchedAt)}</span>
+                  {item.translationStatus && item.translationStatus !== "translated" ? (
+                    <span className={`translation-status translation-status-${item.translationStatus}`}>
+                      <Languages size={14} strokeWidth={2.1} />
+                      {translationStatusLabel(item.translationStatus)}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="news-feed-translation">{bodyText}</p>
+                {originalTitle || originalBody ? (
+                  <details className="news-feed-original">
+                    <summary>원문</summary>
+                    {showOriginalTitle ? <strong>{originalTitle}</strong> : null}
+                    {originalBody ? <p>{originalBody}</p> : null}
+                  </details>
+                ) : null}
+                {item.translationError ? (
+                  <p className="news-feed-error-text">{item.translationError}</p>
+                ) : null}
+              </article>
+            );
+          })}
+
+          {!items.length && !busy ? (
+            <div className="news-feed-empty">
+              <Newspaper size={28} strokeWidth={1.8} />
+              <span>아직 저장된 피드가 없습니다.</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="news-feed-load-state" aria-live="polite">
+          {loadingMore ? (
+            <>
+              <LoaderCircle size={16} strokeWidth={2.2} />
+              <span>이전 항목 불러오는 중</span>
+            </>
+          ) : hasMore ? (
+            <span>아래로 스크롤하면 더 불러옵니다.</span>
+          ) : items.length ? (
+            <span>24시간 보관 범위의 끝입니다.</span>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsSelectField({
+  id,
+  label,
+  value,
+  options,
+  onChange,
+  getOptionLabel = (option) => option.label,
+}) {
+  const safeOptions = options.length ? options : [{ id: "", label: "대기" }];
+
+  return (
+    <label className="settings-select-field" htmlFor={id}>
+      <span>{label}</span>
+      <span className="settings-select-shell">
+        <select
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {safeOptions.map((option) => (
+            <option value={option.id} key={option.id}>
+              {getOptionLabel(option)}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={16} strokeWidth={2.2} aria-hidden="true" />
+      </span>
+    </label>
+  );
+}
+
+function AgentSettingsSection({
+  approvalOptions,
+  approval,
+  onApprovalChange,
+  modelGroups,
+  model,
+  onModelChange,
+  reasoningOptions,
+  reasoning,
+  onReasoningChange,
+  speedOptions,
+  speed,
+  onSpeedChange,
+}) {
+  const safeApprovalOptions = approvalOptions.length ? approvalOptions : fallbackApprovalOptions;
+  const safeModelGroups = modelGroups.length ? modelGroups : fallbackModelGroups;
+  const safeReasoningOptions = reasoningOptions.length ? reasoningOptions : fallbackModelGroups[0].reasoningLevels;
+  const safeSpeedOptions = speedOptions.length ? speedOptions : [standardSpeedOption];
+  const modelOptions = safeModelGroups.map((group, index) => ({
+    id: group.slug,
+    label: index === 0
+      ? `최신 버전 · ${group.displayName || group.slug}`
+      : group.displayName || group.slug,
+  }));
+
+  return (
+    <section className="settings-section" aria-labelledby="agent-settings-title">
+      <div className="settings-section-header">
+        <h2 id="agent-settings-title">에이전트 설정</h2>
+        <span>Codex</span>
+      </div>
+
+      <div className="settings-agent-grid">
+        <SettingsSelectField
+          id="agent-approval-policy"
+          label="에이전트 권한"
+          value={approval}
+          options={safeApprovalOptions}
+          onChange={onApprovalChange}
+        />
+        <SettingsSelectField
+          id="agent-model-version"
+          label="모델 버전"
+          value={model}
+          options={modelOptions}
+          onChange={onModelChange}
+        />
+        <SettingsSelectField
+          id="agent-reasoning-level"
+          label="추론 수준"
+          value={reasoning}
+          options={safeReasoningOptions}
+          onChange={onReasoningChange}
+        />
+        <SettingsSelectField
+          id="agent-speed"
+          label="속도"
+          value={speed}
+          options={safeSpeedOptions}
+          onChange={onSpeedChange}
+        />
+      </div>
+    </section>
+  );
+}
+
+function SettingsView({
+  settings,
+  busy,
+  savingFeedId,
+  error,
+  onReload,
+  onToggleFeed,
+  agentSettings,
+}) {
+  const feeds = settings?.feeds || [];
+
+  return (
+    <div className="settings-shell">
+      <section className="settings-board" aria-labelledby="settings-title">
+        <header className="settings-header">
+          <div>
+            <h1 id="settings-title">설정</h1>
+            <p>News Feed · {settings?.configPath || "config/news-feeds.json"}</p>
+          </div>
+          <button className="board-refresh-button" type="button" onClick={onReload} disabled={busy}>
+            {busy ? <LoaderCircle size={16} strokeWidth={2.2} /> : <RefreshCw size={16} strokeWidth={2.2} />}
+            <span>{busy ? "확인 중" : "새로고침"}</span>
+          </button>
+        </header>
+
+        {error ? (
+          <div className="news-feed-alert">
+            <AlertTriangle size={16} strokeWidth={2.2} />
+            <span>{error}</span>
+          </div>
+        ) : null}
+
+        <AgentSettingsSection {...agentSettings} />
+
+        <section className="settings-section" aria-labelledby="news-feed-source-settings-title">
+          <div className="settings-section-header">
+            <h2 id="news-feed-source-settings-title">출처</h2>
+            <span>{feeds.length}개</span>
+          </div>
+
+          <div className="settings-source-list">
+            {feeds.map((feed) => {
+              const saving = savingFeedId === feed.id;
+              return (
+                <div
+                  className={feed.enabled ? "settings-source-row is-enabled" : "settings-source-row is-disabled"}
+                  key={feed.id}
+                >
+                  <div className="settings-source-main">
+                    <FeedSourceLabel feedId={feed.id} title={feed.title} className="settings-source-title" />
+                    {feed.lastError ? <em>{feed.lastError}</em> : null}
+                  </div>
+                  <button
+                    type="button"
+                    className={feed.enabled ? "settings-toggle is-on" : "settings-toggle"}
+                    role="switch"
+                    aria-checked={feed.enabled}
+                    disabled={saving || busy}
+                    onClick={() => onToggleFeed(feed.id, !feed.enabled)}
+                  >
+                    <span className="settings-toggle-track">
+                      <span className="settings-toggle-thumb" />
+                    </span>
+                    <span>{saving ? "저장 중" : feed.enabled ? "켜짐" : "꺼짐"}</span>
+                  </button>
+                </div>
+              );
+            })}
+
+            {!feeds.length && !busy ? (
+              <div className="settings-empty">등록된 News Feed 출처가 없습니다.</div>
+            ) : null}
+          </div>
+        </section>
+      </section>
+    </div>
+  );
+}
+
 function ChatBlock({ block }) {
   if (block.type === "status") {
     const Icon =
@@ -851,7 +1241,7 @@ function ModelControl({
     reasoningLevels.find((item) => item.id === reasoning) ??
     reasoningLevels.find((item) => item.id === selectedGroup?.defaultReasoningLevel) ??
     reasoningLevels[0];
-  const speedOptions = selectedGroup?.speedOptions?.length ? selectedGroup.speedOptions : [];
+  const speedOptions = getSpeedOptions(selectedGroup);
   const selectedSpeed = speedOptions.find((item) => item.id === speed) ?? speedOptions[0];
   const hasSpeedMenu = speedOptions.length > 1;
   const chipLabel = `${selectedGroup?.label || "모델"} ${selectedReasoning?.label || ""}`.trim();
@@ -864,7 +1254,7 @@ function ModelControl({
     if (!nextReasoningLevels.some((item) => item.id === reasoning)) {
       onReasoningChange(nextGroup.defaultReasoningLevel || nextReasoningLevels[0]?.id || "medium");
     }
-    if (!nextGroup.speedOptions?.some((item) => item.id === speed)) {
+    if (!getSpeedOptions(nextGroup).some((item) => item.id === speed)) {
       onSpeedChange("standard");
     }
     setPanel("main");
@@ -977,6 +1367,7 @@ function ModelControl({
 }
 
 function App() {
+  const [activeView, setActiveView] = useState("stock");
   const [approvalOptions, setApprovalOptions] = useState(fallbackApprovalOptions);
   const [modelGroups, setModelGroups] = useState(fallbackModelGroups);
   const [chatMessages, setChatMessages] = useState(initialChatMessages);
@@ -999,10 +1390,22 @@ function App() {
   const [arcaBoardBusy, setArcaBoardBusy] = useState(false);
   const [arcaBoardError, setArcaBoardError] = useState("");
   const [showHiddenNotices, setShowHiddenNotices] = useState(false);
+  const [newsFeedStatus, setNewsFeedStatus] = useState(null);
+  const [newsFeedItems, setNewsFeedItems] = useState([]);
+  const [newsFeedBusy, setNewsFeedBusy] = useState(false);
+  const [newsFeedLoadingMore, setNewsFeedLoadingMore] = useState(false);
+  const [newsFeedHasMore, setNewsFeedHasMore] = useState(false);
+  const [newsFeedError, setNewsFeedError] = useState("");
+  const [newsFeedSettings, setNewsFeedSettings] = useState(null);
+  const [newsFeedSettingsBusy, setNewsFeedSettingsBusy] = useState(false);
+  const [newsFeedSettingsSavingId, setNewsFeedSettingsSavingId] = useState("");
+  const [newsFeedSettingsError, setNewsFeedSettingsError] = useState("");
   const [attachedArticle, setAttachedArticle] = useState(null);
   const [attachingArticleHref, setAttachingArticleHref] = useState("");
   const messageStackRef = useRef(null);
   const promptRef = useRef(null);
+  const activeViewRef = useRef(activeView);
+  const newsFeedItemsCountRef = useRef(0);
   const selectedModelGroup = useMemo(
     () => modelGroups.find((item) => item.slug === model) ?? modelGroups[0] ?? fallbackModelGroups[0],
     [model, modelGroups]
@@ -1017,7 +1420,7 @@ function App() {
       reasoningOptions[0],
     [reasoning, reasoningOptions, selectedModelGroup]
   );
-  const speedOptions = selectedModelGroup?.speedOptions?.length ? selectedModelGroup.speedOptions : [];
+  const speedOptions = useMemo(() => getSpeedOptions(selectedModelGroup), [selectedModelGroup]);
   const selectedSpeed = useMemo(
     () => speedOptions.find((item) => item.id === speed) ?? speedOptions[0],
     [speed, speedOptions]
@@ -1043,6 +1446,131 @@ function App() {
 
   function refreshBoard() {
     setBoardFilters((filters) => ({ ...filters }));
+  }
+
+  async function loadNewsFeedItems({ reset = false } = {}) {
+    if (reset ? newsFeedBusy : newsFeedLoadingMore || newsFeedBusy || !newsFeedHasMore) return;
+    if (reset) {
+      setNewsFeedBusy(true);
+      setNewsFeedError("");
+    } else {
+      setNewsFeedLoadingMore(true);
+    }
+
+    try {
+      const offset = reset ? 0 : newsFeedItems.length;
+      const response = await fetch(`/api/news-feed/items?limit=${NEWS_FEED_PAGE_SIZE}&offset=${offset}`, {
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+
+      setNewsFeedStatus(payload);
+      setNewsFeedHasMore(Boolean(payload.hasMore));
+      setNewsFeedItems((current) => {
+        const nextItems = reset ? payload.items || [] : [...current, ...(payload.items || [])];
+        const seen = new Set();
+        return nextItems.filter((item) => {
+          if (seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        });
+      });
+    } catch (error) {
+      setNewsFeedError(error.message);
+    } finally {
+      setNewsFeedBusy(false);
+      setNewsFeedLoadingMore(false);
+    }
+  }
+
+  async function loadNewsFeedSettings() {
+    setNewsFeedSettingsBusy(true);
+    setNewsFeedSettingsError("");
+    try {
+      const response = await fetch("/api/news-feed/settings", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setNewsFeedSettings(payload);
+    } catch (error) {
+      setNewsFeedSettingsError(error.message);
+    } finally {
+      setNewsFeedSettingsBusy(false);
+    }
+  }
+
+  async function refreshNewsFeedStatus() {
+    try {
+      const response = await fetch("/api/news-feed/status", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setNewsFeedStatus(payload);
+    } catch {
+      // Settings toggles should still succeed even if the status probe is momentarily stale.
+    }
+  }
+
+  async function toggleNewsFeedSource(feedId, enabled) {
+    setNewsFeedSettingsSavingId(feedId);
+    setNewsFeedSettingsError("");
+    try {
+      const response = await fetch("/api/news-feed/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ feedId, enabled }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setNewsFeedSettings(payload);
+      await refreshNewsFeedStatus();
+      if (activeView === "news-feed") {
+        await loadNewsFeedItems({ reset: true });
+      }
+    } catch (error) {
+      setNewsFeedSettingsError(error.message);
+    } finally {
+      setNewsFeedSettingsSavingId("");
+    }
+  }
+
+  async function refreshNewsFeed() {
+    setNewsFeedBusy(true);
+    setNewsFeedError("");
+    try {
+      const response = await fetch("/api/news-feed/refresh", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setNewsFeedStatus(payload);
+      setNewsFeedItems(payload.items || []);
+      setNewsFeedHasMore(Boolean(payload.hasMore));
+    } catch (error) {
+      setNewsFeedError(error.message);
+    } finally {
+      setNewsFeedBusy(false);
+    }
+  }
+
+  function handleNewsFeedScroll(event) {
+    if (activeView !== "news-feed" || newsFeedBusy || newsFeedLoadingMore || !newsFeedHasMore) return;
+    const element = event.currentTarget;
+    const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (remaining < 420) {
+      void loadNewsFeedItems({ reset: false });
+    }
   }
 
   function submitBoardSearch(event) {
@@ -1142,6 +1670,73 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    newsFeedItemsCountRef.current = newsFeedItems.length;
+  }, [newsFeedItems.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollNewsFeedStatus() {
+      try {
+        const response = await fetch("/api/news-feed/status", { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setNewsFeedStatus(payload);
+
+        if (
+          activeViewRef.current === "news-feed" &&
+          Number(payload.itemCount || 0) !== newsFeedItemsCountRef.current
+        ) {
+          const itemsResponse = await fetch(`/api/news-feed/items?limit=${NEWS_FEED_PAGE_SIZE}&offset=0`, {
+            cache: "no-store",
+          });
+          const itemsPayload = await itemsResponse.json().catch(() => ({}));
+          if (!cancelled && itemsResponse.ok && itemsPayload.ok) {
+            setNewsFeedStatus(itemsPayload);
+            setNewsFeedHasMore(Boolean(itemsPayload.hasMore));
+            setNewsFeedItems(itemsPayload.items || []);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setNewsFeedStatus((current) => ({
+            ...(current || {}),
+            collector: {
+              ...(current?.collector || {}),
+              healthy: false,
+              lastError: error.message,
+            },
+          }));
+        }
+      }
+    }
+
+    pollNewsFeedStatus();
+    const timer = window.setInterval(pollNewsFeedStatus, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeView !== "news-feed") return;
+    void loadNewsFeedItems({ reset: true });
+  }, [activeView]);
+
+  useEffect(() => {
+    if (activeView !== "settings") return;
+    void loadNewsFeedSettings();
+  }, [activeView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1283,6 +1878,8 @@ function App() {
           model: selectedModelGroup?.slug,
           reasoning: selectedReasoning?.id,
           approval: selectedApproval?.id,
+          screen: activeView,
+          includeNewsFeedContext: activeView === "news-feed",
         }),
       });
       if (!response.ok) {
@@ -1409,12 +2006,22 @@ function App() {
                   const Icon = item.icon;
                   return (
                     <button
-                      className={item.active ? "nav-item is-active" : "nav-item"}
+                      className={item.view === activeView ? "nav-item is-active" : "nav-item"}
                       type="button"
                       key={item.label}
+                      onClick={() => {
+                        if (item.view) setActiveView(item.view);
+                      }}
+                      title={item.statusKey === "newsFeed" ? newsFeedDotTitle(newsFeedStatus) : item.label}
                     >
                       <Icon size={16} strokeWidth={2} />
-                      <span>{item.label}</span>
+                      <span className="nav-item-text">{item.label}</span>
+                      {item.statusKey === "newsFeed" ? (
+                        <span
+                          className={newsFeedStatus?.collector?.healthy ? "nav-status-dot is-online" : "nav-status-dot"}
+                          aria-label={newsFeedStatus?.collector?.healthy ? "News Feed 수집 정상" : "News Feed 수집 대기 또는 오류"}
+                        />
+                      ) : null}
                     </button>
                   );
                 })}
@@ -1422,143 +2029,199 @@ function App() {
             </section>
           ))}
         </nav>
+
+        <nav className="app-sidebar-footer" aria-label="설정">
+          {sidebarUtilityItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={item.view === activeView ? "nav-item is-active" : "nav-item"}
+                type="button"
+                key={item.label}
+                onClick={() => setActiveView(item.view)}
+              >
+                <Icon size={16} strokeWidth={2} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
       </aside>
 
-      <section className="workspace-canvas board-index-canvas" aria-label="아카라이브 주식채널 인덱스">
-        <div className="board-index-shell">
-          <section className="stock-board" aria-labelledby="stock-board-title">
-            <header className="stock-board-header">
-              <div>
-                <h1 id="stock-board-title">
-                  <button
-                    className="board-title-refresh"
-                    type="button"
-                    onClick={refreshBoard}
-                    disabled={arcaBoardBusy}
-                    aria-label="아카라이브 주식채널 수동 갱신"
-                  >
-                    아카라이브 주식채널
+      {activeView === "settings" ? (
+        <section className="workspace-canvas settings-canvas" aria-label="설정">
+          <SettingsView
+            settings={newsFeedSettings}
+            busy={newsFeedSettingsBusy}
+            savingFeedId={newsFeedSettingsSavingId}
+            error={newsFeedSettingsError}
+            onReload={loadNewsFeedSettings}
+            onToggleFeed={toggleNewsFeedSource}
+            agentSettings={{
+              approvalOptions,
+              approval,
+              onApprovalChange: setApproval,
+              modelGroups,
+              model,
+              onModelChange: setModel,
+              reasoningOptions,
+              reasoning,
+              onReasoningChange: setReasoning,
+              speedOptions,
+              speed,
+              onSpeedChange: setSpeed,
+            }}
+          />
+        </section>
+      ) : activeView === "news-feed" ? (
+        <section className="workspace-canvas news-feed-canvas" aria-label="News Feed" onScroll={handleNewsFeedScroll}>
+          <NewsFeedView
+            status={newsFeedStatus}
+            items={newsFeedItems}
+            busy={newsFeedBusy}
+            loadingMore={newsFeedLoadingMore}
+            error={newsFeedError}
+            hasMore={newsFeedHasMore}
+            onRefresh={refreshNewsFeed}
+          />
+        </section>
+      ) : (
+        <section className="workspace-canvas board-index-canvas" aria-label="아카라이브 주식채널 인덱스">
+          <div className="board-index-shell">
+            <section className="stock-board" aria-labelledby="stock-board-title">
+              <header className="stock-board-header">
+                <div>
+                  <h1 id="stock-board-title">
+                    <button
+                      className="board-title-refresh"
+                      type="button"
+                      onClick={refreshBoard}
+                      disabled={arcaBoardBusy}
+                      aria-label="아카라이브 주식채널 수동 갱신"
+                    >
+                      아카라이브 주식채널
+                    </button>
+                  </h1>
+                  <p>
+                    {activeCategoryLabel} · {arcaBoard?.articles?.length ?? 0}개 글 · {arcaBoardBusy ? "불러오는 중" : "수동 조회 완료"}
+                  </p>
+                </div>
+                <div className="stock-board-actions">
+                  <button className="board-refresh-button" type="button" onClick={refreshBoard} disabled={arcaBoardBusy}>
+                    <RefreshCw size={16} strokeWidth={2.2} />
+                    <span>{arcaBoardBusy ? "조회 중" : "수동 갱신"}</span>
                   </button>
-                </h1>
-                <p>
-                  {activeCategoryLabel} · {arcaBoard?.articles?.length ?? 0}개 글 · {arcaBoardBusy ? "불러오는 중" : "수동 조회 완료"}
-                </p>
+                  <a className="board-write-link" href={ARCA_WRITE_URL} target="_blank" rel="noreferrer">
+                    <PencilLine size={16} strokeWidth={2.2} />
+                    <span>글쓰기</span>
+                  </a>
+                </div>
+              </header>
+
+              <BoardCategoryRail
+                categories={arcaBoard?.categories}
+                activeCategory={boardFilters.category}
+                onSelect={selectBoardCategory}
+              />
+
+              <div className="board-meta-line">
+                <span>{arcaBoard?.pageTitle || "주식 채널"}</span>
+                <span>page {boardFilters.page}</span>
+                {arcaBoardError ? <strong>{arcaBoardError}</strong> : null}
+                {arcaBoard?.issues?.map((item) => (
+                  <strong key={item.code}>{item.code}</strong>
+                ))}
               </div>
-              <div className="stock-board-actions">
-                <button className="board-refresh-button" type="button" onClick={refreshBoard} disabled={arcaBoardBusy}>
-                  <RefreshCw size={16} strokeWidth={2.2} />
-                  <span>{arcaBoardBusy ? "조회 중" : "수동 갱신"}</span>
-                </button>
+
+              <BoardTable
+                board={arcaBoard}
+                showHiddenNotices={showHiddenNotices}
+                onToggleHidden={() => setShowHiddenNotices((next) => !next)}
+                onAttachArticle={attachArticleContext}
+                attachingArticleHref={attachingArticleHref}
+              />
+
+              <div className="board-bottom-controls">
+                <div className="board-mode-controls">
+                  <button
+                    type="button"
+                    className={!boardFilters.best ? "is-active" : ""}
+                    onClick={() => updateBoardFilters({ best: false, page: 1 })}
+                  >
+                    <List size={15} strokeWidth={2.2} />
+                    <span>전체글</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={boardFilters.best ? "is-hot is-active" : "is-hot"}
+                    onClick={() => updateBoardFilters({ best: true, page: 1 })}
+                  >
+                    <Star size={15} strokeWidth={2.2} />
+                    <span>개념글</span>
+                  </button>
+                  <select
+                    value={boardFilters.sort}
+                    onChange={(event) => updateBoardFilters({ sort: event.target.value, page: 1 })}
+                    aria-label="정렬"
+                  >
+                    {sortOptions.map((option) => (
+                      <option value={option.id} key={option.id || "default-sort"}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={boardFilters.cutRate}
+                    onChange={(event) => updateBoardFilters({ cutRate: event.target.value, page: 1 })}
+                    aria-label="추천컷"
+                  >
+                    {cutRateOptions.map((option) => (
+                      <option value={option.id} key={option.id || "default-cut"}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <form className="board-search" onSubmit={submitBoardSearch}>
+                  <select
+                    value={boardFilters.target}
+                    onChange={(event) => updateBoardFilters({ target: event.target.value, page: 1 })}
+                    aria-label="검색 대상"
+                  >
+                    {searchTargetOptions.map((option) => (
+                      <option value={option.id} key={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={boardSearchInput}
+                    onChange={(event) => setBoardSearchInput(event.target.value)}
+                    aria-label="검색어"
+                  />
+                  <button type="submit">
+                    <Search size={15} strokeWidth={2.2} />
+                    <span>검색</span>
+                  </button>
+                </form>
+              </div>
+
+              <BoardPagination
+                pages={arcaBoard?.pagination}
+                onPage={(page) => updateBoardFilters({ page })}
+              />
+
+              <div className="board-footer-actions">
                 <a className="board-write-link" href={ARCA_WRITE_URL} target="_blank" rel="noreferrer">
                   <PencilLine size={16} strokeWidth={2.2} />
                   <span>글쓰기</span>
                 </a>
               </div>
-            </header>
-
-            <BoardCategoryRail
-              categories={arcaBoard?.categories}
-              activeCategory={boardFilters.category}
-              onSelect={selectBoardCategory}
-            />
-
-            <div className="board-meta-line">
-              <span>{arcaBoard?.pageTitle || "주식 채널"}</span>
-              <span>page {boardFilters.page}</span>
-              {arcaBoardError ? <strong>{arcaBoardError}</strong> : null}
-              {arcaBoard?.issues?.map((item) => (
-                <strong key={item.code}>{item.code}</strong>
-              ))}
-            </div>
-
-            <BoardTable
-              board={arcaBoard}
-              showHiddenNotices={showHiddenNotices}
-              onToggleHidden={() => setShowHiddenNotices((next) => !next)}
-              onAttachArticle={attachArticleContext}
-              attachingArticleHref={attachingArticleHref}
-            />
-
-            <div className="board-bottom-controls">
-              <div className="board-mode-controls">
-                <button
-                  type="button"
-                  className={!boardFilters.best ? "is-active" : ""}
-                  onClick={() => updateBoardFilters({ best: false, page: 1 })}
-                >
-                  <List size={15} strokeWidth={2.2} />
-                  <span>전체글</span>
-                </button>
-                <button
-                  type="button"
-                  className={boardFilters.best ? "is-hot is-active" : "is-hot"}
-                  onClick={() => updateBoardFilters({ best: true, page: 1 })}
-                >
-                  <Star size={15} strokeWidth={2.2} />
-                  <span>개념글</span>
-                </button>
-                <select
-                  value={boardFilters.sort}
-                  onChange={(event) => updateBoardFilters({ sort: event.target.value, page: 1 })}
-                  aria-label="정렬"
-                >
-                  {sortOptions.map((option) => (
-                    <option value={option.id} key={option.id || "default-sort"}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={boardFilters.cutRate}
-                  onChange={(event) => updateBoardFilters({ cutRate: event.target.value, page: 1 })}
-                  aria-label="추천컷"
-                >
-                  {cutRateOptions.map((option) => (
-                    <option value={option.id} key={option.id || "default-cut"}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <form className="board-search" onSubmit={submitBoardSearch}>
-                <select
-                  value={boardFilters.target}
-                  onChange={(event) => updateBoardFilters({ target: event.target.value, page: 1 })}
-                  aria-label="검색 대상"
-                >
-                  {searchTargetOptions.map((option) => (
-                    <option value={option.id} key={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  value={boardSearchInput}
-                  onChange={(event) => setBoardSearchInput(event.target.value)}
-                  aria-label="검색어"
-                />
-                <button type="submit">
-                  <Search size={15} strokeWidth={2.2} />
-                  <span>검색</span>
-                </button>
-              </form>
-            </div>
-
-            <BoardPagination
-              pages={arcaBoard?.pagination}
-              onPage={(page) => updateBoardFilters({ page })}
-            />
-
-            <div className="board-footer-actions">
-              <a className="board-write-link" href={ARCA_WRITE_URL} target="_blank" rel="noreferrer">
-                <PencilLine size={16} strokeWidth={2.2} />
-                <span>글쓰기</span>
-              </a>
-            </div>
-          </section>
-        </div>
-      </section>
+            </section>
+          </div>
+        </section>
+      )}
 
       <aside className="codex-sidebar">
         <header className="sidebar-header" aria-label="Codex controls">

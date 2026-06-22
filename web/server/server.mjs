@@ -4,6 +4,7 @@ import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleArcaEndpoint } from "./arcaApi.mjs";
 import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
+import { handleNewsFeedEndpoint, startNewsFeedCollector } from "./newsFeedApi.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(__dirname, "..");
@@ -37,6 +38,26 @@ function serveStatic(req, res) {
 }
 
 const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/api/news-feed/settings")) {
+    await handleNewsFeedEndpoint("settings", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/news-feed/status")) {
+    await handleNewsFeedEndpoint("status", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/news-feed/items")) {
+    await handleNewsFeedEndpoint("items", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/news-feed/refresh")) {
+    await handleNewsFeedEndpoint("refresh", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/arca/articles")) {
     await handleArcaEndpoint("articles", req, res);
     return;
@@ -96,6 +117,8 @@ const server = createServer(async (req, res) => {
 
   serveStatic(req, res);
 });
+
+startNewsFeedCollector();
 
 server.listen(port, host, () => {
   console.log(`FinanceAgentGUI web server listening on http://${host}:${port}/`);

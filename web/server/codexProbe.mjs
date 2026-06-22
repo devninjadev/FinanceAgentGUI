@@ -7,12 +7,16 @@ import { fileURLToPath } from "node:url";
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
 const GUIBUILD_AGENTS_PATH = join(GUIBUILD_ROOT, "AGENTS.md");
+const NEWS_FEED_DATA_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const CHAT_TIMEOUT_MS = 120000;
+const NEWS_FEED_LATEST_CONTEXT_LIMIT = 24;
+const NEWS_FEED_RETRIEVAL_CONTEXT_LIMIT = 56;
+const NEWS_FEED_CONTEXT_TEXT_LIMIT = 900;
 
 const APPROVAL_LABELS = {
   untrusted: "신뢰 명령만",
   "on-failure": "실패 시 승인",
-  "on-request": "요청 시 승인",
+  "on-request": "요청시 승인",
   never: "승인 없음",
 };
 
@@ -76,6 +80,164 @@ function readGuiBuildAgentsInstructions() {
   return readFileSync(GUIBUILD_AGENTS_PATH, "utf8").trim();
 }
 
+function truncateContextText(value, limit = NEWS_FEED_CONTEXT_TEXT_LIMIT) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trim()}…`;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}\s._%+-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function queryTextFromPayload(payload = {}) {
+  const history = Array.isArray(payload.messages) ? payload.messages.slice(-4) : [];
+  return [
+    ...history.map((message) => message.text || ""),
+    payload.prompt || "",
+  ].join(" ");
+}
+
+function queryTerms(payload = {}) {
+  const normalized = normalizeSearchText(queryTextFromPayload(payload));
+  if (!normalized) return [];
+  const stopWords = new Set([
+    "그리고",
+    "그럼",
+    "뉴스",
+    "뉴스피드",
+    "피드",
+    "관련",
+    "내용",
+    "정리",
+    "요약",
+    "해줘",
+    "알려줘",
+    "뭐야",
+    "what",
+    "about",
+    "news",
+    "feed",
+    "please",
+    "summary",
+  ]);
+  const terms = normalized
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2 && !stopWords.has(term));
+  return [...new Set(terms)].slice(0, 40);
+}
+
+function itemSearchText(item) {
+  return normalizeSearchText(
+    [
+      item.feedTitle,
+      item.translatedTitle,
+      item.translatedText,
+      item.title,
+      item.originalText,
+    ].join(" ")
+  );
+}
+
+function newsItemScore(item, terms) {
+  if (!terms.length) return 0;
+  const titleText = normalizeSearchText([item.translatedTitle, item.title].join(" "));
+  const bodyText = itemSearchText(item);
+  let score = 0;
+  for (const term of terms) {
+    if (titleText.includes(term)) score += 6;
+    if (bodyText.includes(term)) score += 2;
+    if (term.length >= 4) {
+      const compactTerm = term.replace(/\s+/g, "");
+      if (compactTerm && bodyText.replace(/\s+/g, "").includes(compactTerm)) score += 1;
+    }
+  }
+  return score;
+}
+
+function newsItemForContext(item) {
+  return {
+    id: item.id,
+    feed: item.feedTitle || item.feedId || "",
+    publishedAt: item.publishedAt || item.fetchedAt || "",
+    titleKo: item.translatedTitle || "",
+    bodyKo: truncateContextText(item.translatedText || ""),
+    titleOriginal: item.title || "",
+    bodyOriginal: truncateContextText(item.originalText || ""),
+    translationStatus: item.translationStatus || "",
+  };
+}
+
+function shouldIncludeNewsFeedContext(payload = {}) {
+  return payload.includeNewsFeedContext === true || String(payload.screen || "").toLowerCase() === "news-feed";
+}
+
+function buildNewsFeedContext(payload = {}) {
+  if (!shouldIncludeNewsFeedContext(payload)) return "";
+
+  if (!existsSync(NEWS_FEED_DATA_PATH)) {
+    return [
+      "[News Feed 데이터 컨텍스트]",
+      "현재 화면은 News Feed이지만 data/news-feed.json 파일을 아직 찾지 못했다.",
+      "사용자가 뉴스피드 내용에 대해 묻는다면 먼저 수집 상태 확인이나 수동 수집을 제안한다.",
+    ].join("\n");
+  }
+
+  try {
+    const store = JSON.parse(readFileSync(NEWS_FEED_DATA_PATH, "utf8"));
+    const items = Array.isArray(store.items) ? store.items : [];
+    const sortedItems = items
+      .slice()
+      .sort((a, b) => String(b.publishedAt || b.fetchedAt).localeCompare(String(a.publishedAt || a.fetchedAt)));
+    const latestItems = sortedItems.slice(0, NEWS_FEED_LATEST_CONTEXT_LIMIT);
+    const terms = queryTerms(payload);
+    const latestIds = new Set(latestItems.map((item) => item.id));
+    const retrievedItems = sortedItems
+      .map((item) => ({ item, score: newsItemScore(item, terms) }))
+      .filter(({ item, score }) => score > 0 && !latestIds.has(item.id))
+      .sort((a, b) => b.score - a.score || String(b.item.publishedAt || b.item.fetchedAt).localeCompare(String(a.item.publishedAt || a.item.fetchedAt)))
+      .slice(0, NEWS_FEED_RETRIEVAL_CONTEXT_LIMIT)
+      .map(({ item, score }) => ({ ...newsItemForContext(item), retrievalScore: score }));
+    const context = {
+      file: "data/news-feed.json",
+      retrievalMode: "local lexical RAG over the retained news-feed JSON",
+      queryTerms: terms,
+      updatedAt: store.updatedAt || "",
+      collector: {
+        status: store.collector?.status || "",
+        healthy: Boolean(store.collector?.healthy),
+        lastAction: store.collector?.lastAction || "",
+        lastError: store.collector?.lastError || "",
+        lastPollFinishedAt: store.collector?.lastPollFinishedAt || "",
+      },
+      itemCount: items.length,
+      includedLatestItems: latestItems.length,
+      includedRetrievedItems: retrievedItems.length,
+      latestItems: latestItems.map(newsItemForContext),
+      retrievedItems,
+    };
+
+    return [
+      "[News Feed 데이터 컨텍스트]",
+      "현재 사용자는 News Feed 화면에 있다. 오른쪽 Codex 채팅은 기본적으로 GuiBuild/data/news-feed.json의 최신 스냅샷을 참고해야 한다.",
+      "아래 JSON은 최신 항목과 사용자 질문 기반 RAG 검색 결과를 함께 담는다. 데이터에 없는 사실은 있다고 꾸미지 않는다. 사용자가 최신 피드 요약, 특정 이슈 검색, 시장 영향 해석을 물으면 이 컨텍스트를 우선 사용한다.",
+      JSON.stringify(context, null, 2),
+    ].join("\n");
+  } catch (error) {
+    return [
+      "[News Feed 데이터 컨텍스트]",
+      `data/news-feed.json을 읽거나 파싱하지 못했다: ${error.message}`,
+      "뉴스피드 질문에는 파일 상태 문제를 먼저 설명한다.",
+    ].join("\n");
+  }
+}
+
 function buildChatPrompt(payload) {
   const prompt = String(payload.prompt || "").trim();
   const guiBuildAgents = readGuiBuildAgentsInstructions();
@@ -95,6 +257,7 @@ function buildChatPrompt(payload) {
     "현재 채팅은 로컬 GUI 안의 일반 대화 모드다. 사용자가 명시적으로 실행을 요청하지 않은 로컬 파일 수정, 설치, 삭제, 외부 쓰기 작업은 수행하지 말고 설명이나 확인 질문으로 답한다.",
     "금융 에이전트 GUI의 작업 실행은 나중에 별도 job/승인 흐름으로 연결될 예정이므로, 지금은 질문에 대한 응답을 우선한다.",
     guiBuildAgents ? `GuiBuild/AGENTS.md 지침:\n${guiBuildAgents}` : "GuiBuild/AGENTS.md 지침 파일을 찾을 수 없다.",
+    buildNewsFeedContext(payload),
     historyText ? `최근 대화:\n${historyText}` : "",
     `사용자 요청:\n${prompt}`,
   ]
@@ -143,7 +306,7 @@ export function runCodexChat(payload = {}) {
     }
 
     const model = safeCliValue(payload.model, "gpt-5.5");
-    const reasoning = safeCliValue(payload.reasoning, "low");
+    const reasoning = safeCliValue(payload.reasoning, "high");
     const approval = safeCliValue(payload.approval, "on-request", /^[A-Za-z-]+$/);
     const tempDir = mkdtempSync(join(tmpdir(), "finance-agent-codex-chat-"));
     const outputPath = join(tempDir, "last-message.txt");
@@ -271,6 +434,7 @@ function buildAppServerTurnInput(payload) {
     .join("\n");
 
   return [
+    buildNewsFeedContext(payload),
     historyText ? `최근 대화:\n${historyText}` : "",
     `사용자 요청:\n${prompt}`,
   ]
@@ -294,7 +458,7 @@ export function streamCodexChat(payload = {}, res) {
   }
 
   const model = safeCliValue(payload.model, "gpt-5.5");
-  const reasoning = safeCliValue(payload.reasoning, "low");
+  const reasoning = safeCliValue(payload.reasoning, "high");
   const approval = safeCliValue(payload.approval, "on-request", /^[A-Za-z-]+$/);
   const startedAt = Date.now();
   let stdoutBuffer = "";
@@ -744,7 +908,7 @@ function readModelGroups(config) {
       .map((model) => makeModelGroup(model));
   } catch (error) {
     const fallbackModel = config.model || "gpt-5.5";
-    const fallbackEffort = config.reasoningEffort || "medium";
+    const fallbackEffort = config.reasoningEffort || "high";
     return [
       makeModelGroup({
         slug: fallbackModel,
@@ -796,8 +960,12 @@ function buildSandboxOptions(helpText) {
 }
 
 function selectedModelId(modelOptions, config) {
-  const model = config.model || modelOptions[0]?.model || "";
-  const effort = config.reasoningEffort || "";
+  const model = modelOptions[0]?.model || config.model || "";
+  const effort =
+    modelOptions.find((option) => option.model === model && option.reasoningEffort === "high")?.reasoningEffort ||
+    modelOptions.find((option) => option.model === model)?.reasoningEffort ||
+    config.reasoningEffort ||
+    "";
   return (
     modelOptions.find((option) => option.model === model && option.reasoningEffort === effort)?.id ||
     modelOptions.find((option) => option.model === model)?.id ||
@@ -807,27 +975,29 @@ function selectedModelId(modelOptions, config) {
 }
 
 function selectedModelSlug(modelGroups, config) {
-  const configured = config.model || "";
   return (
-    modelGroups.find((model) => model.slug === configured)?.slug ||
     modelGroups[0]?.slug ||
+    config.model ||
     ""
   );
 }
 
 function selectedReasoningEffort(modelGroups, config) {
   const model = modelGroups.find((item) => item.slug === selectedModelSlug(modelGroups, config)) || modelGroups[0];
-  const configured = config.reasoningEffort || "";
   return (
-    model?.reasoningLevels.find((level) => level.id === configured)?.id ||
+    model?.reasoningLevels.find((level) => level.id === "high")?.id ||
     model?.defaultReasoningLevel ||
     model?.reasoningLevels[0]?.id ||
+    config.reasoningEffort ||
     ""
   );
 }
 
 function selectedApprovalPolicy(approvalOptions, config) {
   const hasOption = (id) => approvalOptions.some((item) => item.id === id);
+  if (hasOption("on-request")) {
+    return "on-request";
+  }
   if (config.approvalPolicy && config.approvalPolicy !== "never" && hasOption(config.approvalPolicy)) {
     return config.approvalPolicy;
   }

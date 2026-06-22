@@ -1,0 +1,32 @@
+{
+  "pollIntervalSeconds": 60,
+  "retentionHours": 24,
+  "maxItemsPerFeed": 500,
+  "translationBatchSize": 8,
+  "feeds": [
+    {
+      "id": "financialjuice",
+      "title": "FinancialJuice",
+      "url": "https://nitter.net/financialjuice/rss",
+      "enabled": true
+    },
+    {
+      "id": "walter-bloomberg",
+      "title": "*Walter Bloomberg",
+      "url": "https://nitter.net/DeItaone/rss",
+      "enabled": false
+    },
+    {
+      "id": "first-squawk",
+      "title": "First Squawk",
+      "url": "https://nitter.net/FirstSquawk/rss",
+      "enabled": false
+    },
+    {
+      "id": "unusual-whales",
+      "title": "Unusual Whales",
+      "url": "https://nitter.net/unusual_whales/rss",
+      "enabled": false
+    }
+  ]
+}
