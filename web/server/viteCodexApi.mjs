@@ -1,6 +1,21 @@
-import { handleArcaEndpoint } from "./arcaApi.mjs";
-import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
+import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
+import { handleEarningsEndpoint } from "./earningsApi.mjs";
+import { handleMemoryEndpoint } from "./memoryApi.mjs";
+import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
+import {
+  getCodexOptionsAsync,
+  handleAgentSettingsEndpoint,
+  readJsonBody,
+  runCodexChat,
+  sendJson,
+  streamCodexChat,
+} from "./codexProbe.mjs";
 import { handleNewsFeedEndpoint, startNewsFeedCollector } from "./newsFeedApi.mjs";
+
+async function handleLazyArcaEndpoint(kind, req, res) {
+  const { handleArcaEndpoint } = await import("./arcaApi.mjs");
+  await handleArcaEndpoint(kind, req, res);
+}
 
 export function codexApiPlugin() {
   return {
@@ -25,15 +40,35 @@ export function codexApiPlugin() {
       });
 
       server.middlewares.use("/api/arca/articles", async (req, res) => {
-        await handleArcaEndpoint("articles", req, res);
+        await handleLazyArcaEndpoint("articles", req, res);
       });
 
       server.middlewares.use("/api/arca/article", async (req, res) => {
-        await handleArcaEndpoint("article", req, res);
+        await handleLazyArcaEndpoint("article", req, res);
       });
 
       server.middlewares.use("/api/arca/probe", async (req, res) => {
-        await handleArcaEndpoint("probe", req, res);
+        await handleLazyArcaEndpoint("probe", req, res);
+      });
+
+      server.middlewares.use("/api/earnings/upcoming", async (req, res) => {
+        await handleEarningsEndpoint("upcoming", req, res);
+      });
+
+      server.middlewares.use("/api/economic-calendar/events", async (req, res) => {
+        await handleEconomicCalendarEndpoint("events", req, res);
+      });
+
+      server.middlewares.use("/api/portfolio/backtest", async (req, res) => {
+        await handlePortfolioEndpoint("backtest", req, res);
+      });
+
+      server.middlewares.use("/api/memory/context", async (req, res) => {
+        await handleMemoryEndpoint("context", req, res);
+      });
+
+      server.middlewares.use("/api/memory", async (req, res) => {
+        await handleMemoryEndpoint("memory", req, res);
       });
 
       server.middlewares.use("/api/codex/chat/stream", async (req, res) => {
@@ -49,6 +84,10 @@ export function codexApiPlugin() {
         }
       });
 
+      server.middlewares.use("/api/codex/settings", async (req, res) => {
+        await handleAgentSettingsEndpoint(req, res);
+      });
+
       server.middlewares.use("/api/codex/chat", async (req, res) => {
         if (req.method !== "POST") {
           sendJson(res, { error: "method not allowed" }, 405);
@@ -62,9 +101,9 @@ export function codexApiPlugin() {
         }
       });
 
-      server.middlewares.use("/api/codex/options", (_req, res) => {
+      server.middlewares.use("/api/codex/options", async (_req, res) => {
         try {
-          sendJson(res, getCodexOptions());
+          sendJson(res, await getCodexOptionsAsync());
         } catch (error) {
           sendJson(res, { error: error.message }, 500);
         }

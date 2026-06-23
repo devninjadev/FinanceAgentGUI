@@ -1,0 +1,40 @@
+.DS_Store
+Thumbs.db
+
+# Local environment and user-specific config
+.env
+.env.*
+!.env.example
+/config/*.user.json
+/config/news-feeds.json
+
+# Runtime logs
+*.log
+/logs/
+
+# Private runtime memory and user workspace state
+/data/agent-attachments/*
+/data/shared-memory/*
+!/data/shared-memory/.gitkeep
+/data/**/chat*.json
+/data/**/conversation*.json
+/data/**/portfolio-canvas*.json
+/data/**/portfolio-canvases*.json
+/data/**/workspace-state*.json
+
+# Generated local feed/calendar caches
+/data/news-feed.json
+/data/*-cache.json
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Web build and test artifacts
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/.vite/
+npm-debug.log*

@@ -3,14 +3,25 @@ import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleArcaEndpoint } from "./arcaApi.mjs";
-import { getCodexOptions, readJsonBody, runCodexChat, sendJson, streamCodexChat } from "./codexProbe.mjs";
+import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
+import { handleEarningsEndpoint } from "./earningsApi.mjs";
+import { handleMemoryEndpoint } from "./memoryApi.mjs";
+import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
+import {
+  getCodexOptionsAsync,
+  handleAgentSettingsEndpoint,
+  readJsonBody,
+  runCodexChat,
+  sendJson,
+  streamCodexChat,
+} from "./codexProbe.mjs";
 import { handleNewsFeedEndpoint, startNewsFeedCollector } from "./newsFeedApi.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(__dirname, "..");
 const dist = join(root, "dist");
-const host = process.env.HOST || "127.0.0.1";
-const port = Number(process.env.PORT || 5173);
+const host = process.env.FINANCE_AGENT_GUI_HOST || "127.0.0.1";
+const port = Number(process.env.FINANCE_AGENT_GUI_PORT || process.env.PORT || 5173);
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -34,6 +45,11 @@ function serveStatic(req, res) {
     filePath = join(dist, "index.html");
   }
   res.setHeader("Content-Type", mimeTypes[extname(filePath)] || "application/octet-stream");
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
   createReadStream(filePath).pipe(res);
 }
 
@@ -73,6 +89,31 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/earnings/upcoming")) {
+    await handleEarningsEndpoint("upcoming", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/economic-calendar/events")) {
+    await handleEconomicCalendarEndpoint("events", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/portfolio/backtest")) {
+    await handlePortfolioEndpoint("backtest", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/memory/context")) {
+    await handleMemoryEndpoint("context", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/memory")) {
+    await handleMemoryEndpoint("memory", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/codex/chat/stream")) {
     if (req.method !== "POST") {
       sendJson(res, { error: "method not allowed" }, 405);
@@ -84,6 +125,11 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, { error: error.message }, 500);
     }
+    return;
+  }
+
+  if (req.url?.startsWith("/api/codex/settings")) {
+    await handleAgentSettingsEndpoint(req, res);
     return;
   }
 
@@ -103,7 +149,7 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/codex/options")) {
     try {
-      sendJson(res, getCodexOptions());
+      sendJson(res, await getCodexOptionsAsync());
     } catch (error) {
       sendJson(res, { error: error.message }, 500);
     }
@@ -118,8 +164,9 @@ const server = createServer(async (req, res) => {
   serveStatic(req, res);
 });
 
-startNewsFeedCollector();
-
 server.listen(port, host, () => {
   console.log(`FinanceAgentGUI web server listening on http://${host}:${port}/`);
+  setTimeout(() => {
+    startNewsFeedCollector();
+  }, 0);
 });

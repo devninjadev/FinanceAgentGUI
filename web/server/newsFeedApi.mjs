@@ -12,7 +12,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { XMLParser } from "fast-xml-parser";
-import { getCodexOptions, readJsonBody, sendJson } from "./codexProbe.mjs";
+import {
+  getCodexOptions,
+  readJsonBody,
+  runAntigravityGenerate,
+  sendJson,
+} from "./codexProbe.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
@@ -22,12 +27,17 @@ const DEFAULT_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.defaults.json");
 const USER_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.user.json");
 const LEGACY_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.json");
 const STORE_PATH = join(DATA_DIR, "news-feed.json");
-const DEFAULT_POLL_INTERVAL_SECONDS = 60;
+const DEFAULT_POLL_INTERVAL_SECONDS = 180;
 const DEFAULT_RETENTION_HOURS = 24;
 const DEFAULT_TRANSLATION_BATCH_SIZE = 8;
 const DEFAULT_MAX_ITEMS_PER_FEED = 500;
 const TRANSLATION_TIMEOUT_MS = 180000;
 const FETCH_TIMEOUT_MS = 20000;
+const FEED_FETCH_STAGGER_WINDOW_MS = 60000;
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
+const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
+const ANTIGRAVITY_FALLBACK_MODEL = "gemini-3.5-flash";
 const runtimeKey = Symbol.for("financeAgentGui.newsFeedCollector");
 const defaultFeedHeaders = {
   accept: "application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.5",
@@ -88,6 +98,33 @@ const fallbackConfig = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function staggeredFeedPlan(feeds, windowMs = FEED_FETCH_STAGGER_WINDOW_MS) {
+  const enabledFeeds = feeds.filter((feed) => feed.enabled);
+  if (enabledFeeds.length <= 1 || windowMs <= 0) {
+    return enabledFeeds.map((feed) => ({ feed, delayMs: 0 }));
+  }
+
+  const rawPlan = enabledFeeds.map((feed) => ({
+    feed,
+    delayMs: Math.floor(Math.random() * (windowMs + 1)),
+  }));
+  const firstDelayMs = Math.min(...rawPlan.map((item) => item.delayMs));
+  return rawPlan
+    .map((item) => ({ ...item, delayMs: item.delayMs - firstDelayMs }))
+    .sort((a, b) => a.delayMs - b.delayMs || a.feed.id.localeCompare(b.feed.id));
+}
+
+async function waitUntilFeedOffset(collectionStartedAtMs, delayMs) {
+  const remainingMs = collectionStartedAtMs + delayMs - Date.now();
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
 }
 
 function ensureDirs() {
@@ -251,8 +288,8 @@ function normalizeNewsFeedConfig(config = {}) {
 
   return {
     pollIntervalSeconds: Math.max(
-      15,
-      Number(raw.pollIntervalSeconds || DEFAULT_POLL_INTERVAL_SECONDS)
+      60,
+      Math.min(600, Number(raw.pollIntervalSeconds || DEFAULT_POLL_INTERVAL_SECONDS))
     ),
     retentionHours: Math.max(1, Number(raw.retentionHours || DEFAULT_RETENTION_HOURS)),
     maxItemsPerFeed: Math.max(50, Number(raw.maxItemsPerFeed || DEFAULT_MAX_ITEMS_PER_FEED)),
@@ -432,6 +469,21 @@ function runtimeState() {
   return globalThis[runtimeKey];
 }
 
+function scheduleNewsFeedCollector(
+  config = readNewsFeedConfig(),
+  delayMs = config.pollIntervalSeconds * 1000
+) {
+  const runtime = runtimeState();
+  if (!runtime.started || process.env.NEWS_FEED_COLLECTOR_DISABLED === "1") return;
+  if (runtime.timer) clearTimeout(runtime.timer);
+  const safeDelayMs = Math.max(0, Number(delayMs) || 0);
+  runtime.nextPollAt = new Date(Date.now() + safeDelayMs).toISOString();
+  runtime.timer = setTimeout(() => {
+    runtime.timer = null;
+    void refreshNewsFeeds("interval");
+  }, safeDelayMs);
+}
+
 function collectorStatusFromStore(store, config) {
   const runtime = runtimeState();
   const enabledFeeds = config.feeds.filter((feed) => feed.enabled);
@@ -517,12 +569,19 @@ async function fetchFeedXml(feed) {
   throw lastError || new Error("RSS 응답을 가져오지 못했습니다.");
 }
 
-function chooseTranslationModel() {
-  const options = getCodexOptions();
-  if (!options.codex?.available) {
-    throw new Error(options.codex?.error || "codex command not found");
-  }
+function latestAntigravityTranslationModel(options) {
+  const catalogModels = Array.isArray(options.antigravityModelCatalog?.models)
+    ? options.antigravityModelCatalog.models.filter((item) => item?.selectable && item?.name)
+    : [];
+  return (
+    catalogModels[0]?.name ||
+    options.selected?.model ||
+    options.antigravity?.vertex?.model ||
+    ANTIGRAVITY_FALLBACK_MODEL
+  );
+}
 
+function codexTranslationModel(options) {
   const group = options.modelGroups?.[0];
   if (!group?.slug) {
     throw new Error("Codex 모델 카탈로그가 비어 있습니다.");
@@ -535,7 +594,53 @@ function chooseTranslationModel() {
     supported[0] ||
     "low";
 
-  return { model: group.slug, reasoning };
+  return {
+    provider: "codex-cli",
+    providerLabel: "Codex CLI",
+    model: group.slug,
+    modelLabel: group.slug,
+    reasoning,
+  };
+}
+
+function antigravityTranslationModel(options) {
+  const status = options.antigravity || {};
+  if (!status.ready) {
+    throw new Error(status.detail || status.error || "Antigravity SDK가 번역에 사용할 준비가 되지 않았습니다.");
+  }
+
+  const project = status.vertex?.project || "";
+  const location = status.vertex?.location || "global";
+  if (!project) {
+    throw new Error("Antigravity SDK 번역을 위한 Vertex project가 설정되지 않았습니다.");
+  }
+
+  const model = latestAntigravityTranslationModel(options);
+  return {
+    provider: ANTIGRAVITY_PROVIDER_ID,
+    providerLabel: "Antigravity SDK",
+    model,
+    modelLabel: `Antigravity SDK · ${location}/${model}`,
+    reasoning: ANTIGRAVITY_TRANSLATION_REASONING,
+    thinkingLevel: ANTIGRAVITY_TRANSLATION_THINKING_LEVEL,
+    project,
+    location,
+  };
+}
+
+function chooseTranslationModel() {
+  const options = getCodexOptions();
+  const selectedProvider = options.selected?.provider || "";
+
+  if (selectedProvider === ANTIGRAVITY_PROVIDER_ID) {
+    return antigravityTranslationModel(options);
+  }
+
+  if (!options.codex?.available) {
+    throw new Error(options.codex?.error || "codex command not found");
+  }
+
+  return codexTranslationModel(options);
 }
 
 function translationPrompt(items) {
@@ -561,7 +666,7 @@ function translationPrompt(items) {
 
 function parseJsonPayload(text) {
   const raw = String(text || "").trim();
-  if (!raw) throw new Error("Codex 번역 응답이 비어 있습니다.");
+  if (!raw) throw new Error("번역 응답이 비어 있습니다.");
   try {
     return JSON.parse(raw);
   } catch {
@@ -569,7 +674,7 @@ function parseJsonPayload(text) {
     if (fenced) return JSON.parse(fenced[1]);
     const objectMatch = raw.match(/\{[\s\S]*\}/);
     if (objectMatch) return JSON.parse(objectMatch[0]);
-    throw new Error("Codex 번역 응답을 JSON으로 해석하지 못했습니다.");
+    throw new Error("번역 응답을 JSON으로 해석하지 못했습니다.");
   }
 }
 
@@ -678,6 +783,18 @@ function runCodexTranslationBatch(items, modelInfo) {
   });
 }
 
+async function runAntigravityTranslationBatch(items, modelInfo) {
+  const result = await runAntigravityGenerate({
+    prompt: translationPrompt(items),
+    model: modelInfo.model,
+    project: modelInfo.project,
+    location: modelInfo.location,
+    webGrounding: false,
+    thinkingLevel: modelInfo.thinkingLevel,
+  });
+  return parseJsonPayload(result.answer);
+}
+
 async function translateItems(items, batchSize) {
   if (!items.length) return { translations: [], model: "", reasoning: "" };
   const modelInfo = chooseTranslationModel();
@@ -685,11 +802,18 @@ async function translateItems(items, batchSize) {
 
   for (let index = 0; index < items.length; index += batchSize) {
     const batch = items.slice(index, index + batchSize);
-    const payload = await runCodexTranslationBatch(batch, modelInfo);
+    const payload =
+      modelInfo.provider === ANTIGRAVITY_PROVIDER_ID
+        ? await runAntigravityTranslationBatch(batch, modelInfo)
+        : await runCodexTranslationBatch(batch, modelInfo);
     translations.push(...toArray(payload.translations));
   }
 
-  return { translations, model: modelInfo.model, reasoning: modelInfo.reasoning };
+  return {
+    translations,
+    model: modelInfo.modelLabel || modelInfo.model,
+    reasoning: modelInfo.reasoning,
+  };
 }
 
 function updateFeedStatus(store, feed, patch) {
@@ -777,7 +901,7 @@ function startPendingNewsFeedTranslation(batchSize) {
             return {
               ...item,
               translationStatus: "failed",
-              translationError: "Codex 응답에 해당 항목 번역이 없습니다.",
+              translationError: "번역 응답에 해당 항목 번역이 없습니다.",
               translationModel: translated.model,
               translationReasoning: translated.reasoning,
             };
@@ -836,10 +960,19 @@ function startPendingNewsFeedTranslation(batchSize) {
 async function refreshNewsFeeds(reason = "manual") {
   const runtime = runtimeState();
   if (runtime.inFlight) return runtime.inFlight;
+  if (runtime.timer) {
+    clearTimeout(runtime.timer);
+    runtime.timer = null;
+  }
 
   runtime.inFlight = (async () => {
     const config = readNewsFeedConfig();
-    const startedAt = nowIso();
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    const enabledFeeds = config.feeds.filter((feed) => feed.enabled);
+    const feedPlan = staggeredFeedPlan(enabledFeeds);
+    const staggerWindowSeconds =
+      feedPlan.length > 1 ? Math.round(FEED_FETCH_STAGGER_WINDOW_MS / 1000) : 0;
     let store = readStore();
     const existingFingerprints = new Set(store.items.map((item) => item.sourceFingerprint).filter(Boolean));
     const newItems = [];
@@ -849,21 +982,31 @@ async function refreshNewsFeeds(reason = "manual") {
       ...store.collector,
       running: true,
       status: "polling",
-      lastAction: reason === "manual" ? "수동 수집 중" : "자동 수집 중",
+      lastAction:
+        staggerWindowSeconds > 0
+          ? `${reason === "manual" ? "수동" : "자동"} 수집 중 · ${enabledFeeds.length}개 피드 최대 ${staggerWindowSeconds}초 분산`
+          : reason === "manual"
+            ? "수동 수집 중"
+            : "자동 수집 중",
       lastError: "",
       lastPollStartedAt: startedAt,
+      feedStaggerWindowSeconds: staggerWindowSeconds,
+      feedStaggerPlan: feedPlan.map(({ feed, delayMs }) => ({
+        feedId: feed.id,
+        delaySeconds: Math.round(delayMs / 1000),
+      })),
       lastNewCount: 0,
       lastTranslatedCount: 0,
     };
     store = writeStore(store);
 
-    for (const feed of config.feeds) {
-      if (!feed.enabled) {
-        updateFeedStatus(store, feed, { lastFetchStatus: "disabled", lastError: "" });
-        continue;
-      }
+    for (const feed of config.feeds.filter((feed) => !feed.enabled)) {
+      updateFeedStatus(store, feed, { lastFetchStatus: "disabled", lastError: "" });
+    }
 
+    for (const { feed, delayMs } of feedPlan) {
       try {
+        await waitUntilFeedOffset(startedAtMs, delayMs);
         const xml = await fetchFeedXml(feed);
         const parsed = parseFeedXml(xml, feed);
         const feedNewItems = [];
@@ -904,6 +1047,7 @@ async function refreshNewsFeeds(reason = "manual") {
       lastAction: newItems.length ? `${newItems.length}개 신규 항목 저장, 번역 대기열 등록` : "신규 항목 없음",
       lastError: issues.map((issue) => `${issue.feedId}: ${issue.message}`).join(" / "),
       lastPollFinishedAt: nowIso(),
+      feedStaggerWindowSeconds: staggerWindowSeconds,
       lastNewCount: newItems.length,
       lastTranslatedCount: 0,
     };
@@ -917,7 +1061,11 @@ async function refreshNewsFeeds(reason = "manual") {
   })().finally(() => {
     const config = readNewsFeedConfig();
     runtime.inFlight = null;
-    runtime.nextPollAt = new Date(Date.now() + config.pollIntervalSeconds * 1000).toISOString();
+    if (runtime.started && process.env.NEWS_FEED_COLLECTOR_DISABLED !== "1") {
+      scheduleNewsFeedCollector(config);
+    } else {
+      runtime.nextPollAt = "";
+    }
   });
 
   return runtime.inFlight;
@@ -927,13 +1075,8 @@ export function startNewsFeedCollector() {
   const runtime = runtimeState();
   if (runtime.started || process.env.NEWS_FEED_COLLECTOR_DISABLED === "1") return;
 
-  const config = readNewsFeedConfig();
   runtime.started = true;
   runtime.startedAt = nowIso();
-  runtime.nextPollAt = new Date(Date.now() + config.pollIntervalSeconds * 1000).toISOString();
-  runtime.timer = setInterval(() => {
-    void refreshNewsFeeds("interval");
-  }, config.pollIntervalSeconds * 1000);
 
   void refreshNewsFeeds("startup").finally(() => {
     const latestConfig = readNewsFeedConfig();
@@ -952,21 +1095,46 @@ export async function handleNewsFeedEndpoint(kind, req, res) {
       if (req.method === "PATCH" || req.method === "POST") {
         const body = await readJsonBody(req);
         const feedId = safeId(body.feedId || body.id, "");
-        const enabled = Boolean(body.enabled);
         const config = readNewsFeedConfig();
-        const feed = config.feeds.find((item) => item.id === feedId);
-        if (!feed) {
-          sendJson(res, { ok: false, error: "feed not found" }, 404);
+        const hasPollInterval = body.pollIntervalSeconds !== undefined;
+        const pollIntervalSeconds = hasPollInterval
+          ? Math.max(60, Math.min(600, Number(body.pollIntervalSeconds || 0)))
+          : config.pollIntervalSeconds;
+
+        if (hasPollInterval && !Number.isFinite(pollIntervalSeconds)) {
+          sendJson(res, { ok: false, error: "invalid poll interval" }, 400);
           return;
         }
 
-        const nextFeeds = config.feeds.map((item) =>
-          item.id === feedId ? { ...item, enabled } : item
-        );
-        const nextConfig = writeNewsFeedConfig({ ...config, feeds: nextFeeds });
-        const nextFeed = nextConfig.feeds.find((item) => item.id === feedId);
-        if (nextFeed) updateStoreFeedEnabled(nextFeed, enabled);
-        if (nextFeed?.enabled) await refreshNewsFeeds("settings");
+        let nextFeeds = config.feeds;
+        let nextFeed = null;
+        let enabled = null;
+        if (feedId) {
+          enabled = Boolean(body.enabled);
+          const feed = config.feeds.find((item) => item.id === feedId);
+          if (!feed) {
+            sendJson(res, { ok: false, error: "feed not found" }, 404);
+            return;
+          }
+          nextFeeds = config.feeds.map((item) =>
+            item.id === feedId ? { ...item, enabled } : item
+          );
+        } else if (!hasPollInterval) {
+          sendJson(res, { ok: false, error: "settings patch is empty" }, 400);
+          return;
+        }
+
+        const nextConfig = writeNewsFeedConfig({
+          ...config,
+          pollIntervalSeconds,
+          feeds: nextFeeds,
+        });
+        scheduleNewsFeedCollector(nextConfig);
+        if (feedId) {
+          nextFeed = nextConfig.feeds.find((item) => item.id === feedId);
+          if (nextFeed) updateStoreFeedEnabled(nextFeed, enabled);
+          if (nextFeed?.enabled) await refreshNewsFeeds("settings");
+        }
         sendJson(res, publicSettingsSnapshot());
         return;
       }

@@ -1,0 +1,114 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { readJsonBody, sendJson } from "./codexProbe.mjs";
+
+const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
+const BACKTEST_SCRIPT = join(GUIBUILD_ROOT, "scripts", "portfolio_backtest_yfinance.py");
+const BACKTEST_TIMEOUT_MS = 60000;
+
+function runYfinanceBacktest(payload) {
+  return new Promise((resolveRun) => {
+    if (!existsSync(BACKTEST_SCRIPT)) {
+      resolveRun({
+        ok: false,
+        code: "BACKTEST_SCRIPT_MISSING",
+        error: "scripts/portfolio_backtest_yfinance.py was not found.",
+      });
+      return;
+    }
+
+    const python = process.env.FINANCE_AGENT_GUI_PYTHON || process.env.PYTHON || "python3";
+    const child = spawn(python, [BACKTEST_SCRIPT], {
+      cwd: GUIBUILD_ROOT,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      resolveRun({
+        ok: false,
+        code: "YFINANCE_BACKTEST_TIMEOUT",
+        error: `yfinance backtest exceeded ${Math.round(BACKTEST_TIMEOUT_MS / 1000)}s.`,
+      });
+    }, BACKTEST_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveRun({
+        ok: false,
+        code: "YFINANCE_BACKTEST_SPAWN_FAILED",
+        error: error.message,
+      });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0 && !stdout.trim()) {
+        resolveRun({
+          ok: false,
+          code: "YFINANCE_BACKTEST_FAILED",
+          error: stderr.trim() || `python exited with code ${code}`,
+        });
+        return;
+      }
+
+      try {
+        const payloadJson = JSON.parse(stdout.trim());
+        resolveRun({
+          ...payloadJson,
+          stderrTail: stderr.trim().split(/\r?\n/).slice(-5).join("\n"),
+        });
+      } catch (error) {
+        resolveRun({
+          ok: false,
+          code: "YFINANCE_BACKTEST_BAD_JSON",
+          error: error.message,
+          stdoutTail: stdout.trim().slice(-1000),
+          stderrTail: stderr.trim().slice(-1000),
+        });
+      }
+    });
+
+    child.stdin.end(JSON.stringify(payload || {}));
+  });
+}
+
+export async function handlePortfolioEndpoint(kind, req, res) {
+  if (kind !== "backtest") {
+    sendJson(res, { ok: false, error: "unknown portfolio endpoint" }, 404);
+    return;
+  }
+  if (req.method !== "POST") {
+    sendJson(res, { ok: false, error: "method not allowed" }, 405);
+    return;
+  }
+
+  try {
+    const body = await readJsonBody(req);
+    const result = await runYfinanceBacktest(body);
+    sendJson(res, result, result.ok ? 200 : 422);
+  } catch (error) {
+    sendJson(res, { ok: false, error: error.message }, 500);
+  }
+}
