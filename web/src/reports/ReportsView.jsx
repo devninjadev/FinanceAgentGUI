@@ -6,6 +6,7 @@ import Search from "lucide-react/dist/esm/icons/search.js";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 
 import { PortfolioEChart } from "../portfolio/PortfolioEChart.jsx";
+import { MarkdownText } from "../utils/MarkdownText.jsx";
 
 function reportSearchText(report = {}) {
   return [
@@ -65,7 +66,7 @@ function ReportSection({ section }) {
     return (
       <section className="report-chart-section">
         <h2>{section.heading}</h2>
-        {section.body ? <p>{section.body}</p> : null}
+        {section.body ? <MarkdownText text={section.body} /> : null}
         <div className="report-chart-frame">
           <PortfolioEChart
             option={section.option}
@@ -79,7 +80,7 @@ function ReportSection({ section }) {
   return (
     <section>
       <h2>{section.heading}</h2>
-      <p>{section.body}</p>
+      <MarkdownText text={section.body} />
     </section>
   );
 }

@@ -836,6 +836,42 @@ button {
   white-space: pre-wrap;
 }
 
+.report-document-body .markdown-body {
+  gap: 12px;
+  color: #3e4846;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.report-document-body .markdown-heading {
+  margin-top: 6px;
+  color: #27302e;
+  font-size: 16px;
+}
+
+.report-document-body .chat-table-wrap {
+  margin: 3px 0 4px;
+  border-color: #dfe7e5;
+  border-radius: 8px;
+}
+
+.report-document-body .chat-table {
+  min-width: 560px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.report-document-body .chat-table th,
+.report-document-body .chat-table td {
+  padding: 10px 12px;
+  border-bottom-color: #edf1f0;
+}
+
+.report-document-body .chat-table th {
+  color: #4f5d59;
+  background: #f6f8f7;
+}
+
 .report-chart-section {
   gap: 12px;
 }
