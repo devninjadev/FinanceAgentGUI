@@ -3,10 +3,13 @@ import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleArcaEndpoint } from "./arcaApi.mjs";
+import { handleArcaAuthEndpoint } from "./arcaAuthApi.mjs";
 import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
 import { handleMemoryEndpoint } from "./memoryApi.mjs";
 import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
+import { handleReportsEndpoint } from "./reportsApi.mjs";
+import { handleWorldMemoryEndpoint, startWorldMemoryCollector } from "./worldMemoryApi.mjs";
 import {
   getCodexOptionsAsync,
   handleAgentSettingsEndpoint,
@@ -89,6 +92,36 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/arca/notifications")) {
+    await handleArcaEndpoint("notifications", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/auth/status")) {
+    await handleArcaAuthEndpoint("status", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/auth/start")) {
+    await handleArcaAuthEndpoint("start", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/auth/capture")) {
+    await handleArcaAuthEndpoint("capture", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/auth/stop")) {
+    await handleArcaAuthEndpoint("stop", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/arca/auth/session")) {
+    await handleArcaAuthEndpoint("session", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/earnings/upcoming")) {
     await handleEarningsEndpoint("upcoming", req, res);
     return;
@@ -99,8 +132,28 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/portfolio/canvases")) {
+    await handlePortfolioEndpoint("canvases", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/portfolio/backtest")) {
     await handlePortfolioEndpoint("backtest", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/reports")) {
+    await handleReportsEndpoint("list", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/world-memory/status")) {
+    await handleWorldMemoryEndpoint("status", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/world-memory/action")) {
+    await handleWorldMemoryEndpoint("action", req, res);
     return;
   }
 
@@ -168,5 +221,6 @@ server.listen(port, host, () => {
   console.log(`FinanceAgentGUI web server listening on http://${host}:${port}/`);
   setTimeout(() => {
     startNewsFeedCollector();
+    startWorldMemoryCollector();
   }, 0);
 });

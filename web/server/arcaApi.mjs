@@ -1,4 +1,5 @@
 import { parse } from "node-html-parser";
+import { getArcaCookieHeader } from "./arcaAuthApi.mjs";
 import { readJsonBody, sendJson } from "./codexProbe.mjs";
 
 const DEFAULT_BASE_URL = "https://arca.live";
@@ -106,6 +107,7 @@ function getConfig() {
   return {
     baseUrl: normalizeBaseUrl(process.env.ARCA_BASE_URL),
     defaultChannel: normalizeChannel(process.env.ARCA_CHANNEL) || DEFAULT_CHANNEL,
+    authSessionConfigured: Boolean(getArcaCookieHeader()),
     userAgentConfigured: Boolean(process.env.ARCA_USER_AGENT),
   };
 }
@@ -115,6 +117,7 @@ function issue(code, status, message, recovery = "") {
 }
 
 function buildHeaders({ referer = "" } = {}) {
+  const cookieHeader = getArcaCookieHeader();
   const headers = {
     accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-language": "ko-KR,ko;q=0.9,en-US;q=0.6,en;q=0.5",
@@ -123,7 +126,98 @@ function buildHeaders({ referer = "" } = {}) {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) FinanceAgentGUI/0.1 Safari/537.36",
   };
   if (referer) headers.referer = referer;
+  if (cookieHeader) headers.cookie = cookieHeader;
   return headers;
+}
+
+function buildNotificationUrl(config) {
+  return new URL("/u/notification", config.baseUrl);
+}
+
+function likelyLoginPage(response, html) {
+  const finalUrl = String(response?.url || "");
+  return /\/u\/login\b/.test(finalUrl) || /name=["']password["']|login-form|로그인/i.test(String(html || ""));
+}
+
+function firstPositiveIntegerFromSelectors(root, selectors) {
+  for (const selector of selectors) {
+    for (const node of root.querySelectorAll(selector)) {
+      const count = parseInteger(nodeText(node));
+      if (count && count > 0) return { count, source: selector };
+    }
+  }
+  return null;
+}
+
+function countUniqueNotificationNodes(root, selectors) {
+  const seen = new Set();
+  for (const selector of selectors) {
+    for (const node of root.querySelectorAll(selector)) {
+      const key =
+        node.getAttribute("href") ||
+        node.getAttribute("data-id") ||
+        node.getAttribute("data-notification-id") ||
+        nodeText(node);
+      const normalized = String(key || "").replace(/\s+/g, " ").trim();
+      if (normalized) seen.add(normalized);
+    }
+  }
+  return seen.size;
+}
+
+function countUnreadNotificationSections(root) {
+  let count = 0;
+  for (const row of root.querySelectorAll(".notification-items .row.section, .user-notification .row.section")) {
+    const rowText = nodeText(row);
+    const iconClass = String(row.querySelector(".vrow-icon")?.getAttribute("class") || "");
+    const contentClass = String(row.querySelector(".col.row")?.getAttribute("class") || "");
+    if (!rowText) continue;
+    if (/\bread\b/.test(iconClass) || /\bread\b/.test(contentClass)) continue;
+    count += 1;
+  }
+  return count;
+}
+
+function extractNotificationCount(html) {
+  const root = parse(html);
+  const pageText = nodeText(root);
+
+  const explicit = firstPositiveIntegerFromSelectors(root, [
+    ".notification-count",
+    ".notifications-count",
+    ".notification-badge",
+    ".notify-count",
+    ".noti-count",
+    ".badge-notification",
+    ".badge-danger",
+    "[data-notification-count]",
+    "[data-unread-count]",
+  ]);
+  if (explicit) return { count: explicit.count, source: `explicit:${explicit.source}` };
+
+  for (const node of root.querySelectorAll("[data-notification-count], [data-unread-count]")) {
+    const count = parseInteger(node.getAttribute("data-notification-count") || node.getAttribute("data-unread-count"));
+    if (count && count > 0) return { count, source: "explicit:data-attribute" };
+  }
+
+  const unreadCount = countUniqueNotificationNodes(root, [
+    ".notification-item.unread",
+    ".notification-list .unread",
+    ".noti-item.unread",
+    ".notify-item.unread",
+    ".unread-notification",
+    ".is-unread",
+  ]);
+  if (unreadCount > 0) return { count: unreadCount, source: "unread-selector" };
+
+  const unreadSections = countUnreadNotificationSections(root);
+  if (unreadSections > 0) return { count: unreadSections, source: "unread-section" };
+
+  if (/알림이 없습니다|새로운 알림이 없습니다|받은 알림이 없습니다|no notifications/i.test(pageText)) {
+    return { count: 0, source: "empty-message" };
+  }
+
+  return { count: 0, source: "no-unread-marker" };
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
@@ -544,6 +638,105 @@ async function probeChannel(payload = {}) {
   };
 }
 
+async function readNotifications() {
+  const config = getConfig();
+  const cookieHeader = getArcaCookieHeader();
+  const url = buildNotificationUrl(config);
+  const checkedAt = new Date().toISOString();
+
+  if (!cookieHeader) {
+    return {
+      ok: true,
+      config,
+      connected: false,
+      status: "signed-out",
+      count: 0,
+      notificationUrl: url.toString(),
+      checkedAt,
+    };
+  }
+
+  let response;
+  let html = "";
+  try {
+    response = await fetchWithTimeout(url, {
+      headers: buildHeaders({ referer: `${config.baseUrl}/b/${config.defaultChannel}` }),
+      redirect: "follow",
+    });
+    html = await readTextSafely(response);
+  } catch (error) {
+    return {
+      ok: false,
+      config,
+      connected: true,
+      status: "error",
+      count: 0,
+      notificationUrl: url.toString(),
+      error: `아카라이브 알림 조회 실패: ${error.message}`,
+      checkedAt,
+    };
+  }
+
+  if (isCloudflareChallenge(response, html)) {
+    return {
+      ok: false,
+      config,
+      connected: true,
+      status: "error",
+      count: 0,
+      notificationUrl: url.toString(),
+      statusCode: response.status,
+      pageTitle: extractPageTitle(html),
+      error: "Cloudflare challenge로 알림 조회가 차단되었습니다.",
+      checkedAt,
+    };
+  }
+
+  if (likelyLoginPage(response, html)) {
+    return {
+      ok: true,
+      config,
+      connected: false,
+      status: "auth-required",
+      count: 0,
+      notificationUrl: url.toString(),
+      statusCode: response.status,
+      pageTitle: extractPageTitle(html),
+      error: "저장된 세션으로 알림 페이지에 로그인하지 못했습니다.",
+      checkedAt,
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      config,
+      connected: true,
+      status: "error",
+      count: 0,
+      notificationUrl: url.toString(),
+      statusCode: response.status,
+      pageTitle: extractPageTitle(html),
+      error: `아카라이브가 HTTP ${response.status}를 반환했습니다.`,
+      checkedAt,
+    };
+  }
+
+  const parsed = extractNotificationCount(html);
+  return {
+    ok: true,
+    config,
+    connected: true,
+    status: parsed.count > 0 ? "unread" : "idle",
+    count: parsed.count,
+    countSource: parsed.source,
+    notificationUrl: url.toString(),
+    statusCode: response.status,
+    pageTitle: extractPageTitle(html),
+    checkedAt,
+  };
+}
+
 export async function handleArcaEndpoint(endpoint, req, res) {
   try {
     if (endpoint === "articles") {
@@ -570,6 +763,15 @@ export async function handleArcaEndpoint(endpoint, req, res) {
         return;
       }
       sendJson(res, await probeChannel(await readEndpointPayload(req)));
+      return;
+    }
+
+    if (endpoint === "notifications") {
+      if (!["GET", "POST"].includes(req.method || "")) {
+        sendJson(res, { ok: false, error: "method not allowed" }, 405);
+        return;
+      }
+      sendJson(res, await readNotifications());
       return;
     }
 

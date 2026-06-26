@@ -1,0 +1,1958 @@
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { getCodexOptions, readJsonBody, runAntigravityGenerate, runCodexChat, sendJson } from "./codexProbe.mjs";
+
+const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
+const CONFIG_DIR = join(GUIBUILD_ROOT, "config");
+const WORLD_MEMORY_BASE_DIR = join(GUIBUILD_ROOT, "data", "world-memory");
+const WORLD_MEMORY_BASE_ARG = relative(GUIBUILD_ROOT, WORLD_MEMORY_BASE_DIR) || WORLD_MEMORY_BASE_DIR;
+const WORLD_MEMORY_DB_FILE = "world_issue_log.sqlite3";
+const WORLD_MEMORY_DB_PATH = join(WORLD_MEMORY_BASE_DIR, WORLD_MEMORY_DB_FILE);
+const WORLD_MEMORY_STATE_PATH = join(WORLD_MEMORY_BASE_DIR, "collector-state.json");
+const WORLD_MEMORY_PROMPT_PATH = join(CONFIG_DIR, "world-memory-collection.prompt.md");
+const WORLD_MEMORY_LOG_DIR = join(GUIBUILD_ROOT, "logs", "world-memory");
+const WORLD_MEMORY_CLI = join(GUIBUILD_ROOT, "scripts", "world_memory_cli.py");
+const WORLD_MEMORY_HARNESS = join(GUIBUILD_ROOT, "scripts", "world_memory_harness.py");
+const MARKET_ANALYZER = join(GUIBUILD_ROOT, "scripts", "analyze_market.py");
+const WORLD_MEMORY_EMBEDDING_ENGINE = "sentence-transformers";
+const WORLD_MEMORY_EMBEDDING_MODEL = "ibm-granite/granite-embedding-97m-multilingual-r2";
+const COMMAND_TIMEOUT_MS = 120000;
+const FEED_SCAN_TIMEOUT_MS = 180000;
+const WORLD_MEMORY_MODEL_TIMEOUT_MS = 240000;
+const WORLD_MEMORY_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const WORLD_MEMORY_RETRY_INTERVAL_MS = 30 * 60 * 1000;
+const WORLD_MEMORY_HISTORY_LIMIT = 16;
+const OUTPUT_LIMIT = 1024 * 1024;
+const runtimeKey = Symbol.for("financeAgentGui.worldMemoryCollector");
+
+const actionCatalog = [
+  { id: "collectNow", label: "수동 수집", riskLevel: "network" },
+  { id: "pause", label: "다음 수집 6시간 연기", riskLevel: "low" },
+  { id: "init", label: "DB shell 초기화", riskLevel: "low" },
+  { id: "audit", label: "Audit JSON", riskLevel: "low" },
+  { id: "harness", label: "유지보수 하네스", riskLevel: "low" },
+  { id: "list", label: "최근 엔트리 조회", riskLevel: "low" },
+  { id: "states", label: "상태 스냅샷 조회", riskLevel: "low" },
+  { id: "taxonomy", label: "Taxonomy 조회", riskLevel: "low" },
+  { id: "taxonomyRefresh", label: "Taxonomy 재색인", riskLevel: "medium" },
+  { id: "cleanupDryRun", label: "Cleanup dry-run", riskLevel: "low" },
+  { id: "storyLink", label: "스토리 관계 기록", riskLevel: "medium" },
+  { id: "storyMap", label: "스토리 맵 조회", riskLevel: "low" },
+  { id: "storyFamilyReview", label: "스토리 패밀리 리뷰", riskLevel: "low" },
+  { id: "stateAdd", label: "Watch state 기록", riskLevel: "medium" },
+  { id: "embedStatus", label: "임베딩 커버리지", riskLevel: "low" },
+  { id: "semanticSearch", label: "의미 검색", riskLevel: "low" },
+  { id: "refreshReport", label: "보고서/변경 제안 갱신", riskLevel: "low" },
+  { id: "report", label: "월드 메모리 보고서", riskLevel: "low" },
+  { id: "stateSync", label: "파생 상태 동기화", riskLevel: "medium" },
+  { id: "feedScan", label: "원본 FEED 수집 스캔", riskLevel: "network" },
+];
+
+function ensureWorldMemoryDirs() {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  mkdirSync(WORLD_MEMORY_BASE_DIR, { recursive: true });
+  mkdirSync(WORLD_MEMORY_LOG_DIR, { recursive: true });
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function addMs(dateLike, ms) {
+  const base = new Date(dateLike || Date.now()).getTime();
+  const safeBase = Number.isFinite(base) ? base : Date.now();
+  return new Date(safeBase + ms).toISOString();
+}
+
+function timestampMs(dateLike) {
+  const value = new Date(dateLike || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function safeRelative(path) {
+  return path ? relative(GUIBUILD_ROOT, path) : "";
+}
+
+function runtimeState() {
+  if (!globalThis[runtimeKey]) {
+    globalThis[runtimeKey] = {
+      started: false,
+      timer: null,
+      inFlight: null,
+      nextTimerAt: "",
+    };
+  }
+  return globalThis[runtimeKey];
+}
+
+function defaultCollectorState() {
+  const nextRunAt = addMs(Date.now(), WORLD_MEMORY_INTERVAL_MS);
+  return {
+    version: 1,
+    updatedAt: nowIso(),
+    collector: {
+      running: false,
+      status: "idle",
+      lastAction: "대기 중",
+      lastError: "",
+      lastStartedAt: "",
+      lastFinishedAt: "",
+      lastSuccessfulAt: "",
+      lastFailedAt: "",
+      lastTrigger: "",
+      attempt: 0,
+    },
+    schedule: {
+      intervalMs: WORLD_MEMORY_INTERVAL_MS,
+      retryIntervalMs: WORLD_MEMORY_RETRY_INTERVAL_MS,
+      retryWindowMs: WORLD_MEMORY_INTERVAL_MS,
+      nextRunAt,
+      nextRetryAt: "",
+      pausedUntil: "",
+      activeCycle: null,
+    },
+    modelPolicy: defaultModelPolicy(),
+    report: emptyReportState(),
+    history: [],
+  };
+}
+
+function emptyReportState() {
+  return {
+    status: "empty",
+    title: "World Memory 시장 상황 인식",
+    generatedAt: "",
+    path: "",
+    htmlPath: "",
+    jsonPath: "",
+    summary: "아직 작성된 시장 상황 보고서가 없습니다.",
+    suggestions: [
+      "첫 수동 수집을 실행해 FEED 스캔과 빈 월드 메모리 저장소 초기화를 시작합니다.",
+    ],
+    text: "",
+    view: null,
+  };
+}
+
+function readJsonFile(path) {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonFile(path, payload) {
+  ensureWorldMemoryDirs();
+  writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function readCollectorState() {
+  ensureWorldMemoryDirs();
+  const raw = readJsonFile(WORLD_MEMORY_STATE_PATH);
+  if (!raw || typeof raw !== "object") {
+    const initial = defaultCollectorState();
+    writeCollectorState(initial);
+    return initial;
+  }
+
+  const base = defaultCollectorState();
+  return {
+    ...base,
+    ...raw,
+    collector: { ...base.collector, ...(raw.collector || {}) },
+    schedule: { ...base.schedule, ...(raw.schedule || {}) },
+    modelPolicy: { ...base.modelPolicy, ...(raw.modelPolicy || {}) },
+    report: { ...base.report, ...(raw.report || {}) },
+    history: Array.isArray(raw.history) ? raw.history.slice(0, WORLD_MEMORY_HISTORY_LIMIT) : [],
+  };
+}
+
+function writeCollectorState(state) {
+  const next = {
+    ...state,
+    updatedAt: nowIso(),
+    history: Array.isArray(state.history) ? state.history.slice(0, WORLD_MEMORY_HISTORY_LIMIT) : [],
+  };
+  writeJsonFile(WORLD_MEMORY_STATE_PATH, next);
+  return next;
+}
+
+function updateCollectorState(mutator) {
+  const current = readCollectorState();
+  const next = typeof mutator === "function" ? mutator(current) : { ...current, ...(mutator || {}) };
+  return writeCollectorState(next);
+}
+
+function appendHistory(state, record) {
+  return {
+    ...state,
+    history: [
+      {
+        id: record.id || `wm_${Date.now()}`,
+        at: nowIso(),
+        ...record,
+      },
+      ...(Array.isArray(state.history) ? state.history : []),
+    ].slice(0, WORLD_MEMORY_HISTORY_LIMIT),
+  };
+}
+
+function clampInteger(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(numeric)));
+}
+
+function parseEnum(value, allowed, fallback) {
+  const text = String(value || "").trim();
+  return allowed.includes(text) ? text : fallback;
+}
+
+function commandTextArg(value, fieldName, maxLength = 240) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) throw new Error(`${fieldName} is required`);
+  return text.slice(0, maxLength);
+}
+
+function optionalCommandTextArg(value, maxLength = 400) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, maxLength) : "";
+}
+
+function commandFloat(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function defaultModelPolicy() {
+  return {
+    codex: {
+      provider: "codex-cli",
+      providerLabel: "Codex CLI",
+      model: "gpt-5.5",
+      modelLabel: "latest available Codex model",
+      reasoning: "high",
+      role: "collection + report generation",
+    },
+    antigravity: {
+      provider: "antigravity-sdk",
+      providerLabel: "Antigravity SDK",
+      model: "gemini-3.5-flash",
+      modelLabel: "latest available Antigravity model",
+      reasoning: "medium",
+      role: "collection + report generation",
+    },
+    resolvedAt: "",
+    source: "fallback",
+  };
+}
+
+function resolveWorldMemoryModelPolicy() {
+  const fallback = defaultModelPolicy();
+  try {
+    const options = getCodexOptions();
+    const codexGroup = Array.isArray(options.modelGroups) ? options.modelGroups[0] : null;
+    const codexReasoningLevels = Array.isArray(codexGroup?.reasoningLevels)
+      ? codexGroup.reasoningLevels.map((level) => level.id)
+      : [];
+    const antigravityModels = Array.isArray(options.antigravityModelCatalog?.models)
+      ? options.antigravityModelCatalog.models.filter((item) => item?.selectable && item?.name)
+      : [];
+    const antigravityModel =
+      antigravityModels[0]?.name ||
+      options.antigravity?.vertex?.model ||
+      options.agentSettings?.settings?.providers?.["antigravity-sdk"]?.model ||
+      fallback.antigravity.model;
+
+    return {
+      codex: {
+        ...fallback.codex,
+        available: Boolean(options.codex?.available),
+        model: codexGroup?.slug || options.codex?.config?.model || fallback.codex.model,
+        modelLabel: codexGroup?.displayName || codexGroup?.slug || fallback.codex.modelLabel,
+        reasoning: codexReasoningLevels.includes("high")
+          ? "high"
+          : codexGroup?.defaultReasoningLevel || codexReasoningLevels[0] || "high",
+      },
+      antigravity: {
+        ...fallback.antigravity,
+        available: Boolean(options.antigravity?.ready),
+        model: antigravityModel,
+        modelLabel: antigravityModels[0]?.displayName || antigravityModel,
+        reasoning: "medium",
+        location: options.antigravity?.vertex?.location || "",
+        project: options.antigravity?.vertex?.project || "",
+        projectConfigured: Boolean(options.antigravity?.vertex?.project),
+      },
+      resolvedAt: nowIso(),
+      source: "runtime-options",
+    };
+  } catch (error) {
+    return {
+      ...fallback,
+      resolvedAt: nowIso(),
+      source: "fallback",
+      error: error.message,
+    };
+  }
+}
+
+function safeOutput(text) {
+  const source = String(text || "");
+  if (source.length <= OUTPUT_LIMIT) return source;
+  return `${source.slice(0, OUTPUT_LIMIT)}\n...[truncated ${source.length - OUTPUT_LIMIT} chars]`;
+}
+
+function tryParseJson(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonPayload(text) {
+  const raw = String(text || "").trim();
+  if (!raw) throw new Error("모델 응답이 비어 있습니다.");
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) return JSON.parse(fenced[1]);
+    const arrayMatch = raw.match(/\[[\s\S]*\]/);
+    if (arrayMatch) return JSON.parse(arrayMatch[0]);
+    const objectMatch = raw.match(/\{[\s\S]*\}/);
+    if (objectMatch) return JSON.parse(objectMatch[0]);
+    throw new Error("모델 응답을 JSON으로 해석하지 못했습니다.");
+  }
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.briefs)) return value.briefs;
+  if (Array.isArray(value?.items)) return value.items;
+  if (Array.isArray(value?.entries)) return value.entries;
+  return [];
+}
+
+function normalizeBriefRows(payload) {
+  const rows = asArray(payload)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      ...item,
+      title: String(item.title || "").trim(),
+      summary: String(item.summary || "").trim(),
+      why_it_matters: String(item.why_it_matters || item.whyItMatters || "").trim(),
+      portfolio_link: String(item.portfolio_link || item.portfolioLink || "").trim(),
+      dedupe_key: String(item.dedupe_key || item.dedupeKey || item.title || "").trim(),
+      sources: Array.isArray(item.sources) ? item.sources : [],
+    }))
+    .filter((item) => item.title && item.summary && item.sources.length);
+
+  return rows.slice(0, 8);
+}
+
+function findPythonCommand() {
+  const localVenvPython =
+    process.platform === "win32"
+      ? join(GUIBUILD_ROOT, ".venv", "Scripts", "python.exe")
+      : join(GUIBUILD_ROOT, ".venv", "bin", "python");
+  const candidates =
+    process.platform === "win32"
+      ? [
+          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/Scripts/python.exe" },
+          { command: "py", argsPrefix: ["-3"], display: "py -3" },
+          { command: "python", argsPrefix: [], display: "python" },
+          { command: "python3", argsPrefix: [], display: "python3" },
+        ]
+      : [
+          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/bin/python" },
+          { command: "python3", argsPrefix: [], display: "python3" },
+          { command: "python", argsPrefix: [], display: "python" },
+        ];
+
+  for (const candidate of candidates) {
+    if (candidate.command.includes(".venv") && !existsSync(candidate.command)) continue;
+    const result = spawnSync(candidate.command, [...candidate.argsPrefix, "--version"], {
+      encoding: "utf8",
+      timeout: 3000,
+    });
+    if (!result.error && result.status === 0) return candidate;
+  }
+  return null;
+}
+
+function probePythonDependencies(python) {
+  if (!python) {
+    return {
+      ok: false,
+      python: null,
+      modules: {},
+      missingRequired: ["python"],
+      issues: [{ code: "PYTHON_NOT_FOUND", status: "error", message: "Python 실행 파일을 찾을 수 없습니다." }],
+    };
+  }
+
+  const script = [
+    "import importlib.util, json, sys",
+    "mods = ['pandas', 'requests', 'yfinance', 'sentence_transformers']",
+    "payload = {'python': sys.executable, 'modules': {m: bool(importlib.util.find_spec(m)) for m in mods}}",
+    "print(json.dumps(payload))",
+  ].join("\n");
+  const result = spawnSync(python.command, [...python.argsPrefix, "-c", script], {
+    cwd: GUIBUILD_ROOT,
+    encoding: "utf8",
+    timeout: 8000,
+  });
+  const parsed = tryParseJson(result.stdout);
+  const modules = parsed?.modules || {};
+  const missingRequired = ["pandas"].filter((name) => !modules[name]);
+  const issues = [];
+  if (result.error || result.status !== 0) {
+    issues.push({
+      code: "PYTHON_DEPENDENCY_PROBE_FAILED",
+      status: "error",
+      message: result.error?.message || result.stderr || `python exited ${result.status}`,
+    });
+  }
+  for (const name of missingRequired) {
+    issues.push({
+      code: "WORLD_MEMORY_REQUIRED_DEP_MISSING",
+      status: "error",
+      message: `${name}가 없어 world_memory_cli.py를 import할 수 없습니다.`,
+      installCommand: `${python.display} -m pip install -r requirements.txt`,
+    });
+  }
+  for (const name of ["yfinance", "sentence_transformers"]) {
+    if (!modules[name]) {
+      issues.push({
+        code: "WORLD_MEMORY_OPTIONAL_DEP_MISSING",
+        status: "warning",
+        message:
+          name === "yfinance"
+            ? "yfinance가 없어 FEED 스캔의 시장 스냅샷과 일부 자료수집이 제한됩니다."
+            : "sentence-transformers가 없어 semantic-search/embed-build는 설치 전까지 사용할 수 없습니다.",
+        installCommand: `${python.display} -m pip install -r requirements.txt`,
+      });
+    }
+  }
+
+  return {
+    ok: issues.every((issue) => issue.status !== "error"),
+    python: {
+      command: python.command,
+      display: python.display,
+      executable: parsed?.python || "",
+    },
+    modules,
+    missingRequired,
+    issues,
+  };
+}
+
+function runPythonScript({ scriptPath, args = [], timeoutMs = COMMAND_TIMEOUT_MS }) {
+  return new Promise((resolveRun) => {
+    const python = findPythonCommand();
+    if (!python) {
+      resolveRun({
+        ok: false,
+        code: "PYTHON_NOT_FOUND",
+        error: "Python 실행 파일을 찾을 수 없습니다.",
+        stdout: "",
+        stderr: "",
+        command: "",
+      });
+      return;
+    }
+    if (!existsSync(scriptPath)) {
+      resolveRun({
+        ok: false,
+        code: "WORLD_MEMORY_SCRIPT_MISSING",
+        error: `${relative(GUIBUILD_ROOT, scriptPath)} 파일을 찾을 수 없습니다.`,
+        stdout: "",
+        stderr: "",
+        command: "",
+      });
+      return;
+    }
+
+    const startedAt = Date.now();
+    const commandArgs = [...python.argsPrefix, scriptPath, ...args];
+    const child = spawn(python.command, commandArgs, {
+      cwd: GUIBUILD_ROOT,
+      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      resolveRun({
+        ok: false,
+        code: "WORLD_MEMORY_COMMAND_TIMEOUT",
+        error: `월드 메모리 명령이 ${Math.round(timeoutMs / 1000)}초 제한을 초과했습니다.`,
+        stdout: safeOutput(stdout),
+        stderr: safeOutput(stderr),
+        command: `${python.display} ${[relative(GUIBUILD_ROOT, scriptPath), ...args].join(" ")}`,
+        durationMs: Date.now() - startedAt,
+      });
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveRun({
+        ok: false,
+        code: "WORLD_MEMORY_COMMAND_SPAWN_FAILED",
+        error: error.message,
+        stdout: safeOutput(stdout),
+        stderr: safeOutput(stderr),
+        command: `${python.display} ${[relative(GUIBUILD_ROOT, scriptPath), ...args].join(" ")}`,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveRun({
+        ok: code === 0,
+        code: code === 0 ? "OK" : "WORLD_MEMORY_COMMAND_FAILED",
+        exitCode: code,
+        error: code === 0 ? "" : stderr.trim() || stdout.trim() || `python exited ${code}`,
+        stdout: safeOutput(stdout),
+        stderr: safeOutput(stderr),
+        command: `${python.display} ${[relative(GUIBUILD_ROOT, scriptPath), ...args].join(" ")}`,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+  });
+}
+
+function worldMemoryBaseArgs() {
+  return ["--base-dir", WORLD_MEMORY_BASE_ARG, "--db-file", WORLD_MEMORY_DB_FILE];
+}
+
+function stampForFile() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "_");
+}
+
+function commandForAction(body = {}) {
+  const action = String(body.action || "").trim();
+  const days = clampInteger(body.days, action === "report" ? 14 : 30, 1, 3650);
+  const limit = clampInteger(body.limit, 50, 1, 1000);
+  const entryMode = parseEnum(body.entryMode, ["all", "issue", "brief"], "all");
+  const base = worldMemoryBaseArgs();
+
+  if (action === "init") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "init"], output: "text" };
+  }
+  if (action === "audit") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "audit", "--days", String(days), "--format", "json"], output: "json" };
+  }
+  if (action === "harness") {
+    return {
+      scriptPath: WORLD_MEMORY_HARNESS,
+      args: ["--base-dir", WORLD_MEMORY_BASE_ARG, "--db-file", WORLD_MEMORY_DB_FILE, "--days", String(days), "--format", "json"],
+      output: "json",
+    };
+  }
+  if (action === "list") {
+    return {
+      scriptPath: WORLD_MEMORY_CLI,
+      args: [...base, "list", "--days", String(days), "--entry-mode", entryMode, "--limit", String(limit), "--format", "json"],
+      output: "json",
+    };
+  }
+  if (action === "states") {
+    const status = parseEnum(body.status, ["all", "active", "watch", "resolved", "overridden"], "all");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "states", "--status", status, "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "taxonomy") {
+    const type = parseEnum(body.type, ["all", "category", "region", "importance", "entry_mode", "story", "story_family", "story_relation", "tag", "ticker", "subject", "subject_type", "industry", "event_kind", "state_key", "net_effect"], "all");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "taxonomy", "--type", type, "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "taxonomyRefresh") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "taxonomy", "--refresh", "--type", "all", "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "cleanupDryRun") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "cleanup", "--dry-run"], output: "text" };
+  }
+  if (action === "storyLink") {
+    const story = commandTextArg(body.story || body.storyLabel, "story");
+    const relatedStory = commandTextArg(body.relatedStory || body.related_story || body.relatedStoryLabel, "relatedStory");
+    const relation = parseEnum(
+      body.relation || body.relationType || body.relation_type,
+      ["evolves_from", "branches_from", "confirms", "conflicts_with", "replaces", "same_family"],
+      "branches_from"
+    );
+    const storyKey = optionalCommandTextArg(body.storyKey || body.story_key, 160);
+    const relatedStoryKey = optionalCommandTextArg(body.relatedStoryKey || body.related_story_key, 160);
+    const storyFamily = optionalCommandTextArg(body.storyFamily || body.story_family, 200);
+    const sourceEventId = optionalCommandTextArg(body.sourceEventId || body.source_event_id, 160);
+    const note = optionalCommandTextArg(body.note, 500);
+    const confidence = commandFloat(body.confidence, 0.7, 0, 1);
+    const args = [
+      ...base,
+      "story-link",
+      "--story",
+      story,
+      "--related-story",
+      relatedStory,
+      "--relation",
+      relation,
+      "--confidence",
+      String(confidence),
+    ];
+    if (storyKey) args.push("--story-key", storyKey);
+    if (relatedStoryKey) args.push("--related-story-key", relatedStoryKey);
+    if (storyFamily) args.push("--story-family", storyFamily);
+    if (sourceEventId) args.push("--source-event-id", sourceEventId);
+    if (note) args.push("--note", note);
+    if (body.dryRun === true) args.push("--dry-run");
+    return { scriptPath: WORLD_MEMORY_CLI, args, output: "json" };
+  }
+  if (action === "storyMap") {
+    const view = parseEnum(body.view, ["nodes", "links"], "nodes");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "story-map", "--view", view, "--days", String(days), "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "storyFamilyReview") {
+    const status = parseEnum(body.status, ["all", "suggested", "accepted", "rejected"], "suggested");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "story-family-review", "--status", status, "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "stateAdd") {
+    const title = commandTextArg(body.title || body.state || body.stateLabel || body.label, "title", 180);
+    const summary = commandTextArg(body.summary || body.note || body.description || body.rationale, "summary", 700);
+    const watchItems = Array.isArray(body.watchItems)
+      ? body.watchItems.map((item) => optionalCommandTextArg(item, 120)).filter(Boolean)
+      : [];
+    const rationaleBase = optionalCommandTextArg(body.rationale || body.reason || body.why || body.note || summary, 900);
+    const watchText = watchItems.length ? `감시 항목: ${watchItems.join(", ")}` : "";
+    const stateRationale = optionalCommandTextArg([rationaleBase, watchText].filter(Boolean).join(" "), 1100) || summary;
+    const story = optionalCommandTextArg(body.story || body.storyLabel || body.storyFamily || body.story_family, 180);
+    const storyFamily = optionalCommandTextArg(body.storyFamily || body.story_family || story, 180);
+    const stateKey = commandTextArg(body.stateKey || body.state_key || title, "stateKey", 180);
+    const stateLabel = optionalCommandTextArg(body.stateLabel || body.state_label || body.state || title, 180) || title;
+    const category = parseEnum(body.category, ["stock_bond", "geopolitics", "emerging"], "geopolitics");
+    const region = parseEnum(body.region, ["US", "KR", "GLOBAL"], "GLOBAL");
+    const importance = parseEnum(body.importance, ["high", "medium", "low"], "medium");
+    const stateStatus = parseEnum(body.stateStatus || body.state_status || body.status, ["active", "watch"], "watch");
+    const stateBias = parseEnum(body.stateBias || body.state_bias || body.bias, ["bullish", "bearish", "neutral", "mixed"], "mixed");
+    const netEffect = optionalCommandTextArg(body.netEffect || body.net_effect || "mixed_watch", 100);
+    const horizon = optionalCommandTextArg(body.horizon, 80) || "수일~수주";
+    const portfolioLink = optionalCommandTextArg(body.portfolioLink || body.portfolio_link || "", 360);
+    const tags = [
+      "world_memory",
+      "watch_state",
+      ...(
+        Array.isArray(body.tags)
+          ? body.tags
+          : String(body.tags || "")
+              .split(",")
+      ),
+    ]
+      .map((item) => optionalCommandTextArg(item, 40))
+      .filter(Boolean)
+      .slice(0, 12)
+      .join(",");
+    const industries = (
+      Array.isArray(body.industries)
+        ? body.industries
+        : String(body.industries || "energy,oil,shipping").split(",")
+    )
+      .map((item) => optionalCommandTextArg(item, 60))
+      .filter(Boolean)
+      .slice(0, 10)
+      .join(",");
+    const confidence = commandFloat(body.confidence, 0.7, 0, 1);
+    const dedupeKey = optionalCommandTextArg(body.dedupeKey || body.dedupe_key || `gui-state-add-${stateKey}`, 180);
+    const args = [
+      ...base,
+      "add",
+      "--category",
+      category,
+      "--region",
+      region,
+      "--importance",
+      importance,
+      "--title",
+      title,
+      "--summary",
+      summary,
+      "--why-it-matters",
+      stateRationale,
+      "--horizon",
+      horizon,
+      "--tags",
+      tags,
+      "--industries",
+      industries,
+      "--event-kind",
+      "world_memory_state_watch",
+      "--state-key",
+      stateKey,
+      "--state-label",
+      stateLabel,
+      "--state-status",
+      stateStatus,
+      "--state-bias",
+      stateBias,
+      "--net-effect",
+      netEffect,
+      "--state-summary",
+      summary,
+      "--state-rationale",
+      stateRationale,
+      "--state-confidence",
+      String(confidence),
+      "--source",
+      "FinanceAgentGUI|local://world-memory-change-suggestion||사용자 승인 월드메모리 변경 제안",
+      "--dedupe-key",
+      dedupeKey,
+      "--skip-if-duplicate",
+      "--dedupe-days",
+      "14",
+    ];
+    if (story) args.push("--story", story);
+    if (storyFamily) args.push("--story-family", storyFamily);
+    if (portfolioLink) args.push("--portfolio-link", portfolioLink);
+    if (body.supersedesActive === true || body.supersedes_active === true) args.push("--supersedes-active");
+    return { scriptPath: WORLD_MEMORY_CLI, args, output: "text" };
+  }
+  if (action === "embedStatus") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "embed-status", "--format", "json"], output: "json" };
+  }
+  if (action === "semanticSearch") {
+    const query = String(body.query || "").trim();
+    if (!query) throw new Error("semanticSearch requires query");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "semantic-search", query, "--limit", String(limit), "--format", "json"], output: "json" };
+  }
+  if (action === "report") {
+    const preset = parseEnum(body.preset, ["default", "recent_industry_trends"], "default");
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "report", "--days", String(days), "--entry-mode", entryMode, "--preset", preset, "--max-items", String(Math.min(limit, 20))], output: "text" };
+  }
+  if (action === "stateSync") {
+    return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "state-sync"], output: "text" };
+  }
+  if (action === "feedScan") {
+    const outPath = join(WORLD_MEMORY_LOG_DIR, `world_memory_feed_scan_${stampForFile()}.md`);
+    return {
+      scriptPath: MARKET_ANALYZER,
+      args: [
+        "--news-style",
+        "brief",
+        "--news-language",
+        "original",
+        "--max-news-items",
+        String(clampInteger(body.maxNewsItems, 120, 20, 500)),
+        "--timeline-items",
+        String(clampInteger(body.timelineItems, 60, 5, 200)),
+        "--timeout",
+        String(clampInteger(body.timeoutSeconds, 20, 5, 90)),
+        "--out",
+        outPath,
+      ],
+      output: "markdown-file",
+      outPath,
+      timeoutMs: FEED_SCAN_TIMEOUT_MS,
+    };
+  }
+
+  throw new Error(`unknown world memory action: ${action || "(empty)"}`);
+}
+
+function readCollectionPromptTemplate() {
+  if (existsSync(WORLD_MEMORY_PROMPT_PATH)) {
+    return readFileSync(WORLD_MEMORY_PROMPT_PATH, "utf8");
+  }
+  return [
+    "월드 메모리 업데이트 절차를 수행한다.",
+    "FEED는 빠른 탐지 레이어이며 저장 전 가능한 한 신뢰 가능한 원출처나 정규 언론으로 재확인한다.",
+    "한 번 실행할 때 의미 있는 brief 3~8건을 고른다.",
+    "같은 subject에 과도하게 쏠리지 않도록 하고, 같은 주체는 최대 2건 정도로 제한한다.",
+    "brief-import 입력은 항상 JSON 배열만 사용한다.",
+  ].join("\n");
+}
+
+function buildBriefGenerationPrompt({ preflight, feedScan }) {
+  return [
+    readCollectionPromptTemplate().trim(),
+    "",
+    "반환은 JSON 배열 하나만 출력한다. 설명, 마크다운, 코드펜스는 넣지 않는다.",
+    "각 row는 scripts/world_memory_cli.py brief-import가 읽을 수 있어야 한다.",
+    "",
+    "필수/권장 필드:",
+    "- title",
+    "- summary",
+    "- why_it_matters",
+    "- portfolio_link",
+    "- category: stock_bond | geopolitics | emerging",
+    "- region: US | KR | GLOBAL",
+    "- importance: high | medium | low",
+    "- horizon",
+    "- subjects: [{name, type}]",
+    "- industries: string[]",
+    "- event_kind",
+    "- dedupe_key",
+    "- sources: [{name, url, published_at, note}]",
+    "- tags, tickers, story, story_thesis, story_checkpoint",
+    "",
+    "선택 기준:",
+    "- FEED 단독으로 불확실한 항목은 제외하거나 importance를 낮춘다.",
+    "- 어닝, 가이던스, 정책, 중앙은행, 지정학, 공급망, 자본배분, 산업 실행 신호를 우선한다.",
+    "- 중복 헤드라인은 하나의 durable brief로 압축한다.",
+    "",
+    "사전 월드 메모리 상태:",
+    preflight,
+    "",
+    "FEED 스캔 원문:",
+    feedScan,
+  ].join("\n");
+}
+
+function buildSituationReportPrompt({ listJson, statesJson, auditJson, feedScan, importSummary, harnessSummary }) {
+  return [
+    "World Memory 자동 수집 직후 현재 시장 상황 인식 보고서를 한국어로 작성한다.",
+    "보고서는 사용자가 메인 페이지에서 바로 읽는 HTML 기반 운영 보고서다. DB 경로, 명령어, 의존성 같은 기술 스탯은 쓰지 않는다.",
+    "보고서 하단 제안 영역은 반드시 월드 메모리 변경 제안을 먼저 쓰고, 관찰 및 실행 제안을 그 다음에 쓴다.",
+    "근거가 부족하면 부족하다고 말하고, 실제 행동 제안은 감시/확인/보류처럼 검증 가능한 수준으로 제안한다.",
+    "마크다운이 아니라 JSON 객체 하나만 반환한다. 설명, 코드펜스, HTML 태그는 넣지 않는다.",
+    "",
+    "반환 schema:",
+    JSON.stringify(
+      {
+        title: "World Memory 시장 상황 인식",
+        asOf: "KST 기준 시각",
+        stance: "risk-on | neutral | defensive | mixed",
+        summary: "첫 화면 요약 1문장",
+        narrative: "현재 시장 해석 1~2문단",
+        signalRadar: [
+          { label: "유동성", score: 65, tone: "positive", note: "점수 근거" },
+          { label: "정책", score: 45, tone: "neutral", note: "점수 근거" },
+          { label: "지정학", score: 70, tone: "negative", note: "점수 근거" }
+        ],
+        highlights: [
+          { title: "핵심 변화", body: "근거와 의미", tag: "macro", importance: "high" }
+        ],
+        memoryChangeSuggestions: ["월드 메모리 story/state/taxonomy 변경 제안"],
+        portfolioSuggestions: ["검증 가능한 관찰/비중/헤지 제안"],
+        nextChecks: ["다음 회차에서 확인할 데이터"],
+      },
+      null,
+      2
+    ),
+    "",
+    "월드 메모리 최근 로그 JSON:",
+    JSON.stringify(listJson || {}, null, 2),
+    "",
+    "현재 state JSON:",
+    JSON.stringify(statesJson || {}, null, 2),
+    "",
+    "audit JSON:",
+    JSON.stringify(auditJson || {}, null, 2),
+    "",
+    "이번 import 요약:",
+    importSummary || "import 요약 없음",
+    "",
+    "harness 요약:",
+    harnessSummary || "harness 요약 없음",
+    "",
+    "이번 FEED 스캔:",
+    feedScan || "FEED 스캔 없음",
+  ].join("\n");
+}
+
+function clampScore(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 50;
+  return Math.max(0, Math.min(100, Math.round(numeric)));
+}
+
+function normalizeTextList(value, limit = 6) {
+  return asArray(value)
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normalizeSignalRadar(value) {
+  return asArray(value)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      label: String(item.label || "").trim() || "Signal",
+      score: clampScore(item.score),
+      tone: parseEnum(String(item.tone || "").trim(), ["positive", "neutral", "negative"], "neutral"),
+      note: String(item.note || "").trim(),
+    }))
+    .slice(0, 8);
+}
+
+function normalizeHighlights(value) {
+  return asArray(value)
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      title: String(item.title || "").trim() || "주요 변화",
+      body: String(item.body || item.summary || "").trim(),
+      tag: String(item.tag || "").trim() || "market",
+      importance: parseEnum(String(item.importance || "").trim(), ["high", "medium", "low"], "medium"),
+    }))
+    .filter((item) => item.body)
+    .slice(0, 8);
+}
+
+function fallbackReportView(text = "") {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return {
+    title: "World Memory 시장 상황 인식",
+    asOf: nowIso(),
+    stance: "mixed",
+    summary: lines.find((line) => !line.startsWith("#")) || "보고서가 생성되었습니다.",
+    narrative: lines.filter((line) => !line.startsWith("#")).slice(0, 4).join("\n"),
+    signalRadar: [
+      { label: "시장", score: 50, tone: "neutral", note: "구조화 점수 없음" },
+      { label: "정책", score: 50, tone: "neutral", note: "구조화 점수 없음" },
+      { label: "리스크", score: 50, tone: "neutral", note: "구조화 점수 없음" },
+    ],
+    highlights: [],
+    portfolioSuggestions: [],
+    memoryChangeSuggestions: [],
+    nextChecks: [],
+  };
+}
+
+function normalizeReportView(payload, fallbackText = "") {
+  const raw = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  const view = {
+    ...fallbackReportView(fallbackText),
+    title: String(raw.title || "").trim() || "World Memory 시장 상황 인식",
+    asOf: String(raw.asOf || raw.as_of || nowIso()).trim(),
+    stance: parseEnum(String(raw.stance || "").trim(), ["risk-on", "neutral", "defensive", "mixed"], "mixed"),
+    summary: String(raw.summary || "").trim() || fallbackReportView(fallbackText).summary,
+    narrative: String(raw.narrative || raw.body || "").trim() || fallbackReportView(fallbackText).narrative,
+    signalRadar: normalizeSignalRadar(raw.signalRadar || raw.signal_radar),
+    highlights: normalizeHighlights(raw.highlights),
+    portfolioSuggestions: normalizeTextList(raw.portfolioSuggestions || raw.portfolio_suggestions),
+    memoryChangeSuggestions: normalizeTextList(raw.memoryChangeSuggestions || raw.memory_change_suggestions),
+    nextChecks: normalizeTextList(raw.nextChecks || raw.next_checks),
+  };
+  if (!view.signalRadar.length) view.signalRadar = fallbackReportView(fallbackText).signalRadar;
+  return view;
+}
+
+function reportPlainText(view) {
+  return [
+    `# ${view.title}`,
+    "",
+    view.summary,
+    "",
+    view.narrative,
+    "",
+    "## 주요 변화",
+    ...view.highlights.map((item) => `- ${item.title}: ${item.body}`),
+    "",
+    "## 월드 메모리 변경 제안",
+    ...view.memoryChangeSuggestions.map((item) => `- ${item}`),
+    "",
+    "## 포트폴리오/관찰 제안",
+    ...view.portfolioSuggestions.map((item) => `- ${item}`),
+    "",
+    "## 다음 확인 지점",
+    ...view.nextChecks.map((item) => `- ${item}`),
+  ].join("\n");
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderReportHtmlDocument(view) {
+  const signals = view.signalRadar
+    .map(
+      (item) => `
+        <article class="signal ${escapeHtml(item.tone)}">
+          <div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.note)}</span></div>
+          <div class="bar"><i style="width:${clampScore(item.score)}%"></i></div>
+          <b>${clampScore(item.score)}</b>
+        </article>`
+    )
+    .join("");
+  const highlights = view.highlights
+    .map(
+      (item) => `
+        <article class="highlight ${escapeHtml(item.importance)}">
+          <small>${escapeHtml(item.tag)}</small>
+          <h2>${escapeHtml(item.title)}</h2>
+          <p>${escapeHtml(item.body)}</p>
+        </article>`
+    )
+    .join("");
+  const list = (title, items) => `
+    <section>
+      <h2>${escapeHtml(title)}</h2>
+      <ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("") || "<li>아직 제안 없음</li>"}</ul>
+    </section>`;
+
+  return `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>${escapeHtml(view.title)}</title>
+  <style>
+    body{margin:0;background:#f7f7f5;color:#171717;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    main{max-width:1040px;margin:0 auto;padding:32px 22px 48px}
+    header{border-bottom:1px solid #deded8;padding-bottom:18px;margin-bottom:18px}
+    h1{margin:0;font-size:34px;letter-spacing:0;line-height:1.1}
+    .meta{margin-top:8px;color:#6d6d67}
+    .summary{font-size:18px;font-weight:760}
+    .signals{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:22px 0}
+    .signal,.highlight,section{border:1px solid #dfdfd8;border-radius:10px;background:#fff;padding:15px}
+    .signal{display:grid;gap:10px}
+    .signal div:first-child{display:grid;gap:2px}
+    .signal span{color:#666;font-size:12px}
+    .bar{height:9px;border-radius:99px;background:#ecece7;overflow:hidden}
+    .bar i{display:block;height:100%;border-radius:inherit;background:#537f68}
+    .signal.negative .bar i{background:#a45b45}.signal.positive .bar i{background:#3f8759}
+    .signal b{font-size:20px}
+    .highlights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:18px 0}
+    .highlight small{text-transform:uppercase;color:#6d6d67;font-weight:800}
+    .highlight h2,section h2{margin:5px 0 8px;font-size:17px;letter-spacing:0}
+    .highlight p{margin:0}
+    section{margin-top:12px}
+    li{margin:6px 0}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>${escapeHtml(view.title)}</h1>
+      <div class="meta">${escapeHtml(view.asOf)} · ${escapeHtml(view.stance)}</div>
+    </header>
+    <p class="summary">${escapeHtml(view.summary)}</p>
+    <p>${escapeHtml(view.narrative)}</p>
+    <div class="signals">${signals}</div>
+    <div class="highlights">${highlights}</div>
+    ${list("월드 메모리 변경 제안", view.memoryChangeSuggestions)}
+    ${list("포트폴리오/관찰 제안", view.portfolioSuggestions)}
+    ${list("다음 확인 지점", view.nextChecks)}
+  </main>
+</body>
+</html>
+`;
+}
+
+async function runWorldMemoryModelText({ prompt, modelPolicy, taskType }) {
+  let codexError = null;
+  if (modelPolicy?.codex?.available !== false) {
+    try {
+      const result = await runCodexChat({
+        provider: "codex-cli",
+        prompt,
+        model: modelPolicy.codex.model,
+        reasoning: "high",
+        approval: "never",
+        taskType,
+        timeoutMs: WORLD_MEMORY_MODEL_TIMEOUT_MS,
+      });
+      return {
+        answer: String(result.answer || "").trim(),
+        provider: "codex-cli",
+        model: result.model,
+        reasoning: result.reasoning || "high",
+        elapsedMs: result.elapsedMs,
+      };
+    } catch (error) {
+      codexError = error;
+    }
+  }
+
+  if (modelPolicy?.antigravity?.available && modelPolicy.antigravity.project) {
+    const result = await runAntigravityGenerate({
+      prompt,
+      model: modelPolicy.antigravity.model,
+      project: modelPolicy.antigravity.project,
+      location: modelPolicy.antigravity.location || "global",
+      webGrounding: false,
+      thinkingLevel: "MEDIUM",
+    });
+    return {
+      answer: String(result.answer || "").trim(),
+      provider: "antigravity-sdk",
+      model: result.model || modelPolicy.antigravity.model,
+      reasoning: "medium",
+      elapsedMs: result.elapsedMs,
+    };
+  }
+
+  throw new Error(
+    codexError
+      ? `Codex 모델 호출 실패: ${codexError.message}`
+      : "월드 메모리 보고서/수집에 사용할 Codex 또는 Antigravity 모델을 찾지 못했습니다."
+  );
+}
+
+async function runBriefGeneration({ preflight, feedScan, modelPolicy }) {
+  const prompt = buildBriefGenerationPrompt({ preflight, feedScan });
+  const result = await runWorldMemoryModelText({
+    prompt,
+    taskType: "world-memory-collection",
+    modelPolicy,
+  });
+  const parsed = parseJsonPayload(result.answer);
+  const rows = normalizeBriefRows(parsed);
+  return {
+    ok: true,
+    rows,
+    raw: result.answer,
+    provider: result.provider,
+    model: result.model,
+    reasoning: result.reasoning,
+    elapsedMs: result.elapsedMs,
+  };
+}
+
+async function runSituationReportGeneration({
+  listJson,
+  statesJson,
+  auditJson,
+  feedScan,
+  importSummary,
+  harnessSummary,
+  modelPolicy,
+}) {
+  const result = await runWorldMemoryModelText({
+    prompt: buildSituationReportPrompt({ listJson, statesJson, auditJson, feedScan, importSummary, harnessSummary }),
+    taskType: "world-memory-report",
+    modelPolicy,
+  });
+  let parsed = null;
+  try {
+    parsed = parseJsonPayload(result.answer);
+  } catch {
+    parsed = null;
+  }
+  const view = normalizeReportView(parsed, result.answer);
+  return {
+    view,
+    text: reportPlainText(view),
+    raw: String(result.answer || "").trim(),
+    provider: result.provider,
+    model: result.model,
+    reasoning: result.reasoning,
+    elapsedMs: result.elapsedMs,
+  };
+}
+
+async function runCommandFromBody(body) {
+  const command = commandForAction(body);
+  const result = await runPythonScript({
+    scriptPath: command.scriptPath,
+    args: command.args,
+    timeoutMs: command.timeoutMs || COMMAND_TIMEOUT_MS,
+  });
+  const json = command.output === "json" ? tryParseJson(result.stdout) : null;
+  let artifact = null;
+  let outputText = result.stdout;
+  if (command.output === "markdown-file" && command.outPath) {
+    artifact = {
+      path: safeRelative(command.outPath),
+      exists: existsSync(command.outPath),
+    };
+    if (artifact.exists) {
+      outputText = readFileSync(command.outPath, "utf8");
+    }
+  }
+  return {
+    ...result,
+    action: String(body.action || ""),
+    outputKind: command.output,
+    json,
+    artifact,
+    outputText: safeOutput(outputText),
+  };
+}
+
+async function refreshWorldMemoryReportSnapshot({ sourceAction = "", reason = "" } = {}) {
+  const startedAt = nowIso();
+  const modelPolicy = resolveWorldMemoryModelPolicy();
+  const steps = [];
+
+  updateCollectorState((state) => ({
+    ...state,
+    modelPolicy,
+    collector: {
+      ...state.collector,
+      running: true,
+      status: "writing_report",
+      lastAction: "월드 메모리 보고서와 변경 제안 갱신 중",
+      lastError: "",
+      lastStartedAt: startedAt,
+      lastTrigger: "report-refresh",
+    },
+  }));
+
+  try {
+    const init = await runCommandFromBody({ action: "init" });
+    steps.push({ id: "init", ok: init.ok, text: stepText(init) });
+    if (!init.ok) throw new Error(init.error || "월드 메모리 DB 초기화 실패");
+
+    const [taxonomyRefresh, auditAfter, harnessAfter, embedAfter, listAfter, statesAfter] = await Promise.all([
+      runCommandFromBody({ action: "taxonomyRefresh", limit: 160 }),
+      runCommandFromBody({ action: "audit", days: 30 }),
+      runCommandFromBody({ action: "harness", days: 30 }),
+      runCommandFromBody({ action: "embedStatus" }),
+      runCommandFromBody({ action: "list", days: 30, entryMode: "all", limit: 80 }),
+      runCommandFromBody({ action: "states", status: "all", limit: 80 }),
+    ]);
+    steps.push(
+      { id: "taxonomy-refresh", ok: taxonomyRefresh.ok, text: stepText(taxonomyRefresh) },
+      { id: "audit-after", ok: auditAfter.ok, text: stepText(auditAfter) },
+      { id: "harness-after", ok: harnessAfter.ok, text: stepText(harnessAfter) },
+      { id: "embed-after", ok: embedAfter.ok, text: stepText(embedAfter) },
+      { id: "list-after", ok: listAfter.ok, text: stepText(listAfter) },
+      { id: "states-after", ok: statesAfter.ok, text: stepText(statesAfter) }
+    );
+    if (!auditAfter.ok) throw new Error(auditAfter.error || "audit 실패");
+    if (!harnessAfter.ok) throw new Error(harnessAfter.error || "harness 실패");
+
+    const generatedReport = await runSituationReportGeneration({
+      listJson: listAfter.json,
+      statesJson: statesAfter.json,
+      auditJson: auditAfter.json,
+      feedScan: [
+        "새 FEED 스캔 없이 현재 로컬 월드메모리 DB와 state를 기준으로 보고서/변경 제안을 재생성한다.",
+        sourceAction ? `직전 변경 액션: ${sourceAction}` : "",
+        reason ? `갱신 사유: ${reason}` : "",
+      ].filter(Boolean).join("\n"),
+      importSummary: sourceAction ? `사용자 승인 변경 액션 이후 제안 목록 재계산: ${sourceAction}` : "보고서/변경 제안 수동 갱신",
+      harnessSummary: stepText(harnessAfter),
+      modelPolicy,
+    });
+
+    const reportStem = `world_memory_market_situation_${stampForFile()}`;
+    const reportHtmlPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.html`);
+    const reportJsonPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.json`);
+    const reportTextPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.txt`);
+    const reportView = generatedReport.view || fallbackReportView(generatedReport.text);
+    const reportText = generatedReport.text || reportPlainText(reportView);
+    writeFileSync(reportHtmlPath, renderReportHtmlDocument(reportView));
+    writeFileSync(reportJsonPath, `${JSON.stringify(reportView, null, 2)}\n`);
+    writeFileSync(reportTextPath, `${reportText.trim()}\n`);
+
+    const finishedAt = nowIso();
+    const nextState = updateCollectorState((state) => {
+      const report = {
+        status: "ready",
+        title: reportView.title || "World Memory 시장 상황 인식",
+        generatedAt: finishedAt,
+        path: safeRelative(reportHtmlPath),
+        htmlPath: safeRelative(reportHtmlPath),
+        jsonPath: safeRelative(reportJsonPath),
+        textPath: safeRelative(reportTextPath),
+        summary: reportView.summary,
+        suggestions: [
+          ...normalizeTextList(reportView.memoryChangeSuggestions, 3),
+          ...normalizeTextList(reportView.portfolioSuggestions, 3),
+        ].slice(0, 5),
+        text: reportText,
+        view: reportView,
+        provider: generatedReport.provider,
+        model: generatedReport.model,
+        reasoning: generatedReport.reasoning,
+      };
+      return appendHistory(
+        {
+          ...state,
+          report,
+          collector: {
+            ...state.collector,
+            running: false,
+            status: "ok",
+            lastAction: "월드 메모리 보고서와 변경 제안 갱신 완료",
+            lastError: "",
+            lastFinishedAt: finishedAt,
+            lastSuccessfulAt: finishedAt,
+          },
+        },
+        {
+          id: `report_refresh_${finishedAt}`,
+          trigger: "report-refresh",
+          sourceAction,
+          startedAt,
+          finishedAt,
+          ok: true,
+          steps,
+        }
+      );
+    });
+
+    return {
+      ok: true,
+      action: "refreshReport",
+      outputKind: "report-refresh",
+      outputText: "월드 메모리 보고서와 변경 제안을 새로 생성했습니다.",
+      report: nextState.report,
+      steps,
+      status: await buildWorldMemoryStatus(),
+    };
+  } catch (error) {
+    const failedAt = nowIso();
+    updateCollectorState((state) => ({
+      ...state,
+      collector: {
+        ...state.collector,
+        running: false,
+        status: "error",
+        lastAction: "월드 메모리 보고서와 변경 제안 갱신 실패",
+        lastError: error.message,
+        lastFailedAt: failedAt,
+        lastFinishedAt: failedAt,
+      },
+    }));
+    throw error;
+  }
+}
+
+function stepText(result) {
+  return result?.outputText || result?.stdout || result?.error || "";
+}
+
+async function executeWorldMemoryCycle({ trigger = "manual", scheduledAt = nowIso(), attempt = 1 } = {}) {
+  const runtime = runtimeState();
+  if (runtime.inFlight) return runtime.inFlight;
+
+  const cycleId = `wm_${new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")}`;
+  runtime.inFlight = (async () => {
+    const startedAt = nowIso();
+    const deadlineAt = addMs(scheduledAt, WORLD_MEMORY_INTERVAL_MS);
+    const modelPolicy = resolveWorldMemoryModelPolicy();
+    const steps = [];
+
+    updateCollectorState((state) => ({
+      ...state,
+      modelPolicy,
+      collector: {
+        ...state.collector,
+        running: true,
+        status: "collecting",
+        lastAction: trigger === "manual" ? "수동 월드 메모리 수집 중" : "자동 월드 메모리 수집 중",
+        lastError: "",
+        lastStartedAt: startedAt,
+        lastTrigger: trigger,
+        attempt,
+      },
+      schedule: {
+        ...state.schedule,
+        nextRetryAt: "",
+        activeCycle: {
+          id: cycleId,
+          trigger,
+          scheduledAt,
+          deadlineAt,
+          attempt,
+          startedAt,
+        },
+      },
+    }));
+
+    try {
+      const init = await runCommandFromBody({ action: "init" });
+      steps.push({ id: "init", ok: init.ok, text: stepText(init) });
+      if (!init.ok) throw new Error(init.error || "월드 메모리 DB 초기화 실패");
+
+      const [listBefore, statesBefore, taxonomyRefresh, stateKeyTaxonomy, subjectTaxonomy, embedBefore] =
+        await Promise.all([
+          runCommandFromBody({ action: "list", days: 30, entryMode: "all", limit: 80 }),
+          runCommandFromBody({ action: "states", status: "active", limit: 80 }),
+          runCommandFromBody({ action: "taxonomyRefresh", limit: 160 }),
+          runCommandFromBody({ action: "taxonomy", type: "state_key", limit: 160 }),
+          runCommandFromBody({ action: "taxonomy", type: "subject", limit: 160 }),
+          runCommandFromBody({ action: "embedStatus" }),
+        ]);
+      steps.push(
+        { id: "list-before", ok: listBefore.ok, text: stepText(listBefore) },
+        { id: "states-before", ok: statesBefore.ok, text: stepText(statesBefore) },
+        { id: "taxonomy-refresh", ok: taxonomyRefresh.ok, text: stepText(taxonomyRefresh) },
+        { id: "taxonomy-state-key", ok: stateKeyTaxonomy.ok, text: stepText(stateKeyTaxonomy) },
+        { id: "taxonomy-subject", ok: subjectTaxonomy.ok, text: stepText(subjectTaxonomy) },
+        { id: "embed-before", ok: embedBefore.ok, text: stepText(embedBefore) }
+      );
+
+      const feedScan = await runCommandFromBody({ action: "feedScan" });
+      steps.push({ id: "feed-scan", ok: feedScan.ok, text: stepText(feedScan), artifact: feedScan.artifact });
+      if (!feedScan.ok) throw new Error(feedScan.error || "FEED 스캔 실패");
+
+      const preflight = [
+        "# list --days 30 --entry-mode all",
+        listBefore.outputText || listBefore.stdout || "",
+        "# states --status active",
+        statesBefore.outputText || statesBefore.stdout || "",
+        "# taxonomy --refresh",
+        taxonomyRefresh.outputText || taxonomyRefresh.stdout || "",
+        "# taxonomy --type state_key",
+        stateKeyTaxonomy.outputText || stateKeyTaxonomy.stdout || "",
+        "# taxonomy --type subject",
+        subjectTaxonomy.outputText || subjectTaxonomy.stdout || "",
+        "# embed-status",
+        embedBefore.outputText || embedBefore.stdout || "",
+      ].join("\n\n");
+
+      updateCollectorState((state) => ({
+        ...state,
+        collector: {
+          ...state.collector,
+          status: "generating_briefs",
+          lastAction: "FEED 스캔을 월드 메모리 brief 후보로 변환 중",
+        },
+      }));
+
+      const generated = await runBriefGeneration({
+        preflight: safeOutput(preflight),
+        feedScan: feedScan.outputText,
+        modelPolicy,
+      });
+      const briefPath = join(WORLD_MEMORY_LOG_DIR, `world_memory_briefs_${stampForFile()}.json`);
+      writeFileSync(briefPath, `${JSON.stringify(generated.rows, null, 2)}\n`);
+      steps.push({
+        id: "brief-generation",
+        ok: true,
+        text: `generated=${generated.rows.length} model=${generated.model} reasoning=${generated.reasoning}`,
+        artifact: { path: safeRelative(briefPath), exists: true },
+      });
+
+      let briefImport = {
+        ok: true,
+        outputText: "저장할 신규 brief 후보가 없습니다.",
+        stdout: "저장할 신규 brief 후보가 없습니다.",
+      };
+      if (generated.rows.length) {
+        briefImport = await runPythonScript({
+          scriptPath: WORLD_MEMORY_CLI,
+          args: [
+            ...worldMemoryBaseArgs(),
+            "brief-import",
+            "--from-file",
+            briefPath,
+            "--skip-if-duplicate",
+          ],
+          timeoutMs: COMMAND_TIMEOUT_MS,
+        });
+        briefImport = { ...briefImport, outputText: briefImport.stdout };
+      }
+      steps.push({ id: "brief-import", ok: briefImport.ok, text: stepText(briefImport) });
+      if (!briefImport.ok) throw new Error(briefImport.error || "brief-import 실패");
+
+      const [auditAfter, harnessAfter, embedAfter, listAfter, statesAfter] = await Promise.all([
+        runCommandFromBody({ action: "audit", days: 30 }),
+        runCommandFromBody({ action: "harness", days: 30 }),
+        runCommandFromBody({ action: "embedStatus" }),
+        runCommandFromBody({ action: "list", days: 30, entryMode: "all", limit: 80 }),
+        runCommandFromBody({ action: "states", status: "all", limit: 80 }),
+      ]);
+      steps.push(
+        { id: "audit-after", ok: auditAfter.ok, text: stepText(auditAfter) },
+        { id: "harness-after", ok: harnessAfter.ok, text: stepText(harnessAfter) },
+        { id: "embed-after", ok: embedAfter.ok, text: stepText(embedAfter) },
+        { id: "list-after", ok: listAfter.ok, text: stepText(listAfter) },
+        { id: "states-after", ok: statesAfter.ok, text: stepText(statesAfter) }
+      );
+      if (!auditAfter.ok) throw new Error(auditAfter.error || "audit 실패");
+      if (!harnessAfter.ok) throw new Error(harnessAfter.error || "harness 실패");
+
+      updateCollectorState((state) => ({
+        ...state,
+        collector: {
+          ...state.collector,
+          status: "writing_report",
+          lastAction: "현재 시장 상황 인식 보고서 작성 중",
+        },
+      }));
+
+      const generatedReport = await runSituationReportGeneration({
+        listJson: listAfter.json,
+        statesJson: statesAfter.json,
+        auditJson: auditAfter.json,
+        feedScan: feedScan.outputText,
+        importSummary: stepText(briefImport),
+        harnessSummary: stepText(harnessAfter),
+        modelPolicy,
+      });
+      const reportStem = `world_memory_market_situation_${stampForFile()}`;
+      const reportHtmlPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.html`);
+      const reportJsonPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.json`);
+      const reportTextPath = join(WORLD_MEMORY_LOG_DIR, `${reportStem}.txt`);
+      const reportView = generatedReport.view || fallbackReportView(generatedReport.text);
+      const reportText = generatedReport.text || reportPlainText(reportView);
+      writeFileSync(reportHtmlPath, renderReportHtmlDocument(reportView));
+      writeFileSync(reportJsonPath, `${JSON.stringify(reportView, null, 2)}\n`);
+      writeFileSync(reportTextPath, `${reportText.trim()}\n`);
+      const finishedAt = nowIso();
+
+      updateCollectorState((state) => {
+        const nextRunAt =
+          trigger === "manual"
+            ? state.schedule.nextRunAt
+            : addMs(scheduledAt, WORLD_MEMORY_INTERVAL_MS);
+        const report = {
+          status: "ready",
+          title: reportView.title || "World Memory 시장 상황 인식",
+          generatedAt: finishedAt,
+          path: safeRelative(reportHtmlPath),
+          htmlPath: safeRelative(reportHtmlPath),
+          jsonPath: safeRelative(reportJsonPath),
+          textPath: safeRelative(reportTextPath),
+          summary: reportView.summary,
+          suggestions: [
+            ...normalizeTextList(reportView.memoryChangeSuggestions, 3),
+            ...normalizeTextList(reportView.portfolioSuggestions, 3),
+          ].slice(0, 5),
+          text: reportText,
+          view: reportView,
+          provider: generatedReport.provider,
+          model: generatedReport.model,
+          reasoning: generatedReport.reasoning,
+        };
+        return appendHistory(
+          {
+            ...state,
+            report,
+            collector: {
+              ...state.collector,
+              running: false,
+              status: "ok",
+              lastAction: `월드 메모리 수집 완료 · 신규 후보 ${generated.rows.length}건`,
+              lastError: "",
+              lastFinishedAt: finishedAt,
+              lastSuccessfulAt: finishedAt,
+              attempt,
+            },
+            schedule: {
+              ...state.schedule,
+              nextRunAt,
+              nextRetryAt: "",
+              activeCycle: null,
+              pausedUntil: "",
+            },
+          },
+          {
+            type: "collection",
+            status: "ok",
+            trigger,
+            scheduledAt,
+            startedAt,
+            finishedAt,
+            attempts: attempt,
+            importedCandidates: generated.rows.length,
+            reportPath: safeRelative(reportHtmlPath),
+            reportJsonPath: safeRelative(reportJsonPath),
+            feedScanPath: feedScan.artifact?.path || "",
+            briefPath: safeRelative(briefPath),
+            steps,
+          }
+        );
+      });
+
+      return { ok: true, cycleId, steps };
+    } catch (error) {
+      const failedAt = nowIso();
+      const canRetry =
+        trigger !== "manual" &&
+        timestampMs(addMs(Date.now(), WORLD_MEMORY_RETRY_INTERVAL_MS)) < timestampMs(deadlineAt);
+      updateCollectorState((state) => {
+        const nextRetryAt = canRetry ? addMs(Date.now(), WORLD_MEMORY_RETRY_INTERVAL_MS) : "";
+        const nextRunAt = canRetry ? state.schedule.nextRunAt : addMs(scheduledAt, WORLD_MEMORY_INTERVAL_MS);
+        return appendHistory(
+          {
+            ...state,
+            collector: {
+              ...state.collector,
+              running: false,
+              status: canRetry ? "retry_wait" : "failed",
+              lastAction: canRetry ? "수집 실패 · 30분 뒤 재시도 대기" : "수집 회차 실패",
+              lastError: error.message,
+              lastFinishedAt: failedAt,
+              lastFailedAt: failedAt,
+              attempt,
+            },
+            schedule: {
+              ...state.schedule,
+              nextRetryAt,
+              nextRunAt,
+              activeCycle: canRetry
+                ? {
+                    id: cycleId,
+                    trigger,
+                    scheduledAt,
+                    deadlineAt,
+                    attempt,
+                    failedAt,
+                  }
+                : null,
+            },
+          },
+          {
+            type: "collection",
+            status: canRetry ? "retry_wait" : "failed",
+            trigger,
+            scheduledAt,
+            startedAt,
+            finishedAt: failedAt,
+            attempts: attempt,
+            error: error.message,
+            nextRetryAt,
+            steps,
+          }
+        );
+      });
+      if (trigger !== "manual") scheduleWorldMemoryCollector();
+      return { ok: false, cycleId, error: error.message, steps };
+    } finally {
+      runtime.inFlight = null;
+      scheduleWorldMemoryCollector();
+    }
+  })();
+
+  return runtime.inFlight;
+}
+
+function normalizeMissedSchedules(state) {
+  const now = Date.now();
+  let nextRunMs = timestampMs(state.schedule.nextRunAt);
+  if (!nextRunMs) nextRunMs = now + WORLD_MEMORY_INTERVAL_MS;
+  let nextState = state;
+
+  while (now >= nextRunMs + WORLD_MEMORY_INTERVAL_MS) {
+    const scheduledAt = new Date(nextRunMs).toISOString();
+    nextState = appendHistory(
+      {
+        ...nextState,
+        collector: {
+          ...nextState.collector,
+          status: "failed",
+          lastAction: "예정 회차 미수집으로 실패 처리",
+          lastError: "서버가 예정 회차와 6시간 재시도 창을 모두 놓쳤습니다.",
+          lastFailedAt: nowIso(),
+        },
+      },
+      {
+        type: "collection",
+        status: "failed",
+        trigger: "scheduled",
+        scheduledAt,
+        finishedAt: nowIso(),
+        error: "missed retry window",
+      }
+    );
+    nextRunMs += WORLD_MEMORY_INTERVAL_MS;
+  }
+
+  nextState.schedule.nextRunAt = new Date(nextRunMs).toISOString();
+  return nextState;
+}
+
+function scheduleWorldMemoryCollector(delayOverrideMs = null) {
+  const runtime = runtimeState();
+  if (!runtime.started || process.env.WORLD_MEMORY_COLLECTOR_DISABLED === "1") return;
+  if (runtime.timer) clearTimeout(runtime.timer);
+
+  let state = normalizeMissedSchedules(readCollectorState());
+  state = writeCollectorState(state);
+  const now = Date.now();
+  const pausedUntilMs = timestampMs(state.schedule.pausedUntil);
+  const retryAtMs = timestampMs(state.schedule.nextRetryAt);
+  const nextRunMs = timestampMs(state.schedule.nextRunAt) || now + WORLD_MEMORY_INTERVAL_MS;
+  let targetMs = nextRunMs;
+
+  if (pausedUntilMs > now) targetMs = pausedUntilMs;
+  if (retryAtMs > now) targetMs = Math.min(targetMs, retryAtMs);
+
+  const delayMs = delayOverrideMs === null ? Math.max(0, targetMs - now) : Math.max(0, delayOverrideMs);
+  runtime.nextTimerAt = new Date(now + delayMs).toISOString();
+  runtime.timer = setTimeout(() => {
+    runtime.timer = null;
+    void handleWorldMemoryTimer();
+  }, delayMs);
+}
+
+async function handleWorldMemoryTimer() {
+  const runtime = runtimeState();
+  if (runtime.inFlight) {
+    scheduleWorldMemoryCollector(WORLD_MEMORY_RETRY_INTERVAL_MS);
+    return;
+  }
+
+  let state = normalizeMissedSchedules(readCollectorState());
+  state = writeCollectorState(state);
+  const now = Date.now();
+  const pausedUntilMs = timestampMs(state.schedule.pausedUntil);
+  if (pausedUntilMs > now) {
+    scheduleWorldMemoryCollector();
+    return;
+  }
+
+  const activeCycle = state.schedule.activeCycle;
+  const retryAtMs = timestampMs(state.schedule.nextRetryAt);
+  if (activeCycle && retryAtMs && now >= retryAtMs) {
+    const deadlineAtMs = timestampMs(activeCycle.deadlineAt);
+    if (deadlineAtMs && now >= deadlineAtMs) {
+      updateCollectorState((current) =>
+        appendHistory(
+          {
+            ...current,
+            collector: {
+              ...current.collector,
+              status: "failed",
+              lastAction: "재시도 창 만료로 회차 실패",
+              lastError: "다음 6시간 회차가 도래했습니다.",
+              lastFailedAt: nowIso(),
+            },
+            schedule: {
+              ...current.schedule,
+              activeCycle: null,
+              nextRetryAt: "",
+              nextRunAt: addMs(activeCycle.scheduledAt, WORLD_MEMORY_INTERVAL_MS),
+            },
+          },
+          {
+            type: "collection",
+            status: "failed",
+            trigger: "scheduled",
+            scheduledAt: activeCycle.scheduledAt,
+            finishedAt: nowIso(),
+            attempts: activeCycle.attempt,
+            error: "retry window expired",
+          }
+        )
+      );
+      scheduleWorldMemoryCollector(0);
+      return;
+    }
+    void executeWorldMemoryCycle({
+      trigger: "scheduled",
+      scheduledAt: activeCycle.scheduledAt,
+      attempt: Number(activeCycle.attempt || 1) + 1,
+    });
+    return;
+  }
+
+  const nextRunMs = timestampMs(state.schedule.nextRunAt);
+  if (nextRunMs && now >= nextRunMs) {
+    void executeWorldMemoryCycle({
+      trigger: "scheduled",
+      scheduledAt: state.schedule.nextRunAt,
+      attempt: 1,
+    });
+    return;
+  }
+
+  scheduleWorldMemoryCollector();
+}
+
+export function startWorldMemoryCollector() {
+  const runtime = runtimeState();
+  if (runtime.started) return;
+  ensureWorldMemoryDirs();
+  runtime.started = true;
+  updateCollectorState((state) => ({
+    ...state,
+    modelPolicy: resolveWorldMemoryModelPolicy(),
+  }));
+  scheduleWorldMemoryCollector();
+}
+
+function pauseWorldMemoryCollection() {
+  const pausedUntil = addMs(Date.now(), WORLD_MEMORY_INTERVAL_MS);
+  const state = updateCollectorState((current) => ({
+    ...current,
+    collector: {
+      ...current.collector,
+      status: current.collector.running ? current.collector.status : "paused",
+      lastAction: "다음 월드 메모리 수집을 6시간 연기했습니다.",
+      lastError: "",
+    },
+    schedule: {
+      ...current.schedule,
+      pausedUntil,
+      nextRunAt: pausedUntil,
+      nextRetryAt: "",
+      activeCycle: current.collector.running ? current.schedule.activeCycle : null,
+    },
+  }));
+  scheduleWorldMemoryCollector();
+  return state;
+}
+
+async function buildWorldMemoryStatus() {
+  ensureWorldMemoryDirs();
+  const collectorState = readCollectorState();
+  const runtime = runtimeState();
+  const python = findPythonCommand();
+  const dependencies = probePythonDependencies(python);
+  let init = null;
+  let audit = null;
+  let list = null;
+  let states = null;
+  let taxonomy = null;
+  let embeddings = null;
+
+  if (dependencies.ok) {
+    init = await runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "init"] });
+    if (init.ok) {
+      const [auditResult, listResult, stateResult, taxonomyResult, embedResult] = await Promise.all([
+        runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "audit", "--days", "30", "--format", "json"] }),
+        runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "list", "--days", "30", "--entry-mode", "all", "--limit", "12", "--format", "json"] }),
+        runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "states", "--status", "all", "--limit", "12", "--format", "json"] }),
+        runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "taxonomy", "--type", "all", "--limit", "40", "--format", "json"] }),
+        runPythonScript({ scriptPath: WORLD_MEMORY_CLI, args: [...worldMemoryBaseArgs(), "embed-status", "--format", "json"] }),
+      ]);
+      audit = { ...auditResult, json: tryParseJson(auditResult.stdout) };
+      list = { ...listResult, json: tryParseJson(listResult.stdout) };
+      states = { ...stateResult, json: tryParseJson(stateResult.stdout) };
+      taxonomy = { ...taxonomyResult, json: tryParseJson(taxonomyResult.stdout) };
+      embeddings = { ...embedResult, json: tryParseJson(embedResult.stdout) };
+    }
+  }
+
+  return {
+    ok: dependencies.ok && (!init || init.ok),
+    paths: {
+      root: GUIBUILD_ROOT,
+      baseDir: WORLD_MEMORY_BASE_ARG,
+      dbFile: WORLD_MEMORY_DB_FILE,
+      dbPath: relative(GUIBUILD_ROOT, WORLD_MEMORY_DB_PATH),
+      logDir: relative(GUIBUILD_ROOT, WORLD_MEMORY_LOG_DIR),
+      cli: relative(GUIBUILD_ROOT, WORLD_MEMORY_CLI),
+      harness: relative(GUIBUILD_ROOT, WORLD_MEMORY_HARNESS),
+      analyzer: relative(GUIBUILD_ROOT, MARKET_ANALYZER),
+    },
+    db: {
+      exists: existsSync(WORLD_MEMORY_DB_PATH),
+      path: safeRelative(WORLD_MEMORY_DB_PATH),
+    },
+    embedding: {
+      engine: WORLD_MEMORY_EMBEDDING_ENGINE,
+      model: WORLD_MEMORY_EMBEDDING_MODEL,
+      dependency: "sentence-transformers>=5.0.0",
+      note: "semantic-search, embed-status, embed-build sidecar profile",
+    },
+    collector: {
+      ...collectorState.collector,
+      schedulerStarted: runtime.started,
+      inFlight: Boolean(runtime.inFlight),
+      nextTimerAt: runtime.nextTimerAt,
+    },
+    schedule: collectorState.schedule,
+    modelPolicy: collectorState.modelPolicy,
+    report: collectorState.report,
+    history: collectorState.history,
+    dependencies,
+    actions: actionCatalog,
+    init,
+    audit,
+    list,
+    states,
+    taxonomy,
+    embeddings,
+  };
+}
+
+async function runWorldMemoryAction(body = {}) {
+  ensureWorldMemoryDirs();
+  const action = String(body.action || "").trim();
+  if (action === "collectNow") {
+    const runtime = runtimeState();
+    if (runtime.inFlight) {
+      return {
+        ok: true,
+        action,
+        outputKind: "scheduler",
+        outputText: "이미 월드 메모리 수집이 실행 중입니다.",
+        status: await buildWorldMemoryStatus(),
+      };
+    }
+    void executeWorldMemoryCycle({ trigger: "manual", scheduledAt: nowIso(), attempt: 1 });
+    return {
+      ok: true,
+      action,
+      outputKind: "scheduler",
+      outputText: "월드 메모리 수동 수집을 시작했습니다.",
+      status: await buildWorldMemoryStatus(),
+    };
+  }
+  if (action === "pause") {
+    const state = pauseWorldMemoryCollection();
+    return {
+      ok: true,
+      action,
+      outputKind: "scheduler",
+      outputText: `다음 수집을 ${state.schedule.pausedUntil}까지 연기했습니다.`,
+      status: await buildWorldMemoryStatus(),
+    };
+  }
+  if (action === "refreshReport" || action === "report") {
+    return refreshWorldMemoryReportSnapshot({
+      sourceAction: String(body.sourceAction || body.source_action || "").trim(),
+      reason: String(body.reason || "").trim() || (action === "report" ? "manual-report-action" : ""),
+    });
+  }
+  return runCommandFromBody(body);
+}
+
+export async function handleWorldMemoryEndpoint(kind, req, res) {
+  if (kind === "status") {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
+      return;
+    }
+    try {
+      sendJson(res, await buildWorldMemoryStatus());
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
+
+  if (kind === "action") {
+    if (req.method !== "POST") {
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const result = await runWorldMemoryAction(body);
+      sendJson(res, result, result.ok ? 200 : 422);
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
+
+  sendJson(res, { ok: false, error: "unknown world memory endpoint" }, 404);
+}

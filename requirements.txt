@@ -1,0 +1,7 @@
+yfinance
+pandas
+matplotlib
+Pillow
+sentence-transformers>=5.0.0
+plotly
+playwright

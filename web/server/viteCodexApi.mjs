@@ -2,6 +2,8 @@ import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
 import { handleMemoryEndpoint } from "./memoryApi.mjs";
 import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
+import { handleReportsEndpoint } from "./reportsApi.mjs";
+import { handleWorldMemoryEndpoint, startWorldMemoryCollector } from "./worldMemoryApi.mjs";
 import {
   getCodexOptionsAsync,
   handleAgentSettingsEndpoint,
@@ -17,11 +19,17 @@ async function handleLazyArcaEndpoint(kind, req, res) {
   await handleArcaEndpoint(kind, req, res);
 }
 
+async function handleLazyArcaAuthEndpoint(kind, req, res) {
+  const { handleArcaAuthEndpoint } = await import("./arcaAuthApi.mjs");
+  await handleArcaAuthEndpoint(kind, req, res);
+}
+
 export function codexApiPlugin() {
   return {
     name: "finance-agent-codex-api",
     configureServer(server) {
       startNewsFeedCollector();
+      startWorldMemoryCollector();
 
       server.middlewares.use("/api/news-feed/settings", async (req, res) => {
         await handleNewsFeedEndpoint("settings", req, res);
@@ -51,6 +59,30 @@ export function codexApiPlugin() {
         await handleLazyArcaEndpoint("probe", req, res);
       });
 
+      server.middlewares.use("/api/arca/notifications", async (req, res) => {
+        await handleLazyArcaEndpoint("notifications", req, res);
+      });
+
+      server.middlewares.use("/api/arca/auth/status", async (req, res) => {
+        await handleLazyArcaAuthEndpoint("status", req, res);
+      });
+
+      server.middlewares.use("/api/arca/auth/start", async (req, res) => {
+        await handleLazyArcaAuthEndpoint("start", req, res);
+      });
+
+      server.middlewares.use("/api/arca/auth/capture", async (req, res) => {
+        await handleLazyArcaAuthEndpoint("capture", req, res);
+      });
+
+      server.middlewares.use("/api/arca/auth/stop", async (req, res) => {
+        await handleLazyArcaAuthEndpoint("stop", req, res);
+      });
+
+      server.middlewares.use("/api/arca/auth/session", async (req, res) => {
+        await handleLazyArcaAuthEndpoint("session", req, res);
+      });
+
       server.middlewares.use("/api/earnings/upcoming", async (req, res) => {
         await handleEarningsEndpoint("upcoming", req, res);
       });
@@ -59,8 +91,24 @@ export function codexApiPlugin() {
         await handleEconomicCalendarEndpoint("events", req, res);
       });
 
+      server.middlewares.use("/api/portfolio/canvases", async (req, res) => {
+        await handlePortfolioEndpoint("canvases", req, res);
+      });
+
       server.middlewares.use("/api/portfolio/backtest", async (req, res) => {
         await handlePortfolioEndpoint("backtest", req, res);
+      });
+
+      server.middlewares.use("/api/reports", async (req, res) => {
+        await handleReportsEndpoint("list", req, res);
+      });
+
+      server.middlewares.use("/api/world-memory/status", async (req, res) => {
+        await handleWorldMemoryEndpoint("status", req, res);
+      });
+
+      server.middlewares.use("/api/world-memory/action", async (req, res) => {
+        await handleWorldMemoryEndpoint("action", req, res);
       });
 
       server.middlewares.use("/api/memory/context", async (req, res) => {

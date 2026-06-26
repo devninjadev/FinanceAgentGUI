@@ -14,8 +14,14 @@ Thumbs.db
 
 # Private runtime memory and user workspace state
 /data/agent-attachments/*
+/data/arca-browser-profile/*
+/data/reports/*
+!/data/reports/.gitkeep
+/data/secrets/*
 /data/shared-memory/*
 !/data/shared-memory/.gitkeep
+/data/world-memory/*
+!/data/world-memory/.gitkeep
 /data/**/chat*.json
 /data/**/conversation*.json
 /data/**/portfolio-canvas*.json

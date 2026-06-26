@@ -1,0 +1,238 @@
+export const fallbackApprovalOptions = [
+  {
+    id: "on-request",
+    label: "요청시 승인",
+    cli: "--ask-for-approval on-request",
+    detail: "Codex가 필요하다고 판단한 작업에 대해 사용자 승인을 요청합니다.",
+  },
+  {
+    id: "untrusted",
+    label: "신뢰 명령만",
+    cli: "--ask-for-approval untrusted",
+    detail: "안전한 읽기 명령 위주로 허용하고 나머지는 승인 흐름을 탑니다.",
+  },
+  {
+    id: "never",
+    label: "승인 없음",
+    cli: "--ask-for-approval never",
+    detail: "진단 전용 또는 제한된 allowlist 실행에만 사용해야 합니다.",
+  },
+];
+
+export const standardSpeedOption = {
+  id: "standard",
+  label: "표준",
+  cli: "",
+  detail: "기본 Codex CLI 속도입니다.",
+};
+
+const loadingSpeedOption = {
+  id: "loading",
+  label: "대기",
+  cli: "",
+  detail: "저장된 에이전트 설정을 불러오고 있습니다.",
+};
+
+export const loadingApprovalOptions = [
+  {
+    id: "loading",
+    label: "설정 로드",
+    cli: "",
+    detail: "저장된 에이전트 설정을 불러오고 있습니다.",
+  },
+];
+
+export const loadingModelGroups = [
+  {
+    id: "loading",
+    slug: "loading",
+    label: "설정 로드",
+    displayName: "설정 불러오는 중",
+    defaultReasoningLevel: "loading",
+    reasoningLevels: [
+      {
+        id: "loading",
+        label: "대기",
+        cli: "",
+        detail: "저장된 에이전트 설정을 불러오고 있습니다.",
+      },
+    ],
+    speedOptions: [loadingSpeedOption],
+  },
+];
+
+export const fallbackProviderOptions = [
+  {
+    id: "codex-cli",
+    label: "Codex CLI",
+    available: false,
+    status: "checking",
+    detail: "Codex CLI 확인 중",
+  },
+  {
+    id: "antigravity-sdk",
+    label: "Antigravity SDK",
+    available: false,
+    status: "checking",
+    detail: "Antigravity SDK 확인 중",
+    installCommand: "python3 -m pip install --upgrade google-antigravity",
+  },
+];
+
+export const emptyAgentSettings = {
+  selectedProvider: "codex-cli",
+  providers: {},
+};
+
+export const antigravityPolicyOptions = [
+  {
+    id: "default",
+    label: "Default",
+    cli: "",
+    detail: "작업 폴더 기준 파일 정책을 유지하고, 터미널 실행과 범위 밖 접근은 승인 대상으로 둡니다.",
+  },
+  {
+    id: "full-machine",
+    label: "Full machine",
+    cli: "",
+    detail: "파일 접근 범위를 전체 머신으로 넓히되, 터미널 실행은 사용자 승인 흐름을 탑니다.",
+  },
+  {
+    id: "turbo",
+    label: "Turbo mode",
+    cli: "",
+    detail: "SDK 도구 호출을 최대한 자동 승인하는 고속 모드입니다. 신뢰한 작업에만 사용해야 합니다.",
+  },
+  {
+    id: "custom",
+    label: "Custom",
+    cli: "",
+    detail: "세부 policy와 capability 조합을 직접 지정하기 위한 자리입니다. 현재 GUI에서는 보수적으로 처리합니다.",
+  },
+];
+
+export const fallbackModelGroups = [
+  {
+    id: "gpt-5.5",
+    slug: "gpt-5.5",
+    label: "5.5",
+    displayName: "GPT-5.5",
+    defaultReasoningLevel: "high",
+    reasoningLevels: [
+      {
+        id: "low",
+        label: "낮음",
+        cli: '-c model_reasoning_effort="low"',
+        detail: "Fast responses with lighter reasoning",
+      },
+      {
+        id: "medium",
+        label: "보통",
+        cli: '-c model_reasoning_effort="medium"',
+        detail: "Balances speed and reasoning depth for everyday tasks",
+      },
+      {
+        id: "high",
+        label: "높음",
+        cli: '-c model_reasoning_effort="high"',
+        detail: "Greater reasoning depth for complex problems",
+      },
+      {
+        id: "xhigh",
+        label: "매우 높음",
+        cli: '-c model_reasoning_effort="xhigh"',
+        detail: "Extra high reasoning depth for complex problems",
+      },
+    ],
+    speedOptions: [standardSpeedOption],
+  },
+];
+
+export const antigravityModelGroups = [
+  {
+    id: "gemini-2.5-flash",
+    slug: "gemini-2.5-flash",
+    label: "2.5 Flash",
+    displayName: "Gemini 2.5 Flash (Vertex)",
+    defaultReasoningLevel: "diagnostic",
+    reasoningLevels: [
+      {
+        id: "diagnostic",
+        label: "진단",
+        cli: "",
+        detail: "SDK 준비 전 fallback 진단 모드입니다.",
+      },
+    ],
+    speedOptions: [standardSpeedOption],
+  },
+];
+
+const antigravityReasoningLevels = [
+  {
+    id: "minimal",
+    label: "최소",
+    cli: "",
+    detail: "Gemini thinking level minimal",
+  },
+  {
+    id: "low",
+    label: "낮음",
+    cli: "",
+    detail: "Gemini thinking level low",
+  },
+  {
+    id: "medium",
+    label: "보통",
+    cli: "",
+    detail: "Gemini thinking level medium",
+  },
+  {
+    id: "high",
+    label: "높음",
+    cli: "",
+    detail: "Gemini thinking level high",
+  },
+];
+
+function labelAntigravityModel(name) {
+  return String(name || "")
+    .replace(/^gemini-/, "")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase())
+    .replace(/\bPro\b/g, "Pro")
+    .replace(/\bFlash\b/g, "Flash")
+    .replace(/\bLite\b/g, "Lite");
+}
+
+export function modelGroupsFromAntigravityCatalog(catalog) {
+  const models = Array.isArray(catalog?.models) ? catalog.models : [];
+  const groups = models
+    .filter((item) => item?.selectable && item?.name)
+    .map((item) => ({
+      id: item.name,
+      slug: item.name,
+      label: labelAntigravityModel(item.name),
+      displayName: `Gemini ${labelAntigravityModel(item.name)}`,
+      description: item.sdkKnown
+        ? "Antigravity SDK known model and Vertex-listed in the configured region."
+        : "Vertex-listed Gemini model in the configured region.",
+      defaultReasoningLevel: "medium",
+      reasoningLevels: antigravityReasoningLevels,
+      speedOptions: [standardSpeedOption],
+    }));
+  return groups.length ? groups : antigravityModelGroups;
+}
+
+export function getSpeedOptions(modelGroup) {
+  const options = Array.isArray(modelGroup?.speedOptions) ? modelGroup.speedOptions : [];
+  const seen = new Set(["standard"]);
+  return [
+    standardSpeedOption,
+    ...options.filter((option) => {
+      const id = String(option?.id || "").trim();
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }),
+  ];
+}
