@@ -96,6 +96,19 @@ If the error says WebSocket is unavailable:
 - or patch the project to use an explicit WebSocket dependency,
 - then document the new dependency in `docs/installation.md`.
 
+### Windows Python stdout encoding
+
+Windows native shells can expose `cp949` or another locale code page to Python
+child processes. The yfinance calendar endpoints emit Korean labels, country
+emoji, and fallback markers such as `•` as JSON, so `web/server/earningsApi.mjs`
+and `web/server/economicCalendarApi.mjs` force their Python subprocesses to
+UTF-8 with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
+
+If a calendar view shows `UnicodeEncodeError: 'cp949' codec can't encode`, check
+that those server modules are the active build and that the process was restarted
+after updating. Do not remove the UTF-8 environment override when refactoring
+Python subprocess helpers.
+
 ### Browser profile locks
 
 Chromium-family browsers lock a profile while running. If `data/arca-browser-profile` is already open and the GUI server lost in-memory handoff state, the app should recover the running DevTools port where possible.

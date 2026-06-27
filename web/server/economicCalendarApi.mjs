@@ -16,6 +16,12 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const ECONOMIC_FETCH_TIMEOUT_MS = 45000;
 const FINALIZED_CACHE_AFTER_HOURS = 24;
 const FINALIZED_CACHE_AFTER_MS = FINALIZED_CACHE_AFTER_HOURS * 60 * 60 * 1000;
+const PYTHON_UTF8_ENV = {
+  ...process.env,
+  PYTHONIOENCODING: "utf-8",
+  PYTHONUTF8: "1",
+  PYTHONUNBUFFERED: "1",
+};
 
 const cache = new Map();
 
@@ -52,6 +58,7 @@ function findPythonCommand() {
     if (candidate.command.includes(".venv") && !existsSync(candidate.command)) continue;
     const versionResult = spawnSync(candidate.command, [...candidate.argsPrefix, "--version"], {
       encoding: "utf8",
+      env: PYTHON_UTF8_ENV,
       timeout: 3000,
     });
     if (versionResult.error || versionResult.status !== 0) continue;
@@ -59,6 +66,7 @@ function findPythonCommand() {
 
     const importResult = spawnSync(candidate.command, [...candidate.argsPrefix, "-c", "import pandas, yfinance"], {
       encoding: "utf8",
+      env: PYTHON_UTF8_ENV,
       timeout: 5000,
     });
     if (!importResult.error && importResult.status === 0) return candidate;
@@ -289,6 +297,12 @@ import math
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--start", required=True)
@@ -527,6 +541,7 @@ function runYfinanceEconomicCalendar({ startDate, endDate, limit, force }) {
       ],
       {
         cwd: WEB_ROOT,
+        env: PYTHON_UTF8_ENV,
         stdio: ["ignore", "pipe", "pipe"],
       }
     );
@@ -557,11 +572,11 @@ function runYfinanceEconomicCalendar({ startDate, endDate, limit, force }) {
     }, ECONOMIC_FETCH_TIMEOUT_MS);
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      stdout += chunk.toString("utf8");
     });
 
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr += chunk.toString("utf8");
     });
 
     child.once("error", (error) => {
