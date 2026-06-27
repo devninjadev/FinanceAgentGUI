@@ -43,9 +43,6 @@ export function PortfolioWidgetCanvas({
   onDeleteWidget,
   onWidgetAction,
   onScenarioPromptRequest,
-  onRefreshCanvas,
-  canvasRefreshBusy = false,
-  refreshableWidgetCount = 0,
   appendLog,
 }) {
   const gridRef = useRef(null);
@@ -324,33 +321,15 @@ export function PortfolioWidgetCanvas({
 
   return (
     <div className="portfolio-widget-canvas">
-      <section className="portfolio-widget-intro" aria-labelledby="portfolio-widget-canvas-title">
-        <div>
-          <span>3열 위젯 캔버스</span>
-          <h2 id="portfolio-widget-canvas-title">{isStrategyCanvas ? "시나리오 아래에서 에이전트에게 요청합니다." : "빈 칸의 에이전트 아이콘으로 요청합니다."}</h2>
-          <p>
-            {isStrategyCanvas
-              ? "기간 및 타임프레임에서 출발해 원본 행렬, 신호 행렬, 백테스트, 지표 순서로만 흐릅니다."
-              : "포트폴리오 위젯은 원본 데이터로 두고, 백테스트는 입력 위젯들을 엮은 별도 차트 위젯으로 생성합니다."}
-          </p>
-        </div>
-        <div className="portfolio-widget-intro-actions">
-          <button
-            type="button"
-            onClick={onRefreshCanvas}
-            disabled={canvasRefreshBusy || !refreshableWidgetCount}
-            title={
-              refreshableWidgetCount
-                ? "yfinance 기반 위젯을 의존성 순서대로 새로고침"
-                : "새로고침할 yfinance 기반 위젯이 없습니다."
-            }
-          >
-            <RefreshCw size={15} strokeWidth={2.4} />
-            <span>{canvasRefreshBusy ? "새로고침 중" : "캔버스를 최신 정보로 새로고침"}</span>
-          </button>
-          <span>{widgets.length ? `${widgets.length}개 위젯` : "첫 위젯 대기"}</span>
-        </div>
-      </section>
+      {isStrategyCanvas ? null : (
+        <section className="portfolio-widget-intro" aria-labelledby="portfolio-widget-canvas-title">
+          <div>
+            <span>3열 위젯 캔버스</span>
+            <h2 id="portfolio-widget-canvas-title">빈 칸의 에이전트 아이콘으로 요청합니다.</h2>
+            <p>포트폴리오 위젯은 원본 데이터로 두고, 백테스트는 입력 위젯들을 엮은 별도 차트 위젯으로 생성합니다.</p>
+          </div>
+        </section>
+      )}
 
       <PortfolioWidgetFlowMap widgets={widgets} />
       {isStrategyCanvas ? <PortfolioScenarioPanel scenario={scenario} onPromptRequest={onScenarioPromptRequest} /> : null}

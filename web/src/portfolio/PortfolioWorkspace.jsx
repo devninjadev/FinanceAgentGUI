@@ -551,12 +551,12 @@ export function PortfolioWorkspace({
     }
     setCanvasRefreshBusy(true);
     setWorkspaceStatus("remembered");
-    appendLog(`캔버스 최신 정보 새로고침 시작 · yfinance ${targets.length}개`);
+    appendLog("캔버스 최신 정보 새로고침 시작 · yfinance");
     try {
       for (const target of targets) {
         await runPortfolioWidgetBacktestChart(target);
       }
-      appendLog(`캔버스 최신 정보 새로고침 완료 · ${targets.length}개 위젯`);
+      appendLog("캔버스 최신 정보 새로고침 완료");
     } finally {
       setCanvasRefreshBusy(false);
     }
@@ -763,7 +763,6 @@ export function PortfolioWorkspace({
           isAssetMode={canvasModeMeta.id === PORTFOLIO_CANVAS_MODES.asset.id}
           isWidgetCanvasMode={isWidgetCanvasMode}
           workspaceStatus={workspaceStatus}
-          widgetCount={widgets.length}
           titleEditing={titleEditing}
           titleDraft={titleDraft}
           titleInputRef={titleInputRef}
@@ -772,6 +771,9 @@ export function PortfolioWorkspace({
           onTitleDraftKeyDown={handleCanvasTitleKeyDown}
           onStartTitleEditing={() => setTitleEditing(true)}
           onOpenGuide={reopenPortfolioGuide}
+          onRefreshCanvas={refreshPortfolioCanvasLatestData}
+          canvasRefreshBusy={canvasRefreshBusy}
+          refreshableWidgetCount={canvasRefreshTargets.length}
         />
 
         {isWidgetCanvasMode ? (
@@ -787,9 +789,6 @@ export function PortfolioWorkspace({
               onDeleteWidget={requestDeletePortfolioWidget}
               onWidgetAction={runPortfolioWidgetAction}
               onScenarioPromptRequest={openScenarioPromptModal}
-              onRefreshCanvas={refreshPortfolioCanvasLatestData}
-              canvasRefreshBusy={canvasRefreshBusy}
-              refreshableWidgetCount={canvasRefreshTargets.length}
               appendLog={appendLog}
             />
             <PortfolioWidgetModal
