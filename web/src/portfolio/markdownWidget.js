@@ -3,6 +3,7 @@ import { cleanPortfolioWidgetText } from "./widgetIdentity.js";
 
 const MARKDOWN_TEXT_LIMIT = 24_000;
 const MARKDOWN_CHART_LIMIT = 4;
+const MARKDOWN_ECHART_FENCE_PATTERN = /```(?:echarts|chart)\s*\n([\s\S]*?)```/gi;
 
 function clonePlainObject(value) {
   if (!value || typeof value !== "object") return null;
@@ -25,13 +26,23 @@ function normalizeMarkdownChartEntry(value = {}, index = 0) {
   const optionSource = value.option || value.echartsOption || value.eChartOption || value.options || (objectLooksLikeEChartsOption(value) ? value : null);
   const option = clonePlainObject(optionSource);
   if (!option || !objectLooksLikeEChartsOption(option)) return null;
+  const title = typeof value.title === "string" ? value.title : value.title?.text || value.heading || option?.title?.text || "";
   return {
     id: cleanPortfolioWidgetText(value.id || value.key || `echarts_${index + 1}`, 40),
-    title: cleanPortfolioWidgetText(value.title || value.heading || option?.title?.text || "", 100),
+    title: cleanPortfolioWidgetText(title, 100),
     body: cleanPortfolioWidgetText(value.body || value.summary || value.description || "", 360),
     ariaLabel: cleanPortfolioWidgetText(value.ariaLabel || value.label || value.title || option?.title?.text || "마크다운 위젯 차트", 120),
     option,
   };
+}
+
+function normalizeMarkdownChartFence(value = "", index = 0) {
+  try {
+    const parsed = JSON.parse(value);
+    return normalizeMarkdownChartEntry(parsed, index);
+  } catch {
+    return null;
+  }
 }
 
 export function normalizePortfolioMarkdownText(...values) {
@@ -61,10 +72,22 @@ export function stripDuplicatePortfolioMarkdownTitle(markdown = "", title = "") 
   return lines.join("\n").replace(/^\s*\n+/, "");
 }
 
+export function stripPortfolioMarkdownEChartsFences(markdown = "") {
+  return String(markdown || "").replace(MARKDOWN_ECHART_FENCE_PATTERN, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function normalizePortfolioMarkdownECharts(...values) {
   const entries = [];
   function visit(value) {
     if (!value || entries.length >= MARKDOWN_CHART_LIMIT) return;
+    if (typeof value === "string") {
+      for (const match of value.matchAll(MARKDOWN_ECHART_FENCE_PATTERN)) {
+        if (entries.length >= MARKDOWN_CHART_LIMIT) break;
+        const normalized = normalizeMarkdownChartFence(match[1], entries.length);
+        if (normalized) entries.push(normalized);
+      }
+      return;
+    }
     if (Array.isArray(value)) {
       value.forEach(visit);
       return;

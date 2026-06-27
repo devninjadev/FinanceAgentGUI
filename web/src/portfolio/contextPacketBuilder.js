@@ -13,6 +13,7 @@ const portfolioContextAvailableActions = [
   "import_holdings",
   "refresh_canvas_latest_data",
   "run_backtest_chart_widget",
+  "request_backtest_matrix_context",
   "render_portfolio_artifact",
   "set_widget_dependencies",
   "update_derived_widget",

@@ -291,6 +291,19 @@ export function PortfolioWorkspace({
       }
       return;
     }
+    if (applyState.backtestMatrixPrompt) {
+      if (applyState.workspaceStarted) setWorkspaceStarted(true);
+      if (applyState.scenario) setScenario(applyState.scenario);
+      (applyState.logMessages || []).forEach(appendLog);
+      onWidgetPromptRequest?.({
+        ...(agentWidgetAction.request || {}),
+        action: agentWidgetAction.request?.action || "create",
+        prompt: applyState.backtestMatrixPrompt,
+        source: "backtest-matrix-context",
+        backtestMatrixContext: true,
+      });
+      return;
+    }
     if (applyState.workspaceStarted) setWorkspaceStarted(true);
     if (applyState.rememberWorkspace) {
       setWorkspaceStatus((current) => (current === "draft" ? "remembered" : current));
@@ -303,7 +316,20 @@ export function PortfolioWorkspace({
     const contractRetryCount = Math.max(0, Number(agentWidgetAction?.request?.contractRetryCount || 0) || 0);
     if (applyState.status === "action-contract-invalid" && applyState.contractError && contractRetryCount < 3) {
       const originalPrompt = cleanPortfolioWidgetPrompt(agentWidgetAction?.request?.prompt || "", 1200);
+      const retryTargetWidget = widgets.find(
+        (widget) =>
+          widget.id === applyState.contractError.widgetId ||
+          widget.displayId === applyState.contractError.displayId
+      );
       const contractGuidance = {
+        target_type_mismatch: [
+          "기존 table/function/line/metrics 위젯을 markdown으로 바꾸거나 markdown 새 위젯으로 우회하지 마세요.",
+          "수정이면 같은 widgetId/widgetDisplayId를 대상으로 기존 visualType을 유지한 update_widget을 보내고, 별도 문서가 필요하면 action=create_widget으로 명확히 분리하세요.",
+        ],
+        repair_must_preserve_widget_type: [
+          "관계/의존성 수리 응답은 기존 위젯 타입을 유지하는 update_widget이어야 합니다.",
+          "마크다운 설명 대신 dependsOn, derivedFrom, chartSpec, functionSpec, nextActions 같은 실행 계약 필드를 고치세요.",
+        ],
         matrix_dsl_program_required: [
           "portfolio-matrix-dsl 함수 위젯을 만들려면 functionSpec.program 배열을 완성해서 포함해야 합니다.",
           "strategy-dsl, signal-rules, threshold_rebalance 같은 레거시 함수 경로는 더 이상 허용되지 않습니다.",
@@ -343,7 +369,14 @@ export function PortfolioWorkspace({
       appendLog(`계약 오류 재요청 · ${applyState.contractError.displayId || applyState.contractError.title || "함수 위젯"}`);
       onWidgetPromptRequest?.({
         ...(agentWidgetAction.request || {}),
-        action: agentWidgetAction.request?.action || "create",
+        action: retryTargetWidget ? "edit" : agentWidgetAction.request?.action || "create",
+        widgetId: retryTargetWidget?.id || agentWidgetAction.request?.widgetId || applyState.contractError.widgetId || "",
+        widgetDisplayId:
+          retryTargetWidget?.displayId ||
+          agentWidgetAction.request?.widgetDisplayId ||
+          applyState.contractError.displayId ||
+          "",
+        widget: retryTargetWidget || agentWidgetAction.request?.widget,
         prompt: retryPrompt,
         source: "contract-harness",
         contractRetryCount: contractRetryCount + 1,

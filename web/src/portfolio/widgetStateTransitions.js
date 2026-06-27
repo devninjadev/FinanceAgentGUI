@@ -1,9 +1,11 @@
 import { normalizePortfolioWidgetList } from "./widgetIdentity.js";
+import { buildPortfolioMetricsTableSyncPatch } from "./widgetMetrics.js";
 import {
   portfolioWidgetDependencyIds,
   portfolioWidgetDependsOnWidget,
   portfolioWidgetDownstreamDependents,
 } from "./widgetRelations.js";
+import { portfolioWidgetLooksLikeBacktestResult } from "./widgetRoleClassifier.js";
 import { normalizePortfolioWidgetVisualType } from "./widgetTypes.js";
 
 const BACKTEST_CHART_ACTIONS = new Set(["run_backtest_chart_widget", "run_yfinance_backtest_comparison"]);
@@ -44,11 +46,14 @@ export function markPortfolioWidgetDependentsStale(
     const actionTokens = normalizePortfolioWidgetList(widget.nextActions || widget.actions || widget.nextAction, 8, 80).map(normalizeTransitionToken);
     const chartTokens = [chartSpec.role, widget.outputRole].map(normalizeTransitionToken);
     const isBacktestChart =
-      visualType === "line" &&
+      (visualType === "line" || portfolioWidgetLooksLikeBacktestResult(widget)) &&
       (actionTokens.some((action) => BACKTEST_CHART_ACTIONS.has(action)) ||
-        chartTokens.some((token) => BACKTEST_CHART_ROLES.has(token)));
+        chartTokens.some((token) => BACKTEST_CHART_ROLES.has(token)) ||
+        portfolioWidgetLooksLikeBacktestResult(widget));
     const isMetricsTable = isMetricsTarget(widget);
     if (syncMetricsTargets && isMetricsTable) {
+      const syncedWidget = buildPortfolioMetricsTableSyncPatch(widget, widgets, now);
+      if (syncedWidget) return syncedWidget;
       const nextActions = normalizePortfolioWidgetList(
         (widget.nextActions || []).filter((action) => normalizeTransitionToken(action) !== "update_derived_widget"),
         4,

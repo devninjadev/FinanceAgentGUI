@@ -3,6 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCodexOptions, readJsonBody, runAntigravityGenerate, runCodexChat, sendJson } from "./codexProbe.mjs";
+import {
+  isWorldMemoryEnabled,
+  publicWorldMemorySettingsSnapshot,
+  readWorldMemorySettings,
+  writeWorldMemorySettingsPatch,
+} from "./worldMemorySettings.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
@@ -180,6 +186,62 @@ function writeCollectorState(state) {
   };
   writeJsonFile(WORLD_MEMORY_STATE_PATH, next);
   return next;
+}
+
+function buildWorldMemoryDisabledStatus(settings = readWorldMemorySettings()) {
+  const runtime = runtimeState();
+  return {
+    ok: true,
+    enabled: false,
+    settings,
+    configPath: "config/world-memory.user.json",
+    defaultConfigPath: "config/world-memory.defaults.json",
+    disabledReason: "월드 메모리 사용 설정이 꺼져 있습니다.",
+    paths: {
+      root: GUIBUILD_ROOT,
+      baseDir: WORLD_MEMORY_BASE_ARG,
+      dbFile: WORLD_MEMORY_DB_FILE,
+      dbPath: relative(GUIBUILD_ROOT, WORLD_MEMORY_DB_PATH),
+      logDir: relative(GUIBUILD_ROOT, WORLD_MEMORY_LOG_DIR),
+      cli: relative(GUIBUILD_ROOT, WORLD_MEMORY_CLI),
+      harness: relative(GUIBUILD_ROOT, WORLD_MEMORY_HARNESS),
+      analyzer: relative(GUIBUILD_ROOT, MARKET_ANALYZER),
+    },
+    db: {
+      exists: existsSync(WORLD_MEMORY_DB_PATH),
+      path: safeRelative(WORLD_MEMORY_DB_PATH),
+    },
+    embedding: {
+      engine: WORLD_MEMORY_EMBEDDING_ENGINE,
+      model: WORLD_MEMORY_EMBEDDING_MODEL,
+      dependency: "sentence-transformers>=5.0.0",
+      note: "월드 메모리 사용을 켜면 semantic-search와 embed-status에서 사용합니다.",
+    },
+    collector: {
+      ...defaultCollectorState().collector,
+      status: "disabled",
+      lastAction: "월드 메모리 사용 꺼짐",
+      schedulerStarted: false,
+      inFlight: Boolean(runtime.inFlight),
+      nextTimerAt: "",
+    },
+    schedule: defaultCollectorState().schedule,
+    modelPolicy: defaultModelPolicy(),
+    report: emptyReportState(),
+    history: [],
+    dependencies: {
+      ok: true,
+      modules: {},
+      issues: [],
+    },
+    actions: actionCatalog,
+    init: null,
+    audit: null,
+    list: null,
+    states: null,
+    taxonomy: null,
+    embeddings: null,
+  };
 }
 
 function updateCollectorState(mutator) {
@@ -368,13 +430,13 @@ function findPythonCommand() {
   const candidates =
     process.platform === "win32"
       ? [
-          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/Scripts/python.exe" },
+          { command: localVenvPython, argsPrefix: [], display: ".venv/Scripts/python.exe" },
           { command: "py", argsPrefix: ["-3"], display: "py -3" },
           { command: "python", argsPrefix: [], display: "python" },
           { command: "python3", argsPrefix: [], display: "python3" },
         ]
       : [
-          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/bin/python" },
+          { command: localVenvPython, argsPrefix: [], display: ".venv/bin/python" },
           { command: "python3", argsPrefix: [], display: "python3" },
           { command: "python", argsPrefix: [], display: "python" },
         ];
@@ -1679,7 +1741,16 @@ function normalizeMissedSchedules(state) {
 
 function scheduleWorldMemoryCollector(delayOverrideMs = null) {
   const runtime = runtimeState();
-  if (!runtime.started || process.env.WORLD_MEMORY_COLLECTOR_DISABLED === "1") return;
+  if (
+    !runtime.started ||
+    process.env.WORLD_MEMORY_COLLECTOR_DISABLED === "1" ||
+    !isWorldMemoryEnabled()
+  ) {
+    if (runtime.timer) clearTimeout(runtime.timer);
+    runtime.timer = null;
+    runtime.nextTimerAt = "";
+    return;
+  }
   if (runtime.timer) clearTimeout(runtime.timer);
 
   let state = normalizeMissedSchedules(readCollectorState());
@@ -1703,6 +1774,10 @@ function scheduleWorldMemoryCollector(delayOverrideMs = null) {
 
 async function handleWorldMemoryTimer() {
   const runtime = runtimeState();
+  if (!isWorldMemoryEnabled()) {
+    stopWorldMemoryCollector();
+    return;
+  }
   if (runtime.inFlight) {
     scheduleWorldMemoryCollector(WORLD_MEMORY_RETRY_INTERVAL_MS);
     return;
@@ -1777,7 +1852,11 @@ async function handleWorldMemoryTimer() {
 
 export function startWorldMemoryCollector() {
   const runtime = runtimeState();
-  if (runtime.started) return;
+  if (!isWorldMemoryEnabled()) {
+    stopWorldMemoryCollector({ persist: false });
+    return false;
+  }
+  if (runtime.started) return true;
   ensureWorldMemoryDirs();
   runtime.started = true;
   updateCollectorState((state) => ({
@@ -1785,6 +1864,34 @@ export function startWorldMemoryCollector() {
     modelPolicy: resolveWorldMemoryModelPolicy(),
   }));
   scheduleWorldMemoryCollector();
+  return true;
+}
+
+export function stopWorldMemoryCollector({ persist = true } = {}) {
+  const runtime = runtimeState();
+  if (runtime.timer) clearTimeout(runtime.timer);
+  runtime.timer = null;
+  runtime.nextTimerAt = "";
+  runtime.started = false;
+
+  if (persist && existsSync(WORLD_MEMORY_STATE_PATH)) {
+    updateCollectorState((state) => ({
+      ...state,
+      collector: {
+        ...state.collector,
+        status: runtime.inFlight ? state.collector.status : "disabled",
+        running: Boolean(runtime.inFlight),
+        lastAction: runtime.inFlight ? state.collector.lastAction : "월드 메모리 사용 꺼짐",
+      },
+      schedule: {
+        ...state.schedule,
+        nextRetryAt: "",
+        activeCycle: runtime.inFlight ? state.schedule.activeCycle : null,
+      },
+    }));
+  }
+
+  return true;
 }
 
 function pauseWorldMemoryCollection() {
@@ -1810,6 +1917,11 @@ function pauseWorldMemoryCollection() {
 }
 
 async function buildWorldMemoryStatus() {
+  const settings = readWorldMemorySettings();
+  if (!settings.enabled) {
+    return buildWorldMemoryDisabledStatus(settings);
+  }
+
   ensureWorldMemoryDirs();
   const collectorState = readCollectorState();
   const runtime = runtimeState();
@@ -1842,6 +1954,10 @@ async function buildWorldMemoryStatus() {
 
   return {
     ok: dependencies.ok && (!init || init.ok),
+    enabled: true,
+    settings,
+    configPath: "config/world-memory.user.json",
+    defaultConfigPath: "config/world-memory.defaults.json",
     paths: {
       root: GUIBUILD_ROOT,
       baseDir: WORLD_MEMORY_BASE_ARG,
@@ -1884,6 +2000,16 @@ async function buildWorldMemoryStatus() {
 }
 
 async function runWorldMemoryAction(body = {}) {
+  if (!isWorldMemoryEnabled()) {
+    return {
+      ok: false,
+      action: String(body.action || "").trim(),
+      outputKind: "settings",
+      error: "월드 메모리 사용 설정이 꺼져 있습니다.",
+      status: buildWorldMemoryDisabledStatus(),
+    };
+  }
+
   ensureWorldMemoryDirs();
   const action = String(body.action || "").trim();
   if (action === "collectNow") {
@@ -1926,6 +2052,32 @@ async function runWorldMemoryAction(body = {}) {
 }
 
 export async function handleWorldMemoryEndpoint(kind, req, res) {
+  if (kind === "settings") {
+    try {
+      if (req.method === "GET") {
+        sendJson(res, publicWorldMemorySettingsSnapshot());
+        return;
+      }
+
+      if (req.method === "PATCH" || req.method === "POST") {
+        const body = await readJsonBody(req);
+        const settings = writeWorldMemorySettingsPatch(body);
+        if (settings.enabled) {
+          startWorldMemoryCollector();
+        } else {
+          stopWorldMemoryCollector();
+        }
+        sendJson(res, publicWorldMemorySettingsSnapshot());
+        return;
+      }
+
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message }, 500);
+    }
+    return;
+  }
+
   if (kind === "status") {
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, { ok: false, error: "method not allowed" }, 405);

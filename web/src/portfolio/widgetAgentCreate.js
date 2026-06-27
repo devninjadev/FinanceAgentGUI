@@ -19,8 +19,31 @@ import {
 } from "./scenarioContract.js";
 import { portfolioWidgetIsMarkdownType } from "./markdownWidget.js";
 
-const agentCreateActionPattern =
-  /create|render_portfolio_artifact|artifact|chart|pie|allocation|function|strategy|signal|markdown|document|report|import_holdings|run_backtest_chart_widget|run_yfinance_backtest_comparison/;
+const AGENT_CREATE_ACTION_TOKENS = new Set([
+  "create_widget",
+  "create_portfolio_widget",
+  "create_widget_flow",
+  "update_scenario",
+  "render_portfolio_artifact",
+  "artifact",
+  "chart",
+  "pie",
+  "allocation",
+  "function",
+  "strategy",
+  "signal",
+  "markdown",
+  "document",
+  "report",
+  "import_holdings",
+]);
+
+function normalizeAgentWidgetActionToken(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
 
 function portfolioAgentDefaultKindForVisualType(visualType = "") {
   if (visualType === "table") return "포트폴리오 표";
@@ -76,14 +99,14 @@ export function portfolioAgentWidgetCreateIntent({
   hasWidgetPayload = false,
   hasParsedAction = false,
 } = {}) {
-  const action = String(actionName || "").toLowerCase();
+  const action = normalizeAgentWidgetActionToken(actionName);
   const request = agentWidgetAction?.request || {};
   const hasPayload = Boolean(hasWidgetPayload);
-  const isAmbiguousUpdateWithPayload = /update|edit|modify|수정/.test(action) && !hasExplicitTarget && hasPayload;
+  const isAmbiguousUpdateWithPayload = false;
   const shouldCreateWidget =
     !agentWidgetAction?.error &&
     (hasParsedAction || request?.action === "create_widget") &&
-    (agentCreateActionPattern.test(action) ||
+    (AGENT_CREATE_ACTION_TOKENS.has(action) ||
       request?.action === "create_widget" ||
       isAmbiguousUpdateWithPayload);
 

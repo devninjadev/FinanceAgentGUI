@@ -9,6 +9,7 @@ import {
 } from "./backtestResults.js";
 import {
   buildPortfolioBacktestPayload,
+  portfolioHoldingsSignature,
   portfolioWidgetBenchmarkPreference,
   selectPortfolioBetaReference,
 } from "./backtestRequestBuilder.js";
@@ -32,6 +33,7 @@ import {
 import {
   normalizePortfolioBacktestMetricRow,
   portfolioBacktestMetricColumns,
+  portfolioDcaMetricColumns,
 } from "./widgetMetrics.js";
 import { portfolioWidgetStrategySpec } from "./widgetStrategySpec.js";
 
@@ -44,15 +46,22 @@ export function buildPortfolioBacktestChartRequests({
   const scenarioSpec = normalizePortfolioScenarioSpec(scenario, { backtestPeriod });
   const scenarioRuns = scenarioSpec.runs.length ? scenarioSpec.runs : normalizePortfolioScenarioSpec(null, { backtestPeriod }).runs;
   const hasMultipleRuns = scenarioRuns.length > 1;
+  const targetOnlySourceKeys = portfolioBacktestTargetOnlySourceKeys({
+    runnableSources,
+    supportedStrategySpecs,
+  });
+  const requestSources = targetOnlySourceKeys.size
+    ? runnableSources.filter(({ source }) => !targetOnlySourceKeys.has(portfolioBacktestSourceKey(source)))
+    : runnableSources;
   const firstBuyHoldSourceByHoldings = new Map();
-  runnableSources.forEach(({ source, holdings }) => {
+  requestSources.forEach(({ source, holdings }) => {
     const signature = portfolioBacktestHoldingsSignature(holdings);
     const sourceKey = portfolioBacktestSourceKey(source);
     if (signature && sourceKey && !firstBuyHoldSourceByHoldings.has(signature)) {
       firstBuyHoldSourceByHoldings.set(signature, sourceKey);
     }
   });
-  return runnableSources.flatMap(({ source, holdings }) => {
+  return requestSources.flatMap(({ source, holdings }) => {
     const sourceKey = portfolioBacktestSourceKey(source);
     const holdingsSignature = portfolioBacktestHoldingsSignature(holdings);
     const shouldEmitBuyHold = !holdingsSignature || firstBuyHoldSourceByHoldings.get(holdingsSignature) === sourceKey;
@@ -98,6 +107,70 @@ export function buildPortfolioBacktestChartRequests({
 
 function portfolioBacktestSourceKey(source = {}) {
   return String(source.id || source.displayId || source.title || "").trim();
+}
+
+function portfolioBacktestTargetOnlySourceKeys({
+  runnableSources = [],
+  supportedStrategySpecs = [],
+} = {}) {
+  if (runnableSources.length <= 1) return new Set();
+  const targetSignatures = new Set(
+    supportedStrategySpecs
+      .flatMap(portfolioBacktestStrategyTargetSignatures)
+      .filter(Boolean)
+  );
+  if (!targetSignatures.size) return new Set();
+  const keys = new Set();
+  runnableSources.forEach(({ source, holdings }) => {
+    const sourceKey = portfolioBacktestSourceKey(source);
+    const signatures = portfolioBacktestSourceHoldingsSignatures(holdings);
+    if (sourceKey && signatures.some((signature) => targetSignatures.has(signature))) {
+      keys.add(sourceKey);
+    }
+  });
+  return keys.size >= runnableSources.length ? new Set() : keys;
+}
+
+function portfolioBacktestSourceHoldingsSignatures(holdings = []) {
+  const directSignature = portfolioHoldingsSignature(holdings);
+  const displayNameSignature = portfolioHoldingsSignature(
+    holdings.map((item) => ({
+      ...item,
+      ticker: item?.name || item?.label || item?.ticker,
+    }))
+  );
+  return [...new Set([directSignature, displayNameSignature].filter(Boolean))];
+}
+
+function portfolioBacktestStrategyTargetSignatures({ strategySpec = {} } = {}) {
+  const program = Array.isArray(strategySpec?.functionSpec?.program)
+    ? strategySpec.functionSpec.program
+    : [];
+  return program
+    .filter(portfolioBacktestStepIsPortfolioSwap)
+    .map((step) => portfolioHoldingsSignature(portfolioBacktestTargetWeightsHoldings(step.targetWeights)))
+    .filter(Boolean);
+}
+
+function portfolioBacktestStepIsPortfolioSwap(step = {}) {
+  const op = String(step?.op || step?.type || "").trim().toLowerCase();
+  const eventType = String(step?.eventType || step?.event || step?.kind || step?.method || step?.action || "").trim().toLowerCase();
+  const hasTargetWeights = step?.targetWeights && typeof step.targetWeights === "object" && !Array.isArray(step.targetWeights);
+  return (
+    op === "portfolio_swap" ||
+    (op === "allocation_event" && ["portfolio_swap", "portfolio_allocation_swap", "allocation_swap", "target_weights"].includes(eventType)) ||
+    (op === "swap" && hasTargetWeights)
+  );
+}
+
+function portfolioBacktestTargetWeightsHoldings(targetWeights = {}) {
+  if (!targetWeights || typeof targetWeights !== "object" || Array.isArray(targetWeights)) return [];
+  return Object.entries(targetWeights)
+    .map(([ticker, value]) => ({
+      ticker,
+      value: Number(value),
+    }))
+    .filter((item) => String(item.ticker || "").trim() && Number.isFinite(item.value) && item.value > 0);
 }
 
 function portfolioBacktestSourceReferenceSet(source = {}) {
@@ -470,14 +543,178 @@ export async function executePortfolioBacktestChartRun({
   };
 }
 
+function portfolioBacktestResultRunKey(result = {}) {
+  const run = result.scenarioRun || {};
+  return String(run.runId || run.label || run.period || result.period || "base");
+}
+
+function portfolioBacktestResultGroupKey(result = {}) {
+  const source = result.source || {};
+  return [
+    source.id || source.displayId || source.title || "",
+    portfolioBacktestResultRunKey(result),
+  ].join("::");
+}
+
+function portfolioBacktestDcaContributionValue(payload = {}) {
+  const metric = payload.metrics?.standard || {};
+  const contribution = Number(metric.totalContribution);
+  const hasDcaMetric =
+    payload.metrics?.metricProfile === "dca" ||
+    metric.irr != null ||
+    metric.contributionReturn != null ||
+    metric.netProfit != null;
+  return hasDcaMetric && Number.isFinite(contribution) && contribution > 0 ? contribution : null;
+}
+
+function portfolioBacktestMoneyAmountFromText(value = "") {
+  const source = String(value || "");
+  if (!source) return null;
+  const matches = [];
+  const patterns = [
+    /[$＄]\s*([0-9][0-9,]*(?:\.\d+)?)/g,
+    /([0-9][0-9,]*(?:\.\d+)?)\s*(?:달러|usd)/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const amount = Number(String(match[1] || "").replace(/,/g, ""));
+      if (Number.isFinite(amount) && amount > 0) {
+        matches.push({ amount, index: match.index || 0, raw: match[0] || "" });
+      }
+    }
+  }
+  if (!matches.length) return null;
+  const principalMatch = matches.find((match) => {
+    const start = Math.max(0, match.index - 28);
+    const end = Math.min(source.length, match.index + match.raw.length + 28);
+    return /일시불|lump\s*sum|lump-sum|lumpsum|initial|principal|원금|초기|목돈/i.test(source.slice(start, end));
+  });
+  return (principalMatch || matches[0]).amount;
+}
+
+function portfolioBacktestSourcePrincipal(result = {}) {
+  const source = result.source || {};
+  const textCandidates = [
+    source.title,
+    source.name,
+    source.prompt,
+    source.summary,
+    source.description,
+    source.label,
+    source.agentSummary,
+    source.lastAgentAnswer,
+    source.chartSpec?.title,
+    source.chartSpec?.summary,
+  ];
+  for (const candidate of textCandidates) {
+    const amount = portfolioBacktestMoneyAmountFromText(candidate);
+    if (amount) return amount;
+  }
+  const explicit = [
+    source.principal,
+    source.initialCapital,
+    source.initialValue,
+    source.investmentAmount,
+    source.totalInvestment,
+    source.chartSpec?.principal,
+    source.chartSpec?.initialCapital,
+    source.chartSpec?.initialValue,
+    source.chartSpec?.investmentAmount,
+    source.chartSpec?.totalInvestment,
+  ].map(Number).find((amount) => Number.isFinite(amount) && amount > 0);
+  if (explicit) return explicit;
+  const nonWeightHoldings = (result.holdings || []).filter((item) => !/weight|ratio|percent/i.test(String(item?.inputMode || "")));
+  const total = nonWeightHoldings.reduce((sum, item) => sum + Math.max(0, Number(item?.value || 0)), 0);
+  return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+function scalePortfolioBacktestMetricForContribution(metric = {}, contributionValue = null, scale = 1) {
+  if (!metric || typeof metric !== "object" || !Number.isFinite(contributionValue) || contributionValue <= 0) {
+    return metric;
+  }
+  const endingValue = Number(metric.endingValue);
+  const cumulativeReturn = Number(metric.cumulativeReturn);
+  const scaledEndingValue = Number.isFinite(endingValue) ? endingValue * scale : endingValue;
+  const netProfit = Number.isFinite(scaledEndingValue) ? scaledEndingValue - contributionValue : null;
+  const contributionReturn = Number.isFinite(netProfit) ? (netProfit / contributionValue) * 100 : cumulativeReturn;
+  return {
+    ...metric,
+    endingValue: Number.isFinite(scaledEndingValue) ? Number(scaledEndingValue.toFixed(2)) : metric.endingValue,
+    totalContribution: Number(contributionValue.toFixed(2)),
+    netProfit: Number.isFinite(netProfit) ? Number(netProfit.toFixed(2)) : metric.netProfit,
+    contributionReturn: Number.isFinite(contributionReturn) ? Number(contributionReturn.toFixed(2)) : metric.contributionReturn,
+    cumulativeReturn: Number.isFinite(contributionReturn) ? Number(contributionReturn.toFixed(2)) : metric.cumulativeReturn,
+    irr: Number.isFinite(Number(metric.cagr)) ? metric.cagr : metric.irr,
+    twr: Number.isFinite(cumulativeReturn) ? cumulativeReturn : metric.twr,
+    contributionCount: 1,
+    averageContribution: Number(contributionValue.toFixed(2)),
+  };
+}
+
+function scalePortfolioBacktestPayloadForContribution(payload = {}, contributionValue = null) {
+  const series = Array.isArray(payload.series) ? payload.series : [];
+  const firstPortfolioValue = Number(series.find((row) => Number.isFinite(Number(row?.portfolio)))?.portfolio);
+  if (!Number.isFinite(firstPortfolioValue) || firstPortfolioValue <= 0 || !Number.isFinite(contributionValue) || contributionValue <= 0) {
+    return payload;
+  }
+  const scale = contributionValue / firstPortfolioValue;
+  if (!Number.isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 0.000001) {
+    return payload;
+  }
+  return {
+    ...payload,
+    series: series.map((row) => {
+      const portfolio = Number(row?.portfolio);
+      const benchmark = Number(row?.benchmark);
+      return {
+        ...row,
+        portfolio: Number.isFinite(portfolio) ? Number((portfolio * scale).toFixed(2)) : row?.portfolio,
+        benchmark: Number.isFinite(benchmark) ? Number((benchmark * scale).toFixed(2)) : row?.benchmark,
+      };
+    }),
+    metrics: {
+      ...(payload.metrics || {}),
+      metricProfile: payload.metrics?.metricProfile || "dca",
+      standard: scalePortfolioBacktestMetricForContribution(payload.metrics?.standard || {}, contributionValue, scale),
+      benchmarkStandard: payload.metrics?.benchmarkStandard
+        ? scalePortfolioBacktestMetricForContribution(payload.metrics.benchmarkStandard, contributionValue, scale)
+        : payload.metrics?.benchmarkStandard,
+    },
+  };
+}
+
+function alignBuyHoldResultsToDcaContributions(results = []) {
+  const dcaContributionByGroup = new Map();
+  results.forEach((result) => {
+    if (result.variant !== "strategy") return;
+    const contributionValue = portfolioBacktestDcaContributionValue(result.payload || {});
+    if (!contributionValue) return;
+    const key = portfolioBacktestResultGroupKey(result);
+    dcaContributionByGroup.set(key, Math.max(dcaContributionByGroup.get(key) || 0, contributionValue));
+  });
+  if (!dcaContributionByGroup.size) return results;
+  return results.map((result) => {
+    if (result.variant !== "buy_hold") return result;
+    const groupKey = portfolioBacktestResultGroupKey(result);
+    if (!dcaContributionByGroup.has(groupKey)) return result;
+    const principal = portfolioBacktestSourcePrincipal(result) || dcaContributionByGroup.get(groupKey);
+    if (!principal) return result;
+    return {
+      ...result,
+      payload: scalePortfolioBacktestPayloadForContribution(result.payload || {}, principal),
+    };
+  });
+}
+
 export function buildPortfolioBacktestChartResultModel({
   results = [],
   includeBenchmark = false,
   normalizedBenchmark = "",
 } = {}) {
+  const comparableResults = alignBuyHoldResultsToDcaContributions(results);
   const scenarioRuns = [
     ...new Map(
-      results
+      comparableResults
         .map(({ scenarioRun }) => scenarioRun)
         .filter(Boolean)
         .map((run) => [run.runId || run.label || run.period, run])
@@ -485,12 +722,12 @@ export function buildPortfolioBacktestChartResultModel({
   ];
   const shouldAlignScenarioRuns = scenarioRuns.length > 1;
   if (shouldAlignScenarioRuns) {
-    const sortedRows = results.map(({ payload }) =>
+    const sortedRows = comparableResults.map(({ payload }) =>
       [...(payload.series || [])].filter((row) => row?.date).sort((left, right) => String(left.date).localeCompare(String(right.date)))
     );
     const maxLength = Math.max(0, ...sortedRows.map((rows) => rows.length));
     const xLabels = Array.from({ length: maxLength }, (_, index) => `${index + 1}거래일`);
-    const series = results.map(({ label }, index) => ({
+    const series = comparableResults.map(({ label }, index) => ({
       name: (label || `전략 ${index + 1}`).slice(0, 64),
       type: "line",
       smooth: true,
@@ -501,7 +738,7 @@ export function buildPortfolioBacktestChartResultModel({
     }));
 
     if (includeBenchmark) {
-      results.forEach(({ label, payload }, index) => {
+      comparableResults.forEach(({ label, payload }, index) => {
         const benchmarkData = xLabels.map((_, rowIndex) => {
           const value = Number(sortedRows[index]?.[rowIndex]?.benchmark);
           return Number.isFinite(value) ? Number(value.toFixed(2)) : null;
@@ -519,7 +756,7 @@ export function buildPortfolioBacktestChartResultModel({
       });
     }
 
-    const metrics = results
+    const metrics = comparableResults
       .map(({ label, payload }) =>
         normalizePortfolioBacktestMetricRow(
           {
@@ -534,7 +771,7 @@ export function buildPortfolioBacktestChartResultModel({
     const bestMetric = metrics
       .filter((metric) => Number.isFinite(Number(metric.cumulativeReturn)))
       .sort((a, b) => Number(b.cumulativeReturn) - Number(a.cumulativeReturn))[0];
-    const issues = results.flatMap(({ label, payload }) =>
+    const issues = comparableResults.flatMap(({ label, payload }) =>
       (payload.issues || []).map((issue) => `${label}: ${formatPortfolioBacktestIssue(issue)}`)
     );
 
@@ -552,13 +789,13 @@ export function buildPortfolioBacktestChartResultModel({
   }
 
   const dateSet = new Set();
-  results.forEach(({ payload }) => {
+  comparableResults.forEach(({ payload }) => {
     (payload.series || []).forEach((row) => {
       if (row?.date) dateSet.add(row.date);
     });
   });
   const xLabels = [...dateSet].sort();
-  const series = results.map(({ label, payload }, index) => {
+  const series = comparableResults.map(({ label, payload }, index) => {
     const byDate = new Map((payload.series || []).map((row) => [row.date, row]));
     return {
       name: (label || `전략 ${index + 1}`).slice(0, 64),
@@ -571,7 +808,7 @@ export function buildPortfolioBacktestChartResultModel({
     };
   });
 
-  const benchmarkPayload = results[0]?.payload;
+  const benchmarkPayload = comparableResults[0]?.payload;
   if (includeBenchmark && benchmarkPayload?.benchmark) {
     const benchmarkByDate = new Map((benchmarkPayload.series || []).map((row) => [row.date, row]));
     const benchmarkData = xLabels.map((date) => {
@@ -590,7 +827,7 @@ export function buildPortfolioBacktestChartResultModel({
     }
   }
 
-  const metrics = results
+  const metrics = comparableResults
     .map(({ label, payload }) =>
       normalizePortfolioBacktestMetricRow(
         {
@@ -603,21 +840,21 @@ export function buildPortfolioBacktestChartResultModel({
     )
     .filter(Boolean);
   const benchmarkMetric =
-    includeBenchmark && results[0]?.payload?.metrics?.benchmarkStandard
+    includeBenchmark && comparableResults[0]?.payload?.metrics?.benchmarkStandard
       ? normalizePortfolioBacktestMetricRow(
           {
-            ...results[0].payload.metrics.benchmarkStandard,
-            name: results[0].payload.benchmark || normalizedBenchmark,
-            betaBenchmark: results[0].payload.benchmark || normalizedBenchmark,
+            ...comparableResults[0].payload.metrics.benchmarkStandard,
+            name: comparableResults[0].payload.benchmark || normalizedBenchmark,
+            betaBenchmark: comparableResults[0].payload.benchmark || normalizedBenchmark,
           },
-          results[0].payload.benchmark || normalizedBenchmark
+          comparableResults[0].payload.benchmark || normalizedBenchmark
         )
       : null;
   const standardMetrics = benchmarkMetric ? [...metrics, benchmarkMetric] : metrics;
   const bestMetric = metrics
     .filter((metric) => Number.isFinite(Number(metric.cumulativeReturn)))
     .sort((a, b) => Number(b.cumulativeReturn) - Number(a.cumulativeReturn))[0];
-  const issues = results.flatMap(({ label, payload }) =>
+  const issues = comparableResults.flatMap(({ label, payload }) =>
     (payload.issues || []).map((issue) => `${label}: ${formatPortfolioBacktestIssue(issue)}`)
   );
   return {
@@ -729,6 +966,9 @@ export function buildPortfolioBacktestChartReadyWidget({
   const betaSummary = betaReferenceLabel ? ` · BETA 기준 ${betaReferenceLabel}` : "";
   const normalizedScenario = normalizePortfolioScenarioSpec(scenarioSpec, { backtestPeriod });
   const periodSummary = portfolioBacktestScenarioSummaryLabel(normalizedScenario, backtestPeriod);
+  const metricProfile = standardMetrics.some((row) => row && (row.irr != null || row.contributionReturn != null || row.netProfit != null))
+    ? "dca"
+    : "";
   const summaryText = bestMetric
     ? `${periodSummary} · ${safeVariantCount}개 변형 비교 · 최고 수익률 ${bestMetric.name} ${formatPortfolioPercent(bestMetric.cumulativeReturn)} · ${benchmarkSummary}${betaSummary}`
     : `${periodSummary} · ${safeVariantCount}개 변형 비교 · ${benchmarkSummary}${betaSummary}`;
@@ -752,7 +992,8 @@ export function buildPortfolioBacktestChartReadyWidget({
           includeBenchmark,
           benchmarkMode: includeBenchmark ? "inline" : "none",
           metrics: standardMetrics,
-          metricColumns: portfolioBacktestMetricColumns,
+          metricProfile,
+          metricColumns: metricProfile === "dca" ? portfolioDcaMetricColumns : portfolioBacktestMetricColumns,
           issues,
           yScale: existingYScale,
           restoreMode: item.chartSpec?.restoreMode || "",

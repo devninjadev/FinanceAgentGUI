@@ -28,13 +28,46 @@ function portfolioPromptCurrentDate() {
   return localDate.toISOString().slice(0, 10);
 }
 
+const DEFAULT_USER_WIDGET_PROMPT_LIMIT = 1200;
+const BACKTEST_MATRIX_CONTEXT_PROMPT_LIMIT = 750000;
+
 export function buildPortfolioWidgetAgentPrompt(
-  { action = "create", widget, prompt, canvasId = "", canvasName = "", canvasMode = "", requestId = "", scenario: requestScenario = null },
+  {
+    action = "create",
+    widget,
+    prompt,
+    canvasId = "",
+    canvasName = "",
+    canvasMode = "",
+    requestId = "",
+    scenario: requestScenario = null,
+    source = "",
+    backtestMatrixContext = false,
+  },
   { modeMeta: explicitModeMeta = null, assetCanvasModeId = "asset-management" } = {}
 ) {
   const requestLabel = action === "edit" ? "수정" : "생성";
   const safeWidget = widget || {};
-  const safePrompt = cleanPortfolioWidgetText(prompt || safeWidget.prompt || "", 1200);
+  const isEditingFunctionWidget = requestLabel === "수정" && safeWidget.visualType === "function";
+  const functionSpecTemplate = isEditingFunctionWidget
+    ? safeWidget.functionSpec && typeof safeWidget.functionSpec === "object" && !Array.isArray(safeWidget.functionSpec)
+      ? safeWidget.functionSpec
+      : {
+          language: "portfolio-matrix-dsl",
+          version: 1,
+          executionMode: "matrix-dsl",
+          inputs: ["source_matrix"],
+          outputs: ["signal_matrix"],
+          program: [],
+          dataSources: [],
+          riskControls: [],
+        }
+    : null;
+  const promptLimit =
+    backtestMatrixContext || source === "backtest-matrix-context"
+      ? BACKTEST_MATRIX_CONTEXT_PROMPT_LIMIT
+      : DEFAULT_USER_WIDGET_PROMPT_LIMIT;
+  const safePrompt = cleanPortfolioWidgetText(prompt || safeWidget.prompt || "", promptLimit);
   const modeMeta = portfolioPromptModeMeta(canvasMode, explicitModeMeta);
   const isAssetMode = portfolioPromptIsAssetMode(modeMeta, assetCanvasModeId);
   const scenario = requestScenario && typeof requestScenario === "object" ? requestScenario : null;
@@ -56,6 +89,10 @@ export function buildPortfolioWidgetAgentPrompt(
     `displayId: ${safeWidget.displayId || ""}`,
     `title: ${safeWidget.title || "새 포트폴리오 위젯"}`,
     `kind: ${safeWidget.kind || "프롬프트 위젯"}`,
+    `visualType: ${safeWidget.visualType || ""}`,
+    isEditingFunctionWidget
+      ? `currentFunctionSpec: ${JSON.stringify(functionSpecTemplate)}`
+      : "",
     `layout: ${safeWidget.w || 1}x${safeWidget.h || 1} @ (${Number(safeWidget.x || 0) + 1}, ${Number(safeWidget.y || 0) + 1})`,
     "",
     "[User Widget Prompt]",
@@ -70,6 +107,9 @@ export function buildPortfolioWidgetAgentPrompt(
     "절차형 요청은 하나의 거대한 위젯으로 압축하지 말고 action='create_widget_flow'와 widgets 배열로 table/function/chart 노드를 나누세요.",
     "응답 JSON의 canvasId는 위 [Canvas]의 canvasId와 같아야 하며, 다른 캔버스의 위젯을 추정해서 수정하지 마세요.",
     "위젯을 수정하는 경우 내부 id와 displayId를 모두 참고하세요. 내부 id는 실제 적용용, displayId는 사용자가 화면에서 보는 짧은 식별자입니다.",
+    isEditingFunctionWidget
+      ? "현재 대상은 기존 함수 위젯입니다. action='update_widget'을 사용하고 같은 widgetId/widgetDisplayId를 유지하세요. widget.visualType='function'과 widget.functionSpec.language='portfolio-matrix-dsl', executionMode='matrix-dsl', outputs=['signal_matrix'], program=[...] 전체 배열을 반드시 다시 보내세요. 별도 문서를 만들라는 요청이 아니면 markdown 위젯이나 markdown 본문으로 우회하지 마세요."
+      : "",
     "이 위젯이 다른 위젯의 dataset/chartSpec/summary에서 파생되면 widget.dependsOn과 widget.derivedFrom을 반드시 선언하세요.",
     "관계 위젯은 입력 위젯 변경 시 stale 상태가 되며 updatePolicy에 따라 사용자가 갱신할 수 있습니다. 표/차트는 auto 또는 manual, 투자 해석은 manual 또는 confirm을 권장합니다.",
     isAssetMode
@@ -115,12 +155,20 @@ export function buildPortfolioWidgetAgentPrompt(
     "메인 캔버스에 들어갈 위젯은 단일 기능이어야 합니다. 차트 위젯은 차트 데이터와 차트 스펙만, 설명 위젯은 짧은 설명만, 체크리스트 위젯은 확인 항목만 담아 주세요.",
     "데이터 설명, 웹 검색 결과, 투자 해설, 조사 메모처럼 문서형 문자열을 보여줘야 하면 새 widget.kind='마크다운 위젯', widget.visualType='markdown' 위젯을 만드세요. 기존 table/function/line/metrics 위젯을 markdown으로 변환하지 마세요.",
     "마크다운 위젯은 입력값과 리턴값이 없는 문서 위젯입니다. widget.markdown에는 본문 문자열을 넣고, 선택적 ECharts는 widget.echarts=[{title, body, option}]에 넣으세요. dataset, functionSpec, signalMatrix, dependsOn, derivedFrom, nextActions는 비워 두고 outputRole='note'를 사용하세요.",
+    "ECharts option은 JSON으로 직렬화 가능한 값만 사용하세요. 배열형 data tooltip에서 값 인덱스를 표시할 때는 {value[0]}, {value[1]}, {value[2]}처럼 쓰세요. GUI 렌더러가 이를 안전한 runtime formatter로 변환합니다.",
+    "백테스트 결과 위젯이 이미 Context Packet에 있는 상태에서 추가 계산/해석을 요청받으면, 표준 백테스트 평가 지표(CAGR/MDD/Sharpe/Sortino/Calmar/Ulcer/UPI/BETA 등) 표만 metrics-table로 만드세요. 그 외 효율적 프론티어, 위험-수익 산점도, 롤링 상관, 구간별 손익, 드로다운 분포, 민감도/시나리오 해석은 markdown 위젯으로 만들고 widget.markdown에는 마크다운 표를, widget.echarts 또는 markdown의 fenced echarts/chart JSON에는 line/scatter/bar 등 ECharts option을 적극적으로 넣으세요. 이 문서형 후속 분석은 백테스트 위젯을 컨텍스트로 읽어 작성하므로 dependsOn/derivedFrom/nextActions는 비워 둬도 됩니다.",
+    "Context Packet에 백테스트 위젯의 존재와 backtestMatrixContext 핸들이 있지만 필요한 수열이 샘플뿐이면 값을 추정하지 마세요. 먼저 actionId='request_backtest_matrix_context' portfolio_widget_action을 내고 widgetId 또는 widgetDisplayId와 matrixRequest를 지정하세요. matrixRequest는 transform(raw/returns/drawdown/monthly_returns/yearly_returns), frequency(daily/monthly/yearly), seriesNames, assets/tickers, startDate, endDate, maxPoints, nextPrompt를 지원합니다.",
     "차트 위젯에는 긴 본문, 요구사항 목록, 검증 목록을 섞지 말고 필요한 설명은 summary 한 문장 이하로 제한하세요.",
     "종목 목록, 균등배분 포트폴리오 표시, 단순 보유 구성 표시는 별도 차트 요청이 아니라면 widget.visualType을 table로 두고 widget.dataset에 label/ticker/name과 weight/value를 넣으세요.",
-    "사용자가 어떤 조건에서 사고 어떤 조건에서 파는지, 매수/매도/리밸런싱 규칙, 매매전략, 함수 위젯을 요청하면 widget.visualType='function', widget.kind='함수 위젯'으로 만들고 widget.functionSpec에 안전한 portfolio-matrix-dsl program을 넣으세요. 임의 JS/Python 코드를 실행 대상으로 만들지 말고 검토 가능한 행렬 변환 사양으로 저장하세요.",
-    "함수 위젯은 docs/portfolio-widgets.md의 Function Widget v2 계약만 사용하세요: functionSpec.language='portfolio-matrix-dsl', version=1, executionMode='matrix-dsl', outputs=['signal_matrix'], program=[indicator/rolling/rank/rebalance/rule/emit]. functionSpec.program 배열은 필수입니다.",
+    "사용자가 어떤 조건에서 사고 어떤 조건에서 파는지, 매수/매도/리밸런싱 규칙, 매매전략, 함수 위젯을 요청하면 widget.visualType='function', widget.kind='함수 위젯'으로 만들고 widget.functionSpec에 안전한 portfolio-matrix-dsl program을 넣으세요. kind='함수 위젯' 라벨만 붙은 markdown은 함수 위젯이 아닙니다. 임의 JS/Python 코드를 실행 대상으로 만들지 말고 검토 가능한 행렬 변환 사양으로 저장하세요.",
+    "함수 위젯은 docs/portfolio-widgets.md의 Function Widget v2 계약만 사용하세요: functionSpec.language='portfolio-matrix-dsl', version=1, executionMode='matrix-dsl', outputs=['signal_matrix'], program=[indicator/rolling/rank/swap/portfolio_swap/allocation_event/rebalance/dca/contribution/rule/emit]. functionSpec.program 배열은 필수입니다.",
     "RSI 20/80 같은 지표 전략은 가능하면 portfolio-matrix-dsl로 표현하세요. 예: program=[{op:'indicator',name:'rsi',period:14,field:'close',outputField:'rsi'}, {op:'rule',when:'rsi < 20',emit:{field:'target_weight',value:1}}, {op:'rule',when:'rsi > 80',emit:{field:'target_weight',value:0}}].",
+    "N개월 뒤 한 종목을 다른 종목으로 교체하는 요청은 함수 위젯에서 스왑 의도만 선언하세요. 예: program=[{op:'swap',fromAsset:'META',toAsset:'LLY',effective:{anchor:'run_start',offsetMonths:6,snap:'next_trading_day'},weightPolicy:'preserve_value'}]. yfinance 조회, 거래일 확정, NAV 계산은 백테스트 실행 위젯이 담당합니다.",
+    "'3개월 뒤 A를 B로, 다시 6개월 뒤 B를 C로'처럼 다시/그 뒤/이후 표현이 있으면 두 번째 offsetMonths는 실행 시작 기준 9개월입니다. 사용자가 명시적으로 '실행 시작 6개월차'라고 할 때만 offsetMonths:6을 쓰세요.",
+    "조건이 충족되면 포트폴리오 A 전체를 포트폴리오 B 비중으로 바꾸는 요청은 단일 종목 swap으로 축소하지 말고 portfolio_swap을 쓰세요. 예: program=[{op:'indicator',name:'rsi',period:14,field:'close',outputField:'rsi'}, {op:'portfolio_swap',when:'rsi < 40',fromLabel:'A 공격 포트폴리오',toLabel:'B 방어 포트폴리오',targetWeights:{TLT:0.6,GLD:0.25,SHY:0.15}}]. 6개월 뒤 전환은 when:'months_since_run_start >= 6'처럼 런타임 시간 필드를 사용하세요. 첫 버전은 조건이 처음 참이 된 뒤 B로 전환해 유지하는 one-way 스왑입니다.",
+    "DCA/적립식/매월 납입/분할매수 요청은 함수 위젯에서 납입 규칙만 선언하세요. 예: program=[{op:'dca',amount:1000,frequency:'monthly',dayOfMonth:1,targetWeights:{QQQ:0.7,TLT:0.3}}]. targetWeights가 없으면 입력 포트폴리오 비중으로 납입하고, 실제 납입일 확정/현금흐름/IRR/TWR 계산은 백테스트 실행 위젯이 담당합니다.",
     "10%p 이탈, 허용 밴드 초과, 목표 비중 대비 drift 조건 리밸런싱은 legacy threshold_rebalance가 아니라 program=[{op:'rebalance',method:'threshold_band',threshold:0.10,assets:['QQQ','QLD'],target:'target_weights'}]로 표현하세요.",
+    "월 1회 또는 매월 목표비중 리밸런싱은 legacy periodic_rebalance가 아니라 program=[{op:'rebalance',method:'periodic',frequency:'monthly',target:'target_weights'}]로 표현하세요.",
     "strategy-dsl, signal-rules, periodic_rebalance, threshold_rebalance, supertrend, indicator_signal, external_signal, universe_rotation은 제거된 레거시 경로입니다. 새 액션에 사용하지 마세요.",
     "외부 파일/CSV 기반 전략도 임의 실행 경로로 보내지 말고 portfolio-matrix-dsl의 source/data 계약과 program으로 표현하세요. 지원하지 못하는 데이터 변환은 checklist 또는 markdown으로 실행 불가 사유를 표시하세요.",
     "함수 위젯은 기본적으로 작고 조밀한 규칙 노드입니다. 사용자가 크게 보자고 하지 않았다면 w=1, h=1로 생성하세요.",
@@ -135,7 +183,7 @@ export function buildPortfolioWidgetAgentPrompt(
     "여러 포트폴리오를 비교 백테스트하라는 요청은 해당 table 위젯들을 dependsOn으로 참조하는 별도 line 차트 위젯을 create_widget 또는 create_widget_flow로 생성하세요. 포트폴리오 table 위젯 자체를 백테스트 차트로 변환하지 마세요.",
     "하나의 포트폴리오를 Buy & Hold와 전략 기반으로 비교하라는 요청은 포트폴리오 table 위젯과 전략 function 위젯을 분리하고, 백테스트 차트 위젯에는 widget.kind='백테스트 비교', widget.visualType='line', widget.nextActions=['run_backtest_chart_widget'], widget.dependsOn=[table 위젯 id, function 위젯 id]를 넣으세요. GUI 실행기는 table을 Buy & Hold로 한 번, functionSpec 전략을 적용해서 한 번 더 계산합니다.",
     "라인/백테스트 차트를 로그 차트로 바꾸라는 요청은 원본 series/data 값을 변환하지 말고 chartSpec.yScale='log'만 설정하세요. 선형축 복귀는 chartSpec.yScale='linear'입니다.",
-    "백테스트 평가 지표 표 요청은 widget.kind='백테스트 지표', widget.visualType='metrics-table'로 만들고 chartSpec.metrics rows를 사용하세요. 화면 컬럼 순서는 포트폴리오 | Ending Value | Total Contribution | Cumulative Return | CAGR | MDD | Volatility | Sharpe | Sortino | Calmar | Ulcer | UPI | BETA 입니다. BETA 기준은 백테스트 chart에 연결된 베타 기준 포트폴리오 table에서 옵니다.",
+    "백테스트 평가 지표 표 요청은 widget.kind='백테스트 지표', widget.visualType='metrics-table'로 만들고 chartSpec.metrics rows를 사용하세요. 기본 화면 컬럼 순서는 포트폴리오 | Ending Value | Total Contribution | Cumulative Return | CAGR | MDD | Volatility | Sharpe | Sortino | Calmar | Ulcer | UPI | BETA 입니다. DCA/적립식/납입형 백테스트 지표표는 새 위젯 타입이 아니라 chartSpec.metricProfile='dca'를 쓰고, 백테스트 metrics row에 totalContribution, netProfit, contributionReturn, irr, twr, contributionCount, averageContribution을 넣으면 평가 위젯이 납입형 컬럼을 표시합니다.",
     "metrics-table은 계산 위젯이 아니라 backtest_result line 위젯의 chartSpec.metrics를 표시하는 파생 지표 뷰입니다. 지표표를 수리할 때 새 markdown/report 위젯을 만들지 말고 기존 metrics-table의 dependsOn/chartSpec.metricColumns/status만 유지하거나 갱신하세요.",
     "'백테스트의 테이블 버전', '백테스트 결과를 표로', '벤치마크 테이블'은 종목/비중 table이 아니라 metrics-table 요청입니다. 계산 전 실행 준비표가 필요할 때만 table + run_backtest_chart_widget을 사용하고 결과처럼 보이게 꾸미지 마세요.",
     "",
@@ -179,7 +227,21 @@ export function buildPortfolioWidgetAgentPrompt(
           },
           markdown: "",
           echarts: [],
-          functionSpec: null,
+          functionSpec: functionSpecTemplate,
+          signalMatrix: isEditingFunctionWidget
+            ? {
+                role: "signal_matrix",
+                status: "pending-source",
+                dimensions: ["runId", "date", "asset", "field"],
+                schema: ["runId", "date", "asset", "field", "value", "ruleId", "source"],
+                language: "portfolio-matrix-dsl",
+                executionMode: "matrix-dsl",
+                outputs: ["signal_matrix"],
+                program: functionSpecTemplate?.program || [],
+                rowCount: 0,
+                rows: [],
+              }
+            : undefined,
           dataFiles: [],
           scenarioId: "portfolio_scenario_root",
           graphRole: "process_node",
@@ -269,10 +331,18 @@ export function buildPortfolioChatActionInstructions(
     "각 위젯은 단일 기능이어야 합니다. 차트 위젯은 chartSpec/dataset 중심, 설명 위젯은 summary 중심, 체크리스트 위젯은 checks 중심으로만 갱신하세요.",
     "데이터 설명, 웹 검색 결과, 투자 해설, 조사 메모처럼 문서형 문자열을 보여줘야 하면 새 widget.kind='마크다운 위젯', widget.visualType='markdown' 위젯을 만드세요. 기존 table/function/line/metrics 위젯을 markdown으로 변환하지 마세요.",
     "마크다운 위젯은 입력값과 리턴값이 없는 문서 위젯입니다. widget.markdown에는 본문 문자열을 넣고, 선택적 ECharts는 widget.echarts=[{title, body, option}]에 넣으세요. dataset, functionSpec, signalMatrix, dependsOn, derivedFrom, nextActions는 비워 두고 outputRole='note'를 사용하세요.",
+    "ECharts option은 JSON으로 직렬화 가능한 값만 사용하세요. 배열형 data tooltip에서 값 인덱스를 표시할 때는 {value[0]}, {value[1]}, {value[2]}처럼 쓰세요. GUI 렌더러가 이를 안전한 runtime formatter로 변환합니다.",
+    "백테스트 결과 위젯이 이미 Context Packet에 있는 상태에서 추가 계산/해석을 요청받으면, 표준 백테스트 평가 지표(CAGR/MDD/Sharpe/Sortino/Calmar/Ulcer/UPI/BETA 등) 표만 metrics-table로 만드세요. 그 외 효율적 프론티어, 위험-수익 산점도, 롤링 상관, 구간별 손익, 드로다운 분포, 민감도/시나리오 해석은 markdown 위젯으로 만들고 widget.markdown에는 마크다운 표를, widget.echarts 또는 markdown의 fenced echarts/chart JSON에는 line/scatter/bar 등 ECharts option을 적극적으로 넣으세요. 이 문서형 후속 분석은 백테스트 위젯을 컨텍스트로 읽어 작성하므로 dependsOn/derivedFrom/nextActions는 비워 둬도 됩니다.",
+    "Context Packet에 백테스트 위젯의 존재와 backtestMatrixContext 핸들이 있지만 필요한 수열이 샘플뿐이면 값을 추정하지 마세요. 먼저 actionId='request_backtest_matrix_context' portfolio_widget_action을 내고 widgetId 또는 widgetDisplayId와 matrixRequest를 지정하세요. matrixRequest는 transform(raw/returns/drawdown/monthly_returns/yearly_returns), frequency(daily/monthly/yearly), seriesNames, assets/tickers, startDate, endDate, maxPoints, nextPrompt를 지원합니다.",
     "차트 위젯을 수정할 때는 긴 본문이나 requirements/checks를 넣지 말고 dataset, chartSpec, visualType, title만 우선 갱신하세요.",
-    "매수 조건, 매도 조건, 리밸런싱 규칙, 매매전략, 신호 규칙은 함수 위젯입니다. action=create_widget, widget.kind='함수 위젯', widget.visualType='function', widget.functionSpec={language:'portfolio-matrix-dsl', version:1, executionMode:'matrix-dsl', inputs:[], outputs:['signal_matrix'], program:[{op:'indicator'|'rolling'|'rank'|'rebalance'|'rule'|'emit', ...}], dataSources:[], riskControls:[]}로 생성하세요. widget.signalMatrix에는 컴파일 결과나 pending-source 상태의 signal_matrix 계약을 둡니다.",
+    "매수 조건, 매도 조건, 리밸런싱 규칙, 종목 스왑, 포트폴리오 A/B 스왑, DCA/적립식 납입, 매매전략, 신호 규칙은 함수 위젯입니다. kind='함수 위젯' 라벨만 붙은 markdown은 함수 위젯이 아닙니다. action=create_widget 또는 대상이 명확한 update_widget으로 widget.visualType='function', widget.functionSpec={language:'portfolio-matrix-dsl', version:1, executionMode:'matrix-dsl', inputs:[], outputs:['signal_matrix'], program:[{op:'indicator'|'rolling'|'rank'|'swap'|'portfolio_swap'|'allocation_event'|'rebalance'|'dca'|'contribution'|'rule'|'emit', ...}], dataSources:[], riskControls:[]}를 제공하세요. widget.signalMatrix에는 컴파일 결과나 pending-source 상태의 signal_matrix 계약을 둡니다.",
     "strategy-dsl, signal-rules, periodic_rebalance, threshold_rebalance, supertrend, indicator_signal, external_signal, universe_rotation은 제거된 레거시 경로입니다. 새 액션에 사용하지 마세요.",
     "10%p 이탈, 허용 밴드 초과, 목표 비중 대비 drift 조건 리밸런싱은 program=[{op:'rebalance',method:'threshold_band',threshold:0.10,assets:['QQQ','QLD'],target:'target_weights'}]로 표현하세요.",
+    "월 1회 또는 매월 목표비중 리밸런싱은 legacy periodic_rebalance가 아니라 program=[{op:'rebalance',method:'periodic',frequency:'monthly',target:'target_weights'}]로 표현하세요.",
+    "N개월 뒤 META를 LLY로 교체 같은 요청은 program=[{op:'swap',fromAsset:'META',toAsset:'LLY',effective:{anchor:'run_start',offsetMonths:6,snap:'next_trading_day'},weightPolicy:'preserve_value'}]처럼 표현하세요. 함수 위젯은 의도만 만들고 가격 조회와 실제 스왑 적용은 백테스트 실행 위젯이 합니다.",
+    "'3개월 뒤 A를 B로, 다시 6개월 뒤 B를 C로'처럼 다시/그 뒤/이후 표현이 있으면 두 번째 스왑은 첫 스왑 후 6개월이므로 실행 시작 기준 offsetMonths:9입니다. 사용자가 '실행 시작 6개월차'라고 명시한 경우에만 offsetMonths:6입니다.",
+    "조건에 따라 포트폴리오 A에서 포트폴리오 B로 갈아타는 요청은 program=[{op:'portfolio_swap',when:'조건식',fromLabel:'A',toLabel:'B',targetWeights:{...}}]로 표현하세요. 6개월 뒤 이전 같은 시간 조건은 when:'months_since_run_start >= 6'을 사용합니다. B 포트폴리오의 종목/비중은 targetWeights에 넣고, 조건 지표가 필요하면 앞 단계에 indicator/rolling을 둡니다. 자동 왕복 전환은 아직 기본값이 아니므로 복귀 조건은 별도 reverse portfolio_swap으로 명시해야 합니다.",
+    "DCA/적립식/매월 납입/분할매수는 program=[{op:'dca',amount:금액,frequency:'monthly'|'weekly'|'daily'|'quarterly',dayOfMonth:1,targetWeights:{...}}]로 표현하세요. targetWeights를 생략하면 입력 포트폴리오 비중으로 납입합니다. 백테스트 결과의 metrics row는 totalContribution, netProfit, contributionReturn, irr, twr를 포함해야 합니다.",
     "RSI 같은 내장 지표 전략은 구체적 임계값과 액션을 portfolio-matrix-dsl program에 명시하세요. 예: [{op:'indicator',name:'rsi',period:14,field:'close',outputField:'rsi'}, {op:'rule',when:'rsi < 20',emit:{field:'target_weight',value:1}}, {op:'rule',when:'rsi > 80',emit:{field:'target_weight',value:0}}]. 기본 30/70 템플릿으로 임의 치환하지 마세요.",
     "외부 파일/CSV 기반 전략도 임의 실행 경로로 보내지 말고 portfolio-matrix-dsl의 source/data 계약과 program으로 표현하세요. 지원하지 못하는 데이터 변환은 checklist 또는 markdown으로 실행 불가 사유를 표시하세요.",
     "함수 위젯은 기본 w=1, h=1입니다. 상세 표나 코드 뷰를 사용자가 요청한 경우에만 더 크게 만드세요.",
@@ -284,7 +354,7 @@ export function buildPortfolioChatActionInstructions(
     "베타 기준 포트폴리오를 자동 선택해야 하면 미국 상장 주식/ETF의 기본 베타 기준은 SPY입니다. QQQ는 사용자가 나스닥100/기술주/QQQ 기준을 명시했을 때만 쓰고, 원본 포트폴리오가 QQQ라고 해서 QQQ 100% 베타 기준 테이블을 복사해 만들지 마세요.",
     "전략/리밸런싱 비교 line 차트의 X축은 종목이 아니라 날짜입니다. 결과 차트에 holdings dataset을 복사하지 말고 chartSpec.xField='date'와 실행 action/관계만 선언하세요.",
     "Buy & Hold는 별도 함수 위젯으로 만들지 마세요. 기존 source_matrix table 위젯이 백테스트에서 자동 Buy & Hold baseline으로 실행됩니다. 전략 비교에서는 source table + 전략 function + backtest line 관계만 선언하세요.",
-    "백테스트 평가 지표를 표로 보여 달라는 요청은 kind='백테스트 지표', visualType='metrics-table' 위젯을 생성하세요. 이미 백테스트 차트 위젯이 있으면 새로 계산하지 말고 그 위젯을 dependsOn으로 참조해 chartSpec.metrics를 표로 렌더링하세요. 컬럼은 반드시 포트폴리오 | Ending Value | Total Contribution | Cumulative Return | CAGR | MDD | Volatility | Sharpe | Sortino | Calmar | Ulcer | UPI | BETA 순서입니다. BETA 기준은 연결된 베타 기준 포트폴리오 table의 이름을 betaBenchmark에 표시하세요.",
+    "백테스트 평가 지표를 표로 보여 달라는 요청은 kind='백테스트 지표', visualType='metrics-table' 위젯을 생성하세요. 이미 백테스트 차트 위젯이 있으면 새로 계산하지 말고 그 위젯을 dependsOn으로 참조해 chartSpec.metrics를 표로 렌더링하세요. 기본 컬럼은 포트폴리오 | Ending Value | Total Contribution | Cumulative Return | CAGR | MDD | Volatility | Sharpe | Sortino | Calmar | Ulcer | UPI | BETA 순서입니다. DCA/적립식/납입형 평가표는 chartSpec.metricProfile='dca'를 설정하고 metrics row에 totalContribution, netProfit, contributionReturn, irr, twr, contributionCount, averageContribution을 사용하세요.",
     "metrics-table은 계산 위젯이 아니라 backtest_result line 위젯의 chartSpec.metrics를 표시하는 파생 지표 뷰입니다. 지표표를 수리할 때 새 markdown/report 위젯을 만들지 말고 기존 metrics-table의 dependsOn/chartSpec.metricColumns/status만 유지하거나 갱신하세요.",
     "'백테스트의 테이블 버전', '백테스트 결과를 표로', '벤치마크 테이블'은 holdings/dataset table이 아니라 metrics-table입니다. 입력 종목 목록을 결과 표처럼 새로 만들지 말고, 결과 값이 없으면 metrics-table 대기 상태 또는 기존 백테스트 차트 dependsOn으로 처리하세요.",
     "현재 위젯을 고치는 요청이면 action은 update_current_widget을 사용하세요. 특정 위젯 id가 명확하면 widgetId를 넣고, 사용자가 W-001 같은 짧은 ID로 지칭하면 widgetDisplayId도 넣으세요. 명시적 대상 없이 첫 번째/최근 위젯을 추정해 덮어쓰지 마세요.",
@@ -295,7 +365,7 @@ export function buildPortfolioChatActionInstructions(
     "라인 차트 요청은 widget.visualType을 line으로 두고 가능한 경우 widget.chartSpec.dataset 또는 chartSpec.series를 넣으세요.",
     "라인/백테스트 차트를 로그 차트로 바꾸라는 요청은 series/data 값을 로그 변환하지 말고 chartSpec.yScale='log'만 설정하세요. 선형축 복귀는 chartSpec.yScale='linear'입니다.",
     "종목 목록, 균등배분 포트폴리오 표시, 보유 구성 표시는 별도 차트 요청이 아니라면 widget.visualType을 table로 두고 widget.dataset에 label/ticker/name과 weight/value를 넣으세요.",
-    "지원 필드: action, actionId, canvasId, widgetId, widgetDisplayId, confirmed, periodComparison, periodComparison.isMultiplePeriodComparison, periodComparison.periods, scenario, scenario.runs, holdings, basis, widget.displayId, widget.title, widget.kind, widget.visualType, widget.summary, widget.markdown, widget.echarts, widget.dataset, widget.chartSpec, widget.functionSpec, widget.signalMatrix, widget.dataFiles, widget.dataSources, widget.metrics, widget.checks, widget.badges, widget.scenarioId, widget.graphRole, widget.outputRole, widget.nextActions, widget.dependsOn, widget.derivedFrom, widget.updatePolicy.",
+    "지원 필드: action, actionId, canvasId, widgetId, widgetDisplayId, confirmed, matrixRequest, matrixRequest.transform, matrixRequest.frequency, matrixRequest.seriesNames, matrixRequest.assets, matrixRequest.startDate, matrixRequest.endDate, matrixRequest.maxPoints, matrixRequest.nextPrompt, periodComparison, periodComparison.isMultiplePeriodComparison, periodComparison.periods, scenario, scenario.runs, holdings, basis, widget.displayId, widget.title, widget.kind, widget.visualType, widget.summary, widget.markdown, widget.echarts, widget.dataset, widget.chartSpec, widget.functionSpec, widget.signalMatrix, widget.dataFiles, widget.dataSources, widget.metrics, widget.checks, widget.badges, widget.scenarioId, widget.graphRole, widget.outputRole, widget.nextActions, widget.dependsOn, widget.derivedFrom, widget.updatePolicy.",
     "현재 위젯 후보:",
     ...(widgets.length
       ? widgets.slice(0, 5).map((widget) => {

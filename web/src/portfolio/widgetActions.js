@@ -94,6 +94,7 @@ export function portfolioWidgetPrimaryAction(
   const actions = normalizePortfolioWidgetNextActionsForState(widget);
   const backtestAction = actions.find(portfolioWidgetActionRunsBacktestChart);
   if (backtestAction) return backtestAction;
+  if (widget?.status !== "error" && portfolioWidgetUsesYfinanceRefresh(widget)) return "run_backtest_chart_widget";
   if (actions[0]) return actions[0];
   return portfolioWidgetUsesYfinanceRefresh(widget) ? "run_backtest_chart_widget" : "";
 }

@@ -39,13 +39,13 @@ function findPythonCommand() {
   const candidates =
     process.platform === "win32"
       ? [
-          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/Scripts/python.exe" },
+          { command: localVenvPython, argsPrefix: [], display: ".venv/Scripts/python.exe" },
           { command: "py", argsPrefix: ["-3"], display: "py -3" },
           { command: "python", argsPrefix: [], display: "python" },
           { command: "python3", argsPrefix: [], display: "python3" },
         ]
       : [
-          { command: localVenvPython, argsPrefix: [], display: "GuiBuild/.venv/bin/python" },
+          { command: localVenvPython, argsPrefix: [], display: ".venv/bin/python" },
           { command: "python3", argsPrefix: [], display: "python3" },
           { command: "python", argsPrefix: [], display: "python" },
         ];

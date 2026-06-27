@@ -7,16 +7,35 @@ The runtime database is local user state:
 - path: `data/world-memory/world_issue_log.sqlite3`
 - collector state: `data/world-memory/collector-state.json`
 - logs and generated review artifacts: `logs/world-memory/*`
+- user setting: `config/world-memory.user.json`
 
 These files are intentionally ignored by Git. Do not commit an empty SQLite file,
 sample SQLite file, copied user memory, collector state, generated embeddings,
-or collection logs. Even an empty tracked database can overwrite or confuse a
-user's existing local memory during clone, pull, archive extraction, or repair.
+collection logs, or a user's enabled/disabled preference. Even an empty tracked
+database can overwrite or confuse a user's existing local memory during clone,
+pull, archive extraction, or repair.
+
+## Feature Toggle
+
+World Memory is opt-in by default.
+
+- `config/world-memory.defaults.json` is tracked and sets `enabled: false`.
+- `config/world-memory.user.json` is ignored local configuration written by the
+  Settings screen switch.
+- When disabled, the left sidebar hides the World Memory menu and sidebar-agent
+  prompts do not receive World Memory search context.
+- When enabled, the local collector can start and World Memory status/actions use
+  the private runtime store under `data/world-memory/`.
+- Sidebar-agent prompts do not receive the World Memory store wholesale. General
+  screens receive only bounded retrieval results when enabled: World Memory uses
+  semantic search, while News Feed contributes a separate bounded lexical search
+  result from `data/news-feed.json`.
 
 ## Tracked Blueprint
 
 The tracked design artifacts are:
 
+- `config/world-memory.defaults.json`: default feature toggle, shipped off.
 - `config/world-memory.schema.sql`: empty-store SQLite schema blueprint.
 - `config/world-memory-collection.prompt.md`: collection and curation operating rules.
 - `scripts/world_memory_cli.py`: owner CLI that creates, migrates, reads, and writes the store.
@@ -28,7 +47,7 @@ owner because it also seeds system taxonomy and applies compatibility migrations
 
 ## Initialization
 
-From `GuiBuild/`, initialize a local store only when the user does not already
+From the repository root, initialize a local store only when the user does not already
 have one:
 
 ```bash

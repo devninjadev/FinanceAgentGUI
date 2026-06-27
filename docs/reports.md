@@ -6,7 +6,7 @@ FinanceAgentGUI uses a file-based report system. The local app does not need a r
 
 - Generated user-facing reports should be written under `data/reports/`.
 - Existing World Memory market reports are also discoverable from `logs/world-memory/`.
-- A standalone copied `GuiBuild/` folder should still work with these paths.
+- A standalone checkout or copied app folder should still work with these paths.
 - Runtime report files are local user state and should stay gitignored.
 
 ## API
@@ -43,4 +43,5 @@ FinanceAgentGUI uses a file-based report system. The local app does not need a r
 - Markdown sections can include fenced `echarts` or `chart` blocks containing a JSON ECharts option object.
 - JSON reports can include `charts: [{ heading, body, option }]`.
 - Rich blocks should render as user-facing objects in the reader, not as raw code or JSON.
+- ECharts option blocks must be plain JSON. For array-valued scatter data in tooltip templates, use indexed value placeholders such as `{value[0]}`, `{value[1]}`, and `{value[2]}`; the GUI renderer converts them to runtime tooltip functions before passing options to ECharts.
 - The shared chart renderer in `web/src/portfolio/PortfolioEChart.jsx` registers line, pie, bar, and scatter chart types. If a report needs another ECharts series or component type, extend that runtime deliberately instead of importing the full ECharts distribution.

@@ -147,6 +147,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/world-memory/settings")) {
+    await handleWorldMemoryEndpoint("settings", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/world-memory/status")) {
     await handleWorldMemoryEndpoint("status", req, res);
     return;

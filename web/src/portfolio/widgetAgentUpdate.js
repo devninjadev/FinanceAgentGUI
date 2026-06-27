@@ -11,13 +11,25 @@ import { normalizePortfolioWidgetOutputRole } from "./scenarioContract.js";
 import { portfolioWidgetIsMarkdownType } from "./markdownWidget.js";
 
 function patchWantsMarkdownWidget(patch = {}) {
+  const markdownValues = [
+    patch.markdown,
+    patch.markdownText,
+    patch.content,
+    patch.document,
+    patch.body,
+    patch.report,
+    patch.text,
+  ];
+  const hasMarkdownBody = markdownValues.some((value) => String(value || "").trim());
+  const hasMarkdownChart =
+    (Array.isArray(patch.echarts) && patch.echarts.length > 0) ||
+    (Array.isArray(patch.echartsOptions) && patch.echartsOptions.length > 0) ||
+    Boolean(patch.echartsOption && typeof patch.echartsOption === "object") ||
+    Boolean(patch.echartsOptions && typeof patch.echartsOptions === "object" && !Array.isArray(patch.echartsOptions));
   return (
     portfolioWidgetIsMarkdownType(patch.visualType || patch.type || patch.chartSpec?.type) ||
-    Object.prototype.hasOwnProperty.call(patch, "markdown") ||
-    Object.prototype.hasOwnProperty.call(patch, "markdownText") ||
-    Object.prototype.hasOwnProperty.call(patch, "echarts") ||
-    Object.prototype.hasOwnProperty.call(patch, "echartsOption") ||
-    Object.prototype.hasOwnProperty.call(patch, "echartsOptions")
+    hasMarkdownBody ||
+    hasMarkdownChart
   );
 }
 

@@ -10,7 +10,7 @@ import { portfolioWidgetStatusLabel } from "./widgetActions.js";
 import { cleanPortfolioWidgetText } from "./widgetIdentity.js";
 import {
   formatPortfolioMetricCell,
-  portfolioBacktestMetricColumns,
+  portfolioMetricColumnsForWidget,
   portfolioBacktestMetricRows,
 } from "./widgetMetrics.js";
 import {
@@ -24,6 +24,7 @@ import {
 import {
   normalizePortfolioMarkdownECharts,
   normalizePortfolioMarkdownText,
+  stripPortfolioMarkdownEChartsFences,
   stripDuplicatePortfolioMarkdownTitle,
 } from "./markdownWidget.js";
 import { portfolioFunctionSpecForWidget } from "./widgetStrategySpec.js";
@@ -48,6 +49,38 @@ function formatWidgetFileSize(bytes) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatPortfolioFunctionEffectiveLabel(effective = {}) {
+  if (typeof effective === "string") {
+    return cleanPortfolioWidgetText(effective, 80);
+  }
+  if (!effective || typeof effective !== "object" || Array.isArray(effective)) {
+    return "런 시작 기준";
+  }
+  const date = cleanPortfolioWidgetText(effective.date || effective.effectiveDate || "", 40);
+  if (date) return date;
+  const anchor = cleanPortfolioWidgetText(effective.anchor || "run_start", 40);
+  const months = Number(effective.offsetMonths || effective.months || 0);
+  const days = Number(effective.offsetDays || effective.days || 0);
+  const offsets = [
+    Number.isFinite(months) && months > 0 ? `${months}개월 후` : "",
+    Number.isFinite(days) && days > 0 ? `${days}일 후` : "",
+  ].filter(Boolean);
+  const snap = cleanPortfolioWidgetText(effective.snap || effective.roll || effective.tradingDay || "", 40);
+  const snapLabel = snap === "next_trading_day" ? "다음 거래일" : snap === "previous_trading_day" ? "직전 거래일" : snap;
+  return [anchor, ...offsets, snapLabel].filter(Boolean).join(" · ") || "런 시작 기준";
+}
+
+function formatPortfolioFunctionWeightsLabel(weights = {}) {
+  const entries = weights && typeof weights === "object" && !Array.isArray(weights)
+    ? Object.entries(weights)
+    : [];
+  return entries
+    .filter(([ticker, weight]) => ticker && Number(weight) > 0)
+    .slice(0, 4)
+    .map(([ticker, weight]) => `${cleanPortfolioWidgetText(ticker, 16).toUpperCase()} ${formatPortfolioPercent(Number(weight) * 100, 1)}`)
+    .join(" / ");
 }
 
 export function PortfolioWidgetRelationMeta({ widget, widgets }) {
@@ -180,6 +213,7 @@ function PortfolioWidgetBacktestSetupTable({ widget, widgets = [] }) {
 
 function PortfolioWidgetMetricsTable({ widget, widgets = [] }) {
   const rows = portfolioBacktestMetricRows(widget, widgets);
+  const metricColumns = portfolioMetricColumnsForWidget(widget, rows);
   if (!rows.length) {
     return (
       <div className="portfolio-widget-table-empty">
@@ -193,7 +227,7 @@ function PortfolioWidgetMetricsTable({ widget, widgets = [] }) {
       <table className="portfolio-widget-metrics-table" aria-label={`${widget?.title || "백테스트"} 표준 지표 테이블`}>
         <thead>
           <tr>
-            {portfolioBacktestMetricColumns.map((column) => (
+            {metricColumns.map((column) => (
               <th scope="col" key={column.key}>
                 {column.label}
               </th>
@@ -203,7 +237,7 @@ function PortfolioWidgetMetricsTable({ widget, widgets = [] }) {
         <tbody>
           {rows.map((row, rowIndex) => (
             <tr key={`${widget?.id || "metrics"}-${row.name}-${rowIndex}`}>
-              {portfolioBacktestMetricColumns.map((column) => (
+              {metricColumns.map((column) => (
                 <td key={`${row.name}-${column.key}`}>{formatPortfolioMetricCell(row, column.key)}</td>
               ))}
             </tr>
@@ -253,12 +287,70 @@ function portfolioFunctionProgramDisplayRows(program = []) {
         };
       }
       if (op === "rebalance") {
+        const method = cleanPortfolioWidgetText(step.method || step.name || "threshold_band", 80).toLowerCase();
+        const frequency = cleanPortfolioWidgetText(step.frequency || step.cadence || step.interval || "monthly", 40).toLowerCase();
+        const isPeriodic = ["periodic", "calendar", "calendar_month_end", "monthly", "month_end"].includes(method);
+        const frequencyLabel =
+          frequency === "monthly"
+            ? "월 1회"
+            : frequency === "quarterly"
+              ? "분기 1회"
+              : frequency === "weekly"
+                ? "주 1회"
+                : frequency || "주기";
         return {
-          when: cleanPortfolioWidgetText(step.method || "threshold_band", 80),
+          when: isPeriodic ? `${frequencyLabel} · 전체 기간` : method,
           action: "REBALANCE",
-          target: Array.isArray(step.assets) ? step.assets.join(" / ") : "",
-          size: step.threshold ? `${Number(step.threshold) * 100}%p` : "",
-          note: "",
+          target: isPeriodic
+            ? cleanPortfolioWidgetText(step.target || "target_weights", 80)
+            : Array.isArray(step.assets)
+              ? step.assets.join(" / ")
+              : cleanPortfolioWidgetText(step.target || "", 80),
+          size: isPeriodic ? "" : step.threshold ? `${Number(step.threshold) * 100}%p` : "",
+          note: cleanPortfolioWidgetText(step.note || step.reason || "", 120),
+        };
+      }
+      if (["dca", "contribution", "cashflow", "deposit", "periodic_buy"].includes(op)) {
+        return {
+          when: cleanPortfolioWidgetText(step.frequency || step.cadence || step.interval || formatPortfolioFunctionEffectiveLabel(step.effective || step.start || step.startDate), 80),
+          action: "DCA",
+          target: formatPortfolioFunctionWeightsLabel(step.targetWeights) || "입력 포트폴리오",
+          size: cleanPortfolioWidgetText(step.amount ?? step.contributionAmount ?? step.depositAmount ?? step.periodicAmount ?? step.monthlyAmount ?? "", 60),
+          note: cleanPortfolioWidgetText(step.condition || step.if || step.note || step.reason || "", 120),
+        };
+      }
+      if (op === "swap" || op === "portfolio_swap" || op === "allocation_event") {
+        const hasPortfolioWeights = step.targetWeights && typeof step.targetWeights === "object";
+        const eventType = cleanPortfolioWidgetText(step.eventType || step.event || step.kind || step.method || step.action || (op === "portfolio_swap" ? "portfolio_swap" : op === "swap" ? "swap" : hasPortfolioWeights ? "portfolio_swap" : ""), 40).toLowerCase();
+        if (["portfolio_swap", "portfolio_allocation_swap", "allocation_swap", "target_weights"].includes(eventType)) {
+          return {
+            when: cleanPortfolioWidgetText(step.condition || step.when || step.if || formatPortfolioFunctionEffectiveLabel(step.effective || step.dateRule || step.date || step.effectiveDate), 140),
+            action: "PORTFOLIO SWAP",
+            target: [step.fromLabel || step.fromPortfolio || "A", step.toLabel || step.toPortfolioLabel || step.targetLabel || "B"]
+              .map((item) => cleanPortfolioWidgetText(item, 40))
+              .filter(Boolean)
+              .join(" -> "),
+            size: formatPortfolioFunctionWeightsLabel(step.targetWeights),
+            note: cleanPortfolioWidgetText(step.note || step.reason || "", 120),
+          };
+        }
+        if (eventType && eventType !== "swap") {
+          return {
+            when: `지원되지 않는 allocation_event: ${eventType}`,
+            action: "EVENT",
+            target: "",
+            size: "",
+            note: "",
+          };
+        }
+        const fromAsset = cleanPortfolioWidgetText(step.fromAsset || step.from || step.sell || step.sourceAsset || "", 40).toUpperCase();
+        const toAsset = cleanPortfolioWidgetText(step.toAsset || step.to || step.buy || step.targetAsset || "", 40).toUpperCase();
+        return {
+          when: formatPortfolioFunctionEffectiveLabel(step.effective || step.dateRule || step.when || step.date || step.effectiveDate),
+          action: "SWAP",
+          target: [fromAsset, toAsset].filter(Boolean).join(" -> "),
+          size: cleanPortfolioWidgetText(step.weightPolicy || step.policy || "preserve_value", 60),
+          note: cleanPortfolioWidgetText(step.note || step.reason || "", 120),
         };
       }
       if (op === "emit") return null;
@@ -291,10 +383,10 @@ function PortfolioWidgetFunctionSpec({ widget, widgets = [] }) {
   );
   const signalMatrix = widget?.signalMatrix && typeof widget.signalMatrix === "object" ? widget.signalMatrix : null;
   const programRows = portfolioFunctionProgramDisplayRows(spec.program);
-  const rules = spec.rules.length
-    ? spec.rules
-    : programRows.length
-      ? programRows
+  const rules = programRows.length
+    ? programRows
+    : spec.rules.length
+      ? spec.rules
     : [{ when: "조건 대기", action: "signal", target: "", size: "", note: "매수/매도 조건이 들어오면 함수 규칙으로 표시됩니다." }];
   return (
     <div className="portfolio-widget-function" aria-label={`${widget?.title || "함수 위젯"} 규칙`}>
@@ -343,14 +435,16 @@ function PortfolioWidgetFunctionSpec({ widget, widgets = [] }) {
 
 function PortfolioWidgetMarkdown({ widget }) {
   const markdown = stripDuplicatePortfolioMarkdownTitle(
-    normalizePortfolioMarkdownText(
-      widget?.markdown,
-      widget?.markdownText,
-      widget?.content,
-      widget?.document,
-      widget?.body,
-      widget?.lastAgentAnswer,
-      widget?.prompt
+    stripPortfolioMarkdownEChartsFences(
+      normalizePortfolioMarkdownText(
+        widget?.markdown,
+        widget?.markdownText,
+        widget?.content,
+        widget?.document,
+        widget?.body,
+        widget?.lastAgentAnswer,
+        widget?.prompt
+      )
     ),
     widget?.title
   );
@@ -359,6 +453,11 @@ function PortfolioWidgetMarkdown({ widget }) {
     widget?.eCharts,
     widget?.echartsOptions,
     widget?.echartsOption,
+    widget?.markdown,
+    widget?.markdownText,
+    widget?.content,
+    widget?.document,
+    widget?.body,
     widget?.chartSpec?.echarts,
     widget?.chartSpec?.echartsOptions,
     widget?.chartSpec?.echartsOption,
@@ -394,29 +493,34 @@ function PortfolioWidgetMarkdown({ widget }) {
 
 export function PortfolioWidgetProducedContent({ widget, widgets = [] }) {
   const type = normalizePortfolioWidgetVisualType(widget?.visualType);
+  const hasBacktestResultSeries =
+    widget?.outputRole === "backtest_result" &&
+    Array.isArray(widget?.chartSpec?.series) &&
+    widget.chartSpec.series.length > 0;
+  const renderType = hasBacktestResultSeries ? "line" : type;
   const checklistItems = [...(widget?.checks || []), ...(widget?.requirements || [])].slice(0, 4);
-  if (type === "function") {
+  if (renderType === "function") {
     return (
       <div className="portfolio-widget-produced is-function-only">
         <PortfolioWidgetFunctionSpec widget={widget} widgets={widgets} />
       </div>
     );
   }
-  if (type === "metrics-table") {
+  if (renderType === "metrics-table") {
     return (
       <div className="portfolio-widget-produced is-metrics-table-only">
         <PortfolioWidgetMetricsTable widget={widget} widgets={widgets} />
       </div>
     );
   }
-  if (type === "markdown") {
+  if (renderType === "markdown") {
     return (
       <div className="portfolio-widget-produced is-markdown-only">
         <PortfolioWidgetMarkdown widget={widget} />
       </div>
     );
   }
-  if (type === "table") {
+  if (renderType === "table") {
     if (portfolioWidgetIsBacktestSetupTable(widget)) {
       return (
         <div className="portfolio-widget-produced is-backtest-setup-only">
@@ -430,16 +534,17 @@ export function PortfolioWidgetProducedContent({ widget, widgets = [] }) {
       </div>
     );
   }
-  if (["allocation", "line"].includes(type)) {
+  if (["allocation", "line"].includes(renderType)) {
+    const chartWidget = renderType === type ? widget : { ...widget, visualType: renderType };
     return (
       <div className="portfolio-widget-produced is-visual-only">
         <React.Suspense fallback={<PortfolioWidgetMiniPreview widget={widget} />}>
-          <PortfolioWidgetChart widget={widget} />
+          <PortfolioWidgetChart widget={chartWidget} />
         </React.Suspense>
       </div>
     );
   }
-  if (type === "checklist") {
+  if (renderType === "checklist") {
     return (
       <div className="portfolio-widget-produced is-checklist-only">
         <ul className="portfolio-widget-check-items" aria-label="위젯 체크리스트">

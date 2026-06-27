@@ -1,20 +1,25 @@
 # Installation And Local Run Guide
 
-This document is for people or local agents setting up FinanceAgentGUI from the `GuiBuild/` folder.
+This document is for people or local agents setting up FinanceAgentGUI from the repository root.
 
 The app is intentionally a local web console. It runs a local server, opens in a browser, and stores user-specific state under local `data/` and `logs/` directories.
 
 ## Supported Shape
 
-- Distribution root: `GuiBuild/`
-- Web app: `GuiBuild/web`
+- Distribution root: repository root
+- Web app: `web`
 - Frontend: Vite + React
-- Local server/API layer: Node.js modules under `GuiBuild/web/server`
-- Python helper scripts: `GuiBuild/scripts`
-- Runtime state: `GuiBuild/data`
-- Runtime logs: `GuiBuild/logs`
+- Local server/API layer: Node.js modules under `web/server`
+- Python helper scripts: `scripts`
+- Runtime state: `data`
+- Runtime logs: `logs`
 
-Do not require files outside `GuiBuild/` for normal installation or execution.
+Do not require files outside the repository root for normal installation or execution.
+
+For GitHub publishing, the repository root should be the app root itself. If a
+local development wrapper contains this app in `GuiBuild/`, publish the contents
+of `GuiBuild/`; do not publish the wrapper with `GuiBuild/` as a top-level
+folder.
 
 ## Prerequisites
 
@@ -23,7 +28,7 @@ Recommended baseline:
 - Node.js 22 or newer
 - npm matching the installed Node.js runtime
 - Python 3.11 or newer for optional finance helper scripts
-- A Chromium-family browser for browser-login handoff flows: Chrome, Edge, Chromium, or Brave
+- A Chromium-family browser for browser-login handoff flows: ChatGPT Atlas, Chrome, Edge, Chromium, or Brave
 
 Node 22 is recommended because browser-login handoff code uses the built-in `WebSocket` client to talk to the browser DevTools Protocol. If a user is on an older Node runtime, either upgrade Node or patch the handoff implementation to use a project dependency with equivalent WebSocket support.
 
@@ -45,7 +50,7 @@ Do not mix environments during setup. If the user installs Node packages in WSL,
 
 ## Frontend Install
 
-From the `GuiBuild/web` directory:
+From the `web` directory:
 
 ```bash
 npm install
@@ -70,7 +75,7 @@ The server binds to `127.0.0.1` by default. Use `FINANCE_AGENT_GUI_HOST` and `FI
 
 Python helpers are optional for screens that call finance scripts, world-memory checks, or portfolio backtests.
 
-From `GuiBuild/`:
+From the repository root:
 
 ```bash
 python -m venv .venv
@@ -108,7 +113,7 @@ Local runtime data:
 - `data/world-memory/collector-state.json`
 - `logs/world-memory/*`
 
-Initialize a local store from `GuiBuild/` only when one does not already exist:
+Initialize a local store from the repository root only when one does not already exist:
 
 ```bash
 python scripts/world_memory_cli.py init
@@ -126,7 +131,7 @@ cd web
 npm ls echarts
 ```
 
-ECharts is the default chart/graph engine for finance charts, job status visuals, verification visuals, and relationship/data visualizations. If it is missing, install it in `GuiBuild/web` and update both `package.json` and `package-lock.json`.
+ECharts is the default chart/graph engine for finance charts, job status visuals, verification visuals, and relationship/data visualizations. If it is missing, install it in `web` and update both `package.json` and `package-lock.json`.
 
 ## Frontend Route Boundaries
 
@@ -150,7 +155,7 @@ Shared UI/runtime helpers should stay outside `App.jsx` when multiple screens ne
 
 ## Local Configuration
 
-Local user configuration should live under `GuiBuild/config` or `GuiBuild/data`, not in the repository root.
+Local user configuration should live under `config` or `data`.
 
 Common environment variables:
 
@@ -159,7 +164,7 @@ Common environment variables:
 - `ARCA_BASE_URL`: default `https://arca.live`
 - `ARCA_CHANNEL`: default `stock`
 - `ARCA_LOGIN_URL`: override for the Arca.live login URL
-- `ARCA_BROWSER_PATH`: explicit Chrome/Edge/Chromium/Brave executable path
+- `ARCA_BROWSER_PATH`: explicit ChatGPT Atlas/Chrome/Edge/Chromium/Brave executable path
 - `ARCA_USER_AGENT`: optional Arca.live request user agent override
 
 Keep user-specific config files and generated runtime data gitignored.
@@ -180,7 +185,7 @@ Never print raw cookies, tokens, API keys, or credentials when debugging.
 
 ## Quick Verification
 
-Run from `GuiBuild/web`:
+Run from `web`:
 
 ```bash
 npm run build
@@ -210,6 +215,6 @@ FinanceAgentGUI is meant to be repairable by a local coding agent after a user c
 
 1. Inspect the exact OS, Node version, npm version, Python version, browser path, and failing endpoint.
 2. Keep secrets redacted.
-3. Prefer small patches inside `GuiBuild/`.
+3. Prefer small patches inside the app tree.
 4. Re-run `npm run build` or the narrowest relevant verification.
 5. Update `docs/compatibility.md` when the fix teaches a platform-specific lesson.

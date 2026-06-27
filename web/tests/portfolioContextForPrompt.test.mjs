@@ -1,11 +1,43 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { portfolioContextForPrompt } from "../server/codexProbe.mjs";
+import { portfolioContextForPrompt, resolveAgentRetrievalPolicy } from "../server/codexProbe.mjs";
 import {
   buildPortfolioChatActionInstructions,
   buildPortfolioWidgetAgentPrompt,
 } from "../src/portfolio/agentPromptBuilder.js";
+
+test("agent retrieval policy searches global memory without injecting snapshots on portfolio canvases", () => {
+  const policy = resolveAgentRetrievalPolicy({
+    screen: "portfolio-canvas",
+    includeWorldMemoryContext: false,
+    includeWorldMemorySearchContext: true,
+    includeNewsFeedContext: false,
+    includeNewsFeedSearchContext: true,
+  });
+
+  assert.equal(policy.includeWorldMemorySnapshot, false);
+  assert.equal(policy.worldMemoryPage, false);
+  assert.equal(policy.includeWorldMemorySearch, true);
+  assert.equal(policy.includeNewsFeedLatest, false);
+  assert.equal(policy.includeNewsFeedSearch, true);
+});
+
+test("agent retrieval policy keeps World Memory page context separate from mandatory semantic search", () => {
+  const policy = resolveAgentRetrievalPolicy({
+    screen: "world-memory",
+    includeWorldMemoryContext: true,
+    forceWorldMemoryVectorSearch: true,
+    includeNewsFeedContext: true,
+  });
+
+  assert.equal(policy.worldMemoryPage, true);
+  assert.equal(policy.includeWorldMemorySnapshot, false);
+  assert.equal(policy.includeWorldMemorySearch, true);
+  assert.equal(policy.forceWorldMemorySearch, true);
+  assert.equal(policy.includeNewsFeedLatest, true);
+  assert.equal(policy.includeNewsFeedSearch, true);
+});
 
 test("portfolio prompt context preserves chart series and metric outputs", () => {
   const context = portfolioContextForPrompt({
@@ -101,6 +133,10 @@ test("portfolio prompt context preserves chart series and metric outputs", () =>
   assert.equal(widget.chartSpec.metrics[1].endingValue, 141.21);
   assert.equal(widget.chartSpec.metrics[1].sharpe, 2.271);
   assert.deepEqual(widget.chartSpec.metricColumns, ["name", "endingValue", "cagr", "mdd", "sharpe"]);
+  assert.equal(widget.backtestMatrixContext.actionId, "request_backtest_matrix_context");
+  assert.equal(widget.backtestMatrixContext.widgetDisplayId, "W-003");
+  assert.equal(widget.backtestMatrixContext.pointCount, 3);
+  assert.deepEqual(widget.backtestMatrixContext.supportedTransforms, ["raw", "returns", "drawdown", "monthly_returns", "yearly_returns"]);
   assert.equal(widget.chartSpec.sourceTables[0].dataset.previewRows[0].ticker, "QQQ");
   assert.equal(widget.chartSpec.scenarioMatrix.resultRole, "backtest_result");
   assert.equal(context.widgetDependencyGraph[0].dependsOn[1], "w-signal");

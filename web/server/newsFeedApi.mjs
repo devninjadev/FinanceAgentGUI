@@ -29,11 +29,13 @@ const LEGACY_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.json");
 const STORE_PATH = join(DATA_DIR, "news-feed.json");
 const DEFAULT_POLL_INTERVAL_SECONDS = 180;
 const DEFAULT_RETENTION_HOURS = 24;
-const DEFAULT_TRANSLATION_BATCH_SIZE = 8;
+const DEFAULT_TRANSLATION_BATCH_SIZE = 2;
 const DEFAULT_MAX_ITEMS_PER_FEED = 500;
-const TRANSLATION_TIMEOUT_MS = 180000;
+const TRANSLATION_TIMEOUT_MS = 60000;
 const FETCH_TIMEOUT_MS = 20000;
 const FEED_FETCH_STAGGER_WINDOW_MS = 60000;
+const TRANSLATION_TITLE_MAX_CHARS = 500;
+const TRANSLATION_BODY_MAX_CHARS = 1200;
 const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
 const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
 const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
@@ -295,7 +297,7 @@ function normalizeNewsFeedConfig(config = {}) {
     maxItemsPerFeed: Math.max(50, Number(raw.maxItemsPerFeed || DEFAULT_MAX_ITEMS_PER_FEED)),
     translationBatchSize: Math.max(
       1,
-      Math.min(20, Number(raw.translationBatchSize || DEFAULT_TRANSLATION_BATCH_SIZE))
+      Math.min(3, Number(raw.translationBatchSize || DEFAULT_TRANSLATION_BATCH_SIZE))
     ),
     feeds: feeds.length ? feeds : fallbackConfig.feeds,
   };
@@ -469,6 +471,10 @@ function runtimeState() {
   return globalThis[runtimeKey];
 }
 
+function newsFeedTranslationAutoRunEnabled() {
+  return process.env.NEWS_FEED_TRANSLATION_AUTORUN !== "0";
+}
+
 function scheduleNewsFeedCollector(
   config = readNewsFeedConfig(),
   delayMs = config.pollIntervalSeconds * 1000
@@ -496,6 +502,7 @@ function collectorStatusFromStore(store, config) {
     running: runtime.started,
     inFlight: Boolean(runtime.inFlight),
     translationInFlight: Boolean(runtime.translationInFlight),
+    translationAutoRun: newsFeedTranslationAutoRunEnabled(),
     healthy,
     nextPollAt: runtime.nextPollAt,
     pollIntervalSeconds: config.pollIntervalSeconds,
@@ -644,10 +651,15 @@ function chooseTranslationModel() {
 }
 
 function translationPrompt(items) {
+  const truncateForTranslation = (value, limit) => {
+    const text = String(value || "").trim();
+    if (text.length <= limit) return text;
+    return `${text.slice(0, limit).trim()} ... [truncated for translation]`;
+  };
   const input = items.map((item) => ({
     id: item.id,
-    title: item.title,
-    body: item.originalText,
+    title: truncateForTranslation(item.title, TRANSLATION_TITLE_MAX_CHARS),
+    body: truncateForTranslation(item.originalText, TRANSLATION_BODY_MAX_CHARS),
   }));
 
   return [
@@ -900,8 +912,8 @@ function startPendingNewsFeedTranslation(batchSize) {
           if (!translation) {
             return {
               ...item,
-              translationStatus: "failed",
-              translationError: "번역 응답에 해당 항목 번역이 없습니다.",
+              translationStatus: "pending",
+              translationError: "",
               translationModel: translated.model,
               translationReasoning: translated.reasoning,
             };
@@ -930,19 +942,13 @@ function startPendingNewsFeedTranslation(batchSize) {
         };
         store = writeStore(store);
       } catch (error) {
-        const failedIds = new Set(pendingItems.map((item) => item.id));
         store = readStore();
-        store.items = store.items.map((item) =>
-          failedIds.has(item.id)
-            ? { ...item, translationStatus: "failed", translationError: error.message }
-            : item
-        );
         store.collector = {
           ...store.collector,
-          status: store.collector.status === "error" ? "error" : "translation_error",
-          lastAction: `${pendingItems.length}개 항목 번역 실패`,
-          lastError: error.message,
+          status: store.collector.status === "error" ? "error" : "ok",
+          lastAction: `${pendingItems.length}개 항목 번역 보류 · 원문 표시 유지`,
           lastPollFinishedAt: nowIso(),
+          translationLastError: error.message,
         };
         writeStore(store);
         break;
@@ -1044,7 +1050,11 @@ async function refreshNewsFeeds(reason = "manual") {
       ...store.collector,
       status: issues.length ? "error" : "ok",
       healthy: !issues.length,
-      lastAction: newItems.length ? `${newItems.length}개 신규 항목 저장, 번역 대기열 등록` : "신규 항목 없음",
+      lastAction: newItems.length
+        ? newsFeedTranslationAutoRunEnabled()
+          ? `${newItems.length}개 신규 항목 저장, 번역 대기열 등록`
+          : `${newItems.length}개 신규 항목 저장, 번역 보류`
+        : "신규 항목 없음",
       lastError: issues.map((issue) => `${issue.feedId}: ${issue.message}`).join(" / "),
       lastPollFinishedAt: nowIso(),
       feedStaggerWindowSeconds: staggerWindowSeconds,
@@ -1053,7 +1063,7 @@ async function refreshNewsFeeds(reason = "manual") {
     };
     store = writeStore(store);
 
-    if (newItems.length || pendingTranslationItems(store).length) {
+    if (newsFeedTranslationAutoRunEnabled() && (newItems.length || pendingTranslationItems(store).length)) {
       void startPendingNewsFeedTranslation(config.translationBatchSize);
     }
 
@@ -1079,6 +1089,7 @@ export function startNewsFeedCollector() {
   runtime.startedAt = nowIso();
 
   void refreshNewsFeeds("startup").finally(() => {
+    if (!newsFeedTranslationAutoRunEnabled()) return;
     const latestConfig = readNewsFeedConfig();
     void startPendingNewsFeedTranslation(latestConfig.translationBatchSize);
   });

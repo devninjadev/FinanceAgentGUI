@@ -107,6 +107,10 @@ export function codexApiPlugin() {
         await handleWorldMemoryEndpoint("status", req, res);
       });
 
+      server.middlewares.use("/api/world-memory/settings", async (req, res) => {
+        await handleWorldMemoryEndpoint("settings", req, res);
+      });
+
       server.middlewares.use("/api/world-memory/action", async (req, res) => {
         await handleWorldMemoryEndpoint("action", req, res);
       });

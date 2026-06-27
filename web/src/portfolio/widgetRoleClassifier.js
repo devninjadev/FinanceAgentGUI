@@ -132,11 +132,40 @@ export function portfolioWidgetLooksLikeBenchmarkReference(widget = {}) {
   );
 }
 
+export function portfolioWidgetLooksLikeBacktestResult(widget = {}) {
+  const chartSpec = widget?.chartSpec && typeof widget.chartSpec === "object" ? widget.chartSpec : {};
+  const actions = Array.isArray(widget?.nextActions) ? widget.nextActions : [];
+  const tokens = [
+    ...actions,
+    widget.outputRole,
+    widget.resultRole,
+    chartSpec.type,
+    chartSpec.role,
+    chartSpec.outputRole,
+    chartSpec.resultRole,
+    chartSpec.restoreMode,
+  ]
+    .filter(Boolean)
+    .map(normalizePortfolioRoleToken);
+
+  return tokens.some((token) =>
+    [
+      "run_backtest_chart_widget",
+      "run_yfinance_backtest_comparison",
+      "backtest_result",
+      "backtest_line_chart",
+      "period_return_comparison",
+    ].includes(token)
+  );
+}
+
 export function portfolioWidgetLooksLikeMetricsTarget(widget = {}) {
   const type = normalizePortfolioWidgetVisualType(widget?.visualType);
-  if (type === "metrics-table") return true;
-  if (widget?.outputRole === PORTFOLIO_WIDGET_OUTPUT_ROLES.metrics) return true;
   const chartSpec = widget?.chartSpec && typeof widget.chartSpec === "object" ? widget.chartSpec : {};
+  const outputTokens = [widget?.outputRole, chartSpec.outputRole].filter(Boolean).map(normalizePortfolioRoleToken);
+  if (outputTokens.includes(PORTFOLIO_WIDGET_OUTPUT_ROLES.metrics)) return true;
+  if (portfolioWidgetLooksLikeBacktestResult(widget)) return false;
+  if (type === "metrics-table") return true;
   const tokens = [
     chartSpec.type,
     chartSpec.role,
@@ -152,6 +181,8 @@ export function portfolioWidgetLooksLikeMetricsTarget(widget = {}) {
 
 export function portfolioWidgetUsesYfinanceRefresh(widget = {}) {
   const visualType = normalizePortfolioWidgetVisualType(widget?.visualType);
+  if (portfolioWidgetLooksLikeMetricsTarget(widget)) return false;
+  if (portfolioWidgetLooksLikeBacktestResult(widget)) return true;
   if (visualType !== "line") return false;
   const actions = Array.isArray(widget?.nextActions) ? widget.nextActions.map(normalizePortfolioRoleToken) : [];
   const chartSpec = widget?.chartSpec && typeof widget.chartSpec === "object" ? widget.chartSpec : {};

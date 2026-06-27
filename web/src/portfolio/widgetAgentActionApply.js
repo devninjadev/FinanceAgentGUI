@@ -24,6 +24,11 @@ import {
 import {
   portfolioWidgetActionRunsBacktestChart,
 } from "./widgetActions.js";
+import {
+  buildPortfolioBacktestMatrixContext,
+  buildPortfolioBacktestMatrixPrompt,
+  portfolioActionRequestsBacktestMatrixContext,
+} from "./backtestMatrixContext.js";
 import { portfolioWidgetAgentActionKey } from "./workspaceState.js";
 import { portfolioWidgetLooksLikeMetricsTarget } from "./widgetRoleClassifier.js";
 import { portfolioWidgetVisualTypeContractIssue } from "./widgetTypes.js";
@@ -64,13 +69,25 @@ function nextDisplayIndexForWidgets(widgets = [], nextDisplayIndex = 1) {
 }
 
 function patchWantsMarkdownWidget(patch = {}) {
+  const markdownValues = [
+    patch.markdown,
+    patch.markdownText,
+    patch.content,
+    patch.document,
+    patch.body,
+    patch.report,
+    patch.text,
+  ];
+  const hasMarkdownBody = markdownValues.some((value) => String(value || "").trim());
+  const hasMarkdownChart =
+    (Array.isArray(patch.echarts) && patch.echarts.length > 0) ||
+    (Array.isArray(patch.echartsOptions) && patch.echartsOptions.length > 0) ||
+    Boolean(patch.echartsOption && typeof patch.echartsOption === "object") ||
+    Boolean(patch.echartsOptions && typeof patch.echartsOptions === "object" && !Array.isArray(patch.echartsOptions));
   return (
     portfolioWidgetIsMarkdownType(patch.visualType || patch.type || patch.chartSpec?.type) ||
-    Object.prototype.hasOwnProperty.call(patch, "markdown") ||
-    Object.prototype.hasOwnProperty.call(patch, "markdownText") ||
-    Object.prototype.hasOwnProperty.call(patch, "echarts") ||
-    Object.prototype.hasOwnProperty.call(patch, "echartsOption") ||
-    Object.prototype.hasOwnProperty.call(patch, "echartsOptions")
+    hasMarkdownBody ||
+    hasMarkdownChart
   );
 }
 
@@ -164,6 +181,53 @@ export function buildPortfolioAgentWidgetActionApplyState({
   };
   const targetWidgetId = resolvePortfolioWidgetTargetId(currentWidgets, parsedAction, targetRequest);
   const targetWidget = currentWidgets.find((widget) => widget.id === targetWidgetId);
+  if (portfolioActionRequestsBacktestMatrixContext(actionName)) {
+    const inferredTargets = currentWidgets.filter(
+      (widget) =>
+        widget?.outputRole === "backtest_result" &&
+        Array.isArray(widget?.chartSpec?.series) &&
+        widget.chartSpec.series.length > 0
+    );
+    const matrixTarget = targetWidget || (inferredTargets.length === 1 ? inferredTargets[0] : null);
+    if (!matrixTarget) {
+      return {
+        status: "missing-target",
+        actionKey,
+        consumeId,
+        widgets: currentWidgets,
+        scenario: resolvedScenario,
+        nextDisplayIndex,
+        workspaceStarted: true,
+        rememberWorkspace: false,
+        logMessages: ["백테스트 행렬 조회 보류 · 대상 백테스트 위젯을 지정해야 합니다."],
+      };
+    }
+    const matrixContext = buildPortfolioBacktestMatrixContext({
+      widget: matrixTarget,
+      action: parsedAction,
+      now,
+    });
+    return {
+      status: "backtest-matrix-context",
+      actionKey,
+      consumeId,
+      widgets: currentWidgets,
+      scenario: resolvedScenario,
+      nextDisplayIndex,
+      workspaceStarted: true,
+      rememberWorkspace: false,
+      backtestMatrixPrompt: buildPortfolioBacktestMatrixPrompt({
+        originalPrompt: agentWidgetAction.request?.prompt || "",
+        action: parsedAction,
+        matrixContext,
+      }),
+      logMessages: [
+        matrixContext.ok
+          ? `백테스트 행렬 컨텍스트 조회 · ${matrixTarget.displayId || matrixTarget.title} ${matrixContext.matrix.returnedRowCount}/${matrixContext.matrix.rowCount}행`
+          : `백테스트 행렬 컨텍스트 조회 실패 · ${matrixTarget.displayId || matrixTarget.title}`,
+      ],
+    };
+  }
   const requestIsDependencyRepair = Boolean(
     agentWidgetAction.request?.repairWidgetDependencies ||
       agentWidgetAction.request?.refreshDerivedWidget ||
@@ -336,6 +400,28 @@ export function buildPortfolioAgentWidgetActionApplyState({
     ? buildPortfolioAgentErrorPatch(agentWidgetAction.error, now)
     : buildPortfolioWidgetPatchFromAgentAnswer(agentWidgetAction.answer, agentWidgetAction.request);
   const hasExplicitTarget = hasExplicitPortfolioWidgetTarget(parsedAction, targetRequest);
+  if (targetWidget && !portfolioWidgetIsMarkdownType(targetWidget.visualType) && patchWantsMarkdownWidget(patch)) {
+    return {
+      status: "action-contract-invalid",
+      actionKey,
+      consumeId,
+      widgets: currentWidgets,
+      scenario: resolvedScenario,
+      nextDisplayIndex,
+      workspaceStarted: true,
+      rememberWorkspace: false,
+      logMessages: [
+        `위젯 적용 보류 · ${targetWidget.displayId || targetWidget.title}는 기존 ${targetWidget.visualType || "위젯"} 역할을 유지해야 하므로 마크다운 패치를 적용하지 않습니다.`,
+      ],
+      contractError: {
+        code: "target_type_mismatch",
+        widgetId: targetWidget.id,
+        displayId: targetWidget.displayId,
+        title: targetWidget.title,
+        message: `${targetWidget.displayId || targetWidget.title || "대상 위젯"} 업데이트는 기존 ${targetWidget.visualType || "위젯"} visualType을 유지해야 합니다.`,
+      },
+    };
+  }
   const patchContractIssue = portfolioFunctionSpecMatrixDslContractIssue(patch.functionSpec || {}, {
     ...targetWidget,
     ...patch,
@@ -422,64 +508,6 @@ export function buildPortfolioAgentWidgetActionApplyState({
       logMessages,
       candidate: createdState.candidate,
       allocationWidget: createdState.allocationWidget,
-    };
-  }
-
-  if (!portfolioWidgetIsMarkdownType(targetWidget.visualType) && patchWantsMarkdownWidget(patch)) {
-    if (hasExplicitTarget && portfolioWidgetLooksLikeMetricsTarget(targetWidget)) {
-      return {
-        status: "target-type-mismatch",
-        actionKey,
-        consumeId,
-        widgets: currentWidgets,
-        scenario: resolvedScenario,
-        nextDisplayIndex,
-        workspaceStarted: true,
-        rememberWorkspace: false,
-        logMessages: [
-          `위젯 적용 보류 · ${targetWidget.displayId || targetWidget.title}는 백테스트 지표표라 마크다운/보고서 패치를 새 위젯으로 만들지 않습니다.`,
-        ],
-        contractError: {
-          code: "target_type_mismatch",
-          widgetId: targetWidget.id,
-          displayId: targetWidget.displayId,
-          title: targetWidget.title,
-          message: "백테스트 지표표 대상에는 metrics-table 패치만 적용할 수 있습니다.",
-        },
-      };
-    }
-    const reserved = reservePortfolioWidgetDisplayIdFromState(currentWidgets, nextDisplayIndex);
-    const createdState = buildPortfolioAgentCreatedWidgetState({
-      currentWidgets,
-      patch: {
-        ...patch,
-        visualType: "markdown",
-        kind: patch.kind || "마크다운 위젯",
-        dependsOn: [],
-        derivedFrom: [],
-        nextActions: [],
-        updatePolicy: "manual",
-      },
-      request: agentWidgetAction.request,
-      createdDisplayId: reserved.displayId,
-      canvasModeId,
-      assetCanvasModeId,
-      now,
-      nowMs,
-      findPlacement,
-    });
-    return {
-      status: "created",
-      actionKey,
-      consumeId,
-      widgets: createdState.widgets,
-      scenario: resolvedScenario,
-      nextDisplayIndex: nextDisplayIndexForWidgets(createdState.widgets, reserved.nextDisplayIndex),
-      workspaceStarted: true,
-      rememberWorkspace: true,
-      logMessages: [`마크다운 위젯 생성 · ${createdState.candidate.title || "문서 위젯"}`],
-      candidate: createdState.candidate,
-      allocationWidget: null,
     };
   }
 

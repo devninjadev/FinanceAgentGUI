@@ -2,13 +2,20 @@ import React, { useEffect, useRef } from "react";
 import { init as initEChart, use as useEChart } from "echarts/core";
 import { BarChart, LineChart, PieChart, ScatterChart } from "echarts/charts";
 import {
+  AriaComponent,
+  DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkLineComponent,
+  MarkPointComponent,
   TitleComponent,
   ToolboxComponent,
   TooltipComponent,
+  VisualMapComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+
+import { normalizeEChartsOption } from "../charts/echartsOptionSanitizer.js";
 
 useEChart([
   BarChart,
@@ -17,6 +24,11 @@ useEChart([
   ScatterChart,
   GridComponent,
   LegendComponent,
+  DataZoomComponent,
+  VisualMapComponent,
+  MarkLineComponent,
+  MarkPointComponent,
+  AriaComponent,
   TitleComponent,
   ToolboxComponent,
   TooltipComponent,
@@ -29,7 +41,7 @@ export function PortfolioEChart({ option, className = "", ariaLabel }) {
   useEffect(() => {
     if (!chartRef.current) return undefined;
     const chart = initEChart(chartRef.current, null, { renderer: "canvas" });
-    chart.setOption(option, true);
+    chart.setOption(normalizeEChartsOption(option), true);
 
     const resize = () => chart.resize();
     let observer = null;

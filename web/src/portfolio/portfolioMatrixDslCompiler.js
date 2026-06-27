@@ -131,6 +131,76 @@ function normalizeEmitSpec(value = {}, fallbackRuleId = "") {
   };
 }
 
+function normalizeEffectiveSpec(value = {}) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return {
+      anchor: cleanDslIdentifier(value.anchor || "run_start", "run_start"),
+      date: cleanDslText(value.date || value.effectiveDate || "", 40),
+      offsetMonths: Math.max(0, Math.min(240, Math.round(finiteNumber(value.offsetMonths || value.months, 0) || 0))),
+      offsetDays: Math.max(0, Math.min(7300, Math.round(finiteNumber(value.offsetDays || value.days, 0) || 0))),
+      snap: cleanDslIdentifier(value.snap || value.roll || value.tradingDay || "next_trading_day", "next_trading_day"),
+    };
+  }
+  const text = cleanDslText(value || "", 120);
+  return {
+    anchor: "run_start",
+    date: text.match(/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/) ? text.replace(/[/.]/g, "-") : "",
+    offsetMonths: Math.max(0, Math.min(240, Math.round(finiteNumber(text.match(/(\d+)\s*(?:months?|개월)/i)?.[1], 0) || 0))),
+    offsetDays: Math.max(0, Math.min(7300, Math.round(finiteNumber(text.match(/(\d+)\s*(?:days?|일)/i)?.[1], 0) || 0))),
+    snap: /previous|prev|직전/i.test(text) ? "previous_trading_day" : "next_trading_day",
+    text,
+  };
+}
+
+function normalizeAllocationWeights(value) {
+  const entries = [];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    Object.entries(value).forEach(([asset, weight]) => {
+      const ticker = cleanDslText(asset, 40).toUpperCase();
+      const number = finiteNumber(weight, null);
+      if (ticker && number !== null && number > 0) entries.push([ticker, number]);
+    });
+  } else if (Array.isArray(value)) {
+    value.forEach((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return;
+      const ticker = cleanDslText(item.ticker || item.asset || item.symbol || item.name || "", 40).toUpperCase();
+      const number = finiteNumber(item.weight ?? item.value ?? item.allocation ?? item.ratio, null);
+      if (ticker && number !== null && number > 0) entries.push([ticker, number]);
+    });
+  }
+  const weights = entries.reduce((acc, [ticker, weight]) => {
+    acc[ticker] = (acc[ticker] || 0) + weight;
+    return acc;
+  }, {});
+  const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+  if (total > 1.0001) {
+    Object.keys(weights).forEach((ticker) => {
+      weights[ticker] /= total;
+    });
+  }
+  return weights;
+}
+
+function normalizePortfolioSwapTargetWeights(raw = {}) {
+  const direct = normalizeAllocationWeights(raw.targetWeights || raw.toWeights || raw.weights || raw.allocation || raw.targetAllocation);
+  if (Object.keys(direct).length) return direct;
+  const portfolio = raw.toPortfolio || raw.targetPortfolio || raw.portfolioB;
+  if (portfolio && typeof portfolio === "object" && !Array.isArray(portfolio)) {
+    return normalizeAllocationWeights(portfolio.weights || portfolio.holdings || portfolio.allocation);
+  }
+  return {};
+}
+
+function normalizeDcaTargetWeights(raw = {}) {
+  const direct = normalizeAllocationWeights(raw.targetWeights || raw.contributionWeights || raw.buyWeights || raw.weights || raw.allocation || raw.targetAllocation);
+  if (Object.keys(direct).length) return direct;
+  const portfolio = raw.targetPortfolio || raw.portfolio || raw.portfolioB;
+  if (portfolio && typeof portfolio === "object" && !Array.isArray(portfolio)) {
+    return normalizeAllocationWeights(portfolio.weights || portfolio.holdings || portfolio.allocation);
+  }
+  return {};
+}
+
 export function normalizePortfolioMatrixDslProgram(value = []) {
   const program = Array.isArray(value) ? value : [];
   return program
@@ -181,15 +251,121 @@ export function normalizePortfolioMatrixDslProgram(value = []) {
         };
       }
       if (op === "rebalance") {
+        const method = cleanDslIdentifier(raw.method || raw.name || "threshold_band", "threshold_band");
         const threshold = finiteNumber(raw.threshold || raw.driftThreshold || raw.band || raw.value, 0.1);
-        return {
+        const normalized = {
           op,
-          method: cleanDslIdentifier(raw.method || raw.name || "threshold_band", "threshold_band"),
+          method,
           threshold: threshold === null ? 0.1 : Math.max(0.0001, Math.min(1, threshold)),
           assets: Array.isArray(raw.assets)
             ? raw.assets.slice(0, 12).map((asset) => cleanDslText(asset, 40)).filter(Boolean)
             : [],
           target: cleanDslText(raw.target || "target_weights", 80),
+        };
+        if (["periodic", "calendar", "calendar_month_end", "monthly", "month_end"].includes(method)) {
+          return {
+            ...normalized,
+            frequency: cleanDslIdentifier(raw.frequency || raw.cadence || raw.interval || "monthly", "monthly"),
+            dayOfMonth: Math.max(1, Math.min(31, Math.round(finiteNumber(raw.dayOfMonth || raw.day, 1) || 1))),
+          };
+        }
+        return normalized;
+      }
+      if (["dca", "contribution", "cashflow", "deposit", "periodic_buy"].includes(op)) {
+        const amount = finiteNumber(
+          raw.amount ?? raw.contributionAmount ?? raw.depositAmount ?? raw.periodicAmount ?? raw.installmentAmount ?? raw.monthlyAmount ?? raw.value,
+          null
+        );
+        const conditionSource = raw.condition || raw.if;
+        const expr = conditionSource ? normalizePortfolioMatrixDslExpression(conditionSource) : null;
+        if (amount === null || amount <= 0 || (conditionSource && !expr)) {
+          return {
+            op,
+            unsupported: true,
+            reason: "portfolio-matrix-dsl dca requires a positive amount and a valid optional condition expression",
+          };
+        }
+        return {
+          op: "dca",
+          amount,
+          frequency: cleanDslIdentifier(raw.frequency || raw.cadence || raw.interval || (raw.monthlyAmount ? "monthly" : "monthly"), "monthly"),
+          targetWeights: normalizeDcaTargetWeights(raw),
+          effective: normalizeEffectiveSpec(raw.effective || raw.start || raw.startDate || raw.dateRule || {
+            offsetMonths: raw.offsetMonths,
+            offsetDays: raw.offsetDays,
+            snap: raw.snap,
+          }),
+          endDate: cleanDslText(raw.endDate || raw.until || "", 40),
+          dayOfMonth: Math.max(1, Math.min(31, Math.round(finiteNumber(raw.dayOfMonth || raw.day, 1) || 1))),
+          maxContributions: Math.max(0, Math.min(1000, Math.round(finiteNumber(raw.maxContributions || raw.count || raw.installments, 0) || 0))),
+          condition: cleanDslText(conditionSource || "", 180),
+          expr,
+          ruleId: cleanDslText(raw.ruleId || raw.id || `dca_${index + 1}`, 80),
+          note: cleanDslText(raw.note || raw.reason || "", 160),
+          source: cleanDslText(raw.source || PORTFOLIO_MATRIX_DSL_LANGUAGE, 120),
+        };
+      }
+      if (op === "swap" || op === "portfolio_swap" || op === "allocation_event") {
+        const rawEventType = cleanDslIdentifier(raw.eventType || raw.event || raw.kind || raw.method || raw.action || "", "");
+        const eventType = rawEventType || (op === "portfolio_swap" ? "portfolio_swap" : op === "swap" ? "swap" : Object.keys(normalizePortfolioSwapTargetWeights(raw)).length ? "portfolio_swap" : "swap");
+        if (["portfolio_swap", "portfolio_allocation_swap", "allocation_swap", "target_weights"].includes(eventType)) {
+          const targetWeights = normalizePortfolioSwapTargetWeights(raw);
+          const conditionSource = raw.expr || raw.condition || raw.if || raw.when;
+          const expr = conditionSource ? normalizePortfolioMatrixDslExpression(conditionSource) : null;
+          if (!Object.keys(targetWeights).length || (conditionSource && !expr)) {
+            return {
+              op,
+              unsupported: true,
+              reason: "portfolio-matrix-dsl portfolio_swap requires targetWeights and a valid condition expression",
+            };
+          }
+          return {
+            op: "portfolio_swap",
+            eventType: "portfolio_swap",
+            targetWeights,
+            condition: cleanDslText(raw.condition || raw.when || raw.if || "", 180),
+            expr,
+            effective: normalizeEffectiveSpec(raw.effective || raw.dateRule || raw.date || raw.effectiveDate || {
+              offsetMonths: raw.offsetMonths,
+              offsetDays: raw.offsetDays,
+              snap: raw.snap,
+            }),
+            fromLabel: cleanDslText(raw.fromPortfolio || raw.fromLabel || "A", 60),
+            toLabel: cleanDslText(raw.toPortfolioLabel || raw.toLabel || raw.targetLabel || "B", 60),
+            ruleId: cleanDslText(raw.ruleId || raw.id || `portfolio_swap_${index + 1}`, 80),
+            note: cleanDslText(raw.note || raw.reason || "", 160),
+            source: cleanDslText(raw.source || PORTFOLIO_MATRIX_DSL_LANGUAGE, 120),
+          };
+        }
+        if (eventType !== "swap") {
+          return {
+            op,
+            unsupported: true,
+            reason: `Unsupported portfolio-matrix-dsl allocation event: ${eventType}`,
+          };
+        }
+        const fromAsset = cleanDslText(raw.fromAsset || raw.from || raw.sell || raw.sourceAsset || "", 40).toUpperCase();
+        const toAsset = cleanDslText(raw.toAsset || raw.to || raw.buy || raw.targetAsset || "", 40).toUpperCase();
+        if (!fromAsset || !toAsset || fromAsset === toAsset) {
+          return {
+            op,
+            unsupported: true,
+            reason: "portfolio-matrix-dsl swap requires distinct fromAsset and toAsset",
+          };
+        }
+        return {
+          op: "swap",
+          fromAsset,
+          toAsset,
+          effective: normalizeEffectiveSpec(raw.effective || raw.dateRule || raw.when || raw.date || raw.effectiveDate || {
+            offsetMonths: raw.offsetMonths,
+            offsetDays: raw.offsetDays,
+            snap: raw.snap,
+          }),
+          weightPolicy: cleanDslIdentifier(raw.weightPolicy || raw.policy || "preserve_value", "preserve_value"),
+          ruleId: cleanDslText(raw.ruleId || raw.id || `swap_${index + 1}`, 80),
+          note: cleanDslText(raw.note || raw.reason || "", 160),
+          source: cleanDslText(raw.source || PORTFOLIO_MATRIX_DSL_LANGUAGE, 120),
         };
       }
       if (op === "emit" && !(raw.expr || raw.when || raw.condition || raw.if)) {

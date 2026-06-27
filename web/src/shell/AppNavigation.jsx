@@ -1,4 +1,5 @@
 import React from "react";
+import BarChart3 from "lucide-react/dist/esm/icons/bar-chart-3.js";
 import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right.js";
@@ -6,6 +7,7 @@ import Database from "lucide-react/dist/esm/icons/database.js";
 import FileText from "lucide-react/dist/esm/icons/file-text.js";
 import Home from "lucide-react/dist/esm/icons/home.js";
 import Landmark from "lucide-react/dist/esm/icons/landmark.js";
+import MessageSquare from "lucide-react/dist/esm/icons/message-square.js";
 import Newspaper from "lucide-react/dist/esm/icons/newspaper.js";
 import PieChart from "lucide-react/dist/esm/icons/chart-pie.js";
 import Settings from "lucide-react/dist/esm/icons/settings.js";
@@ -21,6 +23,7 @@ const leftSidebarSections = [
       { label: "News Feed", icon: Newspaper, view: "news-feed", statusKey: "newsFeed" },
       { label: "Earning Calendar", icon: CalendarDays, view: "earning-calendar" },
       { label: "Economic Calendar", icon: Landmark, view: "economic-calendar" },
+      { label: "채팅", icon: MessageSquare, view: "chat" },
       { label: "보고서", icon: FileText, view: "reports" },
       { label: "포트폴리오", icon: PieChart, view: "portfolio" },
     ],
@@ -71,14 +74,17 @@ export function AppNavigation({
   portfolioCanvasMenuId,
   portfolioCanvases,
   portfolioSidebarOpen,
+  worldMemoryEnabled = false,
 }) {
   const PortfolioChevron = portfolioSidebarOpen ? ChevronDown : ChevronRight;
 
   return (
     <aside className="app-sidebar" aria-label="FinanceAgentGUI navigation">
       <div className="app-sidebar-brand">
-        <span className="brand-mark" aria-hidden="true">F</span>
-        <span>FinanceAgent</span>
+        <span className="brand-mark" aria-hidden="true">
+          <BarChart3 size={15} strokeWidth={2.3} />
+        </span>
+        <span>주식채널+</span>
       </div>
 
       <nav className="app-sidebar-nav" aria-label="주요 작업">
@@ -86,62 +92,64 @@ export function AppNavigation({
           <section className="nav-section" key={section.title}>
             <h2>{section.title}</h2>
             <div className="nav-list">
-              {section.items.map((item) => {
-                const Icon = item.icon;
-                const itemStatusHealth =
-                  item.statusKey === "newsFeed"
-                    ? newsFeedHealthState(newsFeedStatus)
-                    : item.statusKey === "arcaNotifications"
-                      ? arcaNotificationHealth
-                      : null;
-                const isPortfolioItem = item.view === "portfolio";
-                const isPortfolioSurface = activeView === "portfolio" || activeView === "portfolio-canvas";
-                const isActiveItem = isPortfolioItem ? isPortfolioSurface : item.view === activeView;
-                return (
-                  <React.Fragment key={item.label}>
-                    <button
-                      className={[
-                        "nav-item",
-                        isActiveItem ? "is-active" : "",
-                        isPortfolioItem ? "has-children" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      type="button"
-                      onClick={() => onSelectItem(item)}
-                      title={itemStatusHealth ? itemStatusHealth.title : item.label}
-                      aria-expanded={isPortfolioItem ? portfolioSidebarOpen : undefined}
-                    >
-                      <Icon size={16} strokeWidth={2} />
-                      <span className="nav-item-text">{item.label}</span>
-                      <NavStatusDot health={itemStatusHealth} />
-                      {isPortfolioItem ? (
-                        <PortfolioChevron className="nav-item-chevron" size={15} strokeWidth={2.2} />
+              {section.items
+                .filter((item) => item.view !== "world-memory" || worldMemoryEnabled)
+                .map((item) => {
+                  const Icon = item.icon;
+                  const itemStatusHealth =
+                    item.statusKey === "newsFeed"
+                      ? newsFeedHealthState(newsFeedStatus)
+                      : item.statusKey === "arcaNotifications"
+                        ? arcaNotificationHealth
+                        : null;
+                  const isPortfolioItem = item.view === "portfolio";
+                  const isPortfolioSurface = activeView === "portfolio" || activeView === "portfolio-canvas";
+                  const isActiveItem = isPortfolioItem ? isPortfolioSurface : item.view === activeView;
+                  return (
+                    <React.Fragment key={item.label}>
+                      <button
+                        className={[
+                          "nav-item",
+                          isActiveItem ? "is-active" : "",
+                          isPortfolioItem ? "has-children" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        type="button"
+                        onClick={() => onSelectItem(item)}
+                        title={itemStatusHealth ? itemStatusHealth.title : item.label}
+                        aria-expanded={isPortfolioItem ? portfolioSidebarOpen : undefined}
+                      >
+                        <Icon size={16} strokeWidth={2} />
+                        <span className="nav-item-text">{item.label}</span>
+                        <NavStatusDot health={itemStatusHealth} />
+                        {isPortfolioItem ? (
+                          <PortfolioChevron className="nav-item-chevron" size={15} strokeWidth={2.2} />
+                        ) : null}
+                      </button>
+                      {isPortfolioItem && portfolioSidebarOpen ? (
+                        <PortfolioCanvasNavList
+                          activeCanvasId={activePortfolioCanvas?.id || ""}
+                          activeView={activeView}
+                          canvases={portfolioCanvases}
+                          editingCanvasId={editingPortfolioCanvasId}
+                          menuCanvasId={portfolioCanvasMenuId}
+                          nameDraft={portfolioCanvasNameDraft}
+                          nameInputRef={nameInputRef}
+                          onDraftChange={onDraftChange}
+                          onDraftKeyDown={onDraftKeyDown}
+                          onDuplicateCanvas={onDuplicateCanvas}
+                          onMenuToggle={onMenuToggle}
+                          onRenameCanvas={onRenameCanvas}
+                          onRequestDeleteCanvas={onRequestDeleteCanvas}
+                          onSaveDraft={onSaveDraft}
+                          onSelectCanvas={onSelectCanvas}
+                          portfolioCanvasModeMeta={portfolioCanvasModeMeta}
+                        />
                       ) : null}
-                    </button>
-                    {isPortfolioItem && portfolioSidebarOpen ? (
-                      <PortfolioCanvasNavList
-                        activeCanvasId={activePortfolioCanvas?.id || ""}
-                        activeView={activeView}
-                        canvases={portfolioCanvases}
-                        editingCanvasId={editingPortfolioCanvasId}
-                        menuCanvasId={portfolioCanvasMenuId}
-                        nameDraft={portfolioCanvasNameDraft}
-                        nameInputRef={nameInputRef}
-                        onDraftChange={onDraftChange}
-                        onDraftKeyDown={onDraftKeyDown}
-                        onDuplicateCanvas={onDuplicateCanvas}
-                        onMenuToggle={onMenuToggle}
-                        onRenameCanvas={onRenameCanvas}
-                        onRequestDeleteCanvas={onRequestDeleteCanvas}
-                        onSaveDraft={onSaveDraft}
-                        onSelectCanvas={onSelectCanvas}
-                        portfolioCanvasModeMeta={portfolioCanvasModeMeta}
-                      />
-                    ) : null}
-                  </React.Fragment>
-                );
-              })}
+                    </React.Fragment>
+                  );
+                })}
             </div>
           </section>
         ))}

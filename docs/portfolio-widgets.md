@@ -42,6 +42,40 @@ Strategy-research widgets should declare one output role:
 
 Metrics widgets are derived views, not calculation widgets. A `metrics-table` should normally depend on a `backtest_result` line widget and render that widget's `chartSpec.metrics` / `chartSpec.standardMetrics`. Repairing or refreshing a metrics table should preserve `visualType:"metrics-table"` and should not create a markdown/report widget unless the user explicitly asks for a separate explanatory note.
 
+Do not turn a `backtest_result` widget into a metrics widget just because it contains metric rows or currently renders like a table. If a stored widget has `outputRole:"backtest_result"` or `nextActions:["run_backtest_chart_widget"]`, agents and repair code must treat it as an executable backtest result first. Refreshing it must rerun the backtest path, not perform `metrics-table` synchronization. A true metrics table should use `outputRole:"metrics"` and depend on the backtest result widget.
+
+DCA / contribution-based backtests should still use the same `metrics-table` visual type. Set `chartSpec.metricProfile:"dca"` when the table should show contribution-aware columns. The backtest metric rows may include `totalContribution`, `netProfit`, `contributionReturn`, `irr`, `twr`, `contributionCount`, and `averageContribution`; the renderer switches from the standard metrics columns to the DCA cashflow columns when this profile or those fields are present.
+
+Backtest follow-up analysis has a narrow table rule:
+
+- Use `metrics-table` only for the canonical backtest evaluation table: CAGR, MDD, Sharpe, Sortino, Calmar, Ulcer, UPI, BETA, contribution-aware DCA metrics, and adjacent standard performance columns.
+- For any other calculation or interpretation after a `backtest_result` exists, create a `markdown` widget. Put compact numeric comparisons in markdown tables, and use `widget.echarts` or fenced `echarts` / `chart` JSON blocks for ECharts visuals such as efficient frontiers, risk-return scatter plots, rolling-correlation lines, drawdown distributions, sensitivity bars, or scenario comparison charts.
+- ECharts option blocks must be plain JSON. For array-valued scatter data in tooltip templates, use indexed value placeholders such as `{value[0]}`, `{value[1]}`, and `{value[2]}`; the GUI renderer converts them to runtime tooltip functions before passing options to ECharts.
+- These markdown follow-ups may be context-derived rather than graph-derived. When the LLM already sees the backtest widget in the Context Packet, keep `dependsOn`, `derivedFrom`, and `nextActions` empty unless the user explicitly asks for refreshable dependency behavior.
+- The Context Packet may include only edge samples for `chartSpec.xLabels` and `chartSpec.series`. If a follow-up needs more sequence data, the agent must request exact backtest matrix context first with `actionId:"request_backtest_matrix_context"` rather than guessing from samples.
+- Do not invent uncomputed values. If the required backtest series, returns, covariance, or scenario data is absent from context, make the markdown widget state the missing input or create a checklist instead of fabricating a chart.
+
+Backtest matrix retrieval is not vector search. It is deterministic series retrieval by widget and axes:
+
+```json
+{
+  "actionId": "request_backtest_matrix_context",
+  "widgetDisplayId": "W-005",
+  "matrixRequest": {
+    "transform": "yearly_returns",
+    "frequency": "yearly",
+    "seriesNames": ["Buy & Hold", "전략"],
+    "assets": ["QQQ"],
+    "startDate": "2020-01-01",
+    "endDate": "2026-12-31",
+    "maxPoints": 1200,
+    "nextPrompt": "이 연도별 수익률로 markdown 위젯과 ECharts 막대 차트를 만들어 주세요."
+  }
+}
+```
+
+Supported filters are `widgetId` / `widgetDisplayId`, date range, `seriesNames`, and `assets` / `tickers`. Supported transforms are `raw`, `returns`, `drawdown`, `monthly_returns`, and `yearly_returns`. The GUI returns a compact matrix with `date`, `seriesName`, `asset`, `field`, and `value`; the agent then uses that returned matrix to build the requested markdown table and ECharts block.
+
 ## Multiple Asset Comparison Contract
 
 When the agent classifies a request as an independent comparison of multiple assets, ETFs, or strategy portfolio candidates, it must set `classification.isMultipleAssetComparison=true`.
@@ -129,8 +163,64 @@ Supported v1 operations:
 | `indicator` | Add derived indicator fields to each run/asset/date record | `name:"rsi"` over a numeric source field such as `close` |
 | `rolling` | Add rolling statistics | `mean`/`avg`, `sum`, `min`, `max`, `std` |
 | `rank` | Rank assets within the same `runId` and `date` | Frontend compiler only for source matrices that already contain comparable asset rows |
+| `swap` / `allocation_event` | Declare a dated asset replacement intent | yfinance runner resolves the effective trading date, adds the replacement ticker to the price universe, and transfers the current `fromAsset` position value to `toAsset` |
+| `portfolio_swap` / `allocation_event eventType:"portfolio_swap"` | Declare a one-way portfolio A to portfolio B allocation switch | yfinance runner watches the safe `when` condition from runtime fields/indicators, then reallocates total portfolio value into `targetWeights` for the next interval |
+| `dca` / `contribution` | Declare periodic external contributions into the portfolio | yfinance runner snaps scheduled deposits to trading dates, invests each contribution into `targetWeights` or the input portfolio weights, and emits contribution-aware metrics such as IRR/TWR |
+| `rebalance` | Rebalance when portfolio drift crosses a threshold or on a periodic schedule | `method:"threshold_band"` / `drift_rebalance` / `band_rebalance`, plus `method:"periodic", frequency:"monthly"` |
 | `rule` | Convert conditions into `signal_matrix` rows | simple comparison expressions, optional `and`/`or`, `true`/`false`, emitting `target_weight` or another named field |
 | `emit` | Optional output declaration metadata | ignored by the runner when it has no condition; conditional `emit` is normalized as `rule` |
+
+Asset swaps are still function-widget intent, not execution. The function widget declares the event; the backtest runner fetches the needed prices, chooses the trading date, applies the swap, and stores the result series. Example:
+
+```json
+{
+  "op": "swap",
+  "fromAsset": "META",
+  "toAsset": "LLY",
+  "effective": { "anchor": "run_start", "offsetMonths": 6, "snap": "next_trading_day" },
+  "weightPolicy": "preserve_value"
+}
+```
+
+`weightPolicy:"preserve_value"` sells the current `fromAsset` position at the event date and buys the `toAsset` with that value. It does not force the whole portfolio back to equal weight unless a separate rebalance event is added.
+
+Portfolio swaps are also function-widget intent. Use them when a condition changes the whole strategy allocation rather than one ticker. The first executable version is one-way: once the condition becomes true, the runner switches from the current portfolio A to target portfolio B and stays there. If the strategy needs B to A recovery, model that as a later explicit reverse event rather than assuming automatic round-trips. Example:
+
+```json
+{
+  "op": "portfolio_swap",
+  "when": "rsi < 40",
+  "fromLabel": "A 공격 포트폴리오",
+  "toLabel": "B 방어 포트폴리오",
+  "targetWeights": { "TLT": 0.6, "GLD": 0.25, "SHY": 0.15 }
+}
+```
+
+`targetWeights` accepts either decimal weights or percentage-like numbers; values above 1 are normalized to 100%. If the weights sum below 1, the remaining value is held as cash. Conditions use the same small expression grammar below and may reference fields created by earlier `indicator` or `rolling` steps, such as `rsi`, `ema`, or `macd`.
+
+The yfinance runner also exposes time fields for date-based conditions:
+
+- `bar_index`
+- `trading_days_since_run_start`
+- `days_since_run_start`
+- `months_since_run_start`
+- `years_since_run_start`
+
+For example, `when:"months_since_run_start >= 6"` switches on the first trading date at or after the six-calendar-month anniversary of the run start.
+
+DCA / contribution operations are function-widget intent, not standalone portfolio tables. Use them when the user asks for 적립식, DCA, periodic buys, or monthly contributions. Example:
+
+```json
+{
+  "op": "dca",
+  "amount": 1000,
+  "frequency": "monthly",
+  "dayOfMonth": 1,
+  "targetWeights": { "QQQ": 0.7, "TLT": 0.3 }
+}
+```
+
+`frequency` supports `daily`, `weekly`, `biweekly`, `monthly`, and `quarterly`. If `targetWeights` is omitted, each contribution follows the input portfolio weights. The runner records each deposit as an external cashflow and returns DCA metrics in `metrics.standard`: `totalContribution`, `netProfit`, `contributionReturn`, `irr`, `twr`, `contributionCount`, and `averageContribution`.
 
 Expression grammar is deliberately small:
 
@@ -182,7 +272,7 @@ Compiler statuses:
 | `unsupported_op` | At least one op is not in the allowed DSL subset |
 | `invalid_expression` | A rule condition could not be parsed into the safe expression grammar |
 
-Execution timing follows the scenario assumptions. In the current yfinance runner, DSL rules observe the current close-derived state and change exposure for the next interval, matching the existing `next_open`/next-bar safety model. This is close to the important Pine Script strategy distinction that scripts evaluate bar by bar, while strategy orders are filled by the broker emulator on a subsequent available tick. See the official Pine docs for the execution model and strategy order behavior:
+Execution timing follows the scenario assumptions. In the current yfinance runner, DSL rules observe the current close-derived state and change exposure for the next interval, matching the existing `next_open`/next-bar safety model. Swap events are applied after the effective date's portfolio value is observed, so the replacement asset affects the next interval. This is close to the important Pine Script strategy distinction that scripts evaluate bar by bar, while strategy orders are filled by the broker emulator on a subsequent available tick. See the official Pine docs for the execution model and strategy order behavior:
 
 - https://www.tradingview.com/pine-script-docs/language/execution-model/
 - https://www.tradingview.com/pine-script-docs/concepts/strategies/
@@ -228,11 +318,11 @@ Use these types as the default primitives:
 - `metrics-table`: computed backtest metrics such as CAGR, MDD, Sharpe, Sortino, Calmar, Ulcer, UPI, and beta.
 - `allocation`: allocation or pie/donut visualization.
 - `checklist`: validation, missing inputs, blocked execution, or repair steps.
-- `markdown`: document-style agent output for explanation, web-search result review, analysis notes, or narrative reports. It has no calculation input or return value; use `kind:"마크다운 위젯"`, `outputRole:"note"`, empty `dataset`, empty `dependsOn`, empty `derivedFrom`, and empty `nextActions`. Default layout is `3x3`. Optional embedded charts are allowed through `widget.echarts=[{title, body, option}]`, where `option` is a plain ECharts option object.
+- `markdown`: document-style agent output for explanation, web-search result review, analysis notes, backtest follow-up calculations, or narrative reports. It has no calculation input or return value; use `kind:"마크다운 위젯"`, `outputRole:"note"`, empty `dataset`, empty `dependsOn`, empty `derivedFrom`, and empty `nextActions`. Default layout is `3x3`. Optional embedded charts are allowed through `widget.echarts=[{title, body, option}]` or fenced `echarts` / `chart` JSON blocks in `widget.markdown`, where `option` is a plain ECharts option object.
 
 `memo` is a legacy/local display fallback only. Agents must not create new `memo` or `프롬프트 위젯` nodes. If an action lacks a canonical `visualType`, the harness rejects the action and asks the agent to regenerate a complete `portfolio_widget_action` JSON.
 
-Do not convert existing `table`, `function`, `line`, `metrics-table`, `allocation`, or `checklist` widgets into `markdown`. If an agent needs to show a document-style explanation about an existing widget or external research result, create a new `markdown` widget instead.
+Do not convert existing `table`, `function`, `line`, `metrics-table`, `allocation`, or `checklist` widgets into `markdown`. A targeted `update_widget` must preserve the target widget's calculation role and canonical `visualType`; if an agent needs to show a document-style explanation about an existing widget or external research result, it must emit a separate `action:"create_widget"` markdown action instead.
 
 Runtime helpers now live under `web/src/portfolio/` for new portfolio-specific engine work. Keep reusable action parsing, widget type normalization, deterministic widget compilers, and portfolio route components there instead of adding more portfolio domain code to `web/src/App.jsx`. `App.jsx` lazy-loads the portfolio guide and active workspace route components.
 
@@ -472,10 +562,12 @@ External CSV flow with no benchmark:
 - A source portfolio should be a `table` widget, not hidden inside a chart.
 - A rebalance rule should be a `function` widget, not prose inside a chart.
 - A backtest result should be a separate `line` widget that depends on the source portfolio and the function widgets.
+- A backtest result's identity is `outputRole:"backtest_result"` plus the backtest execution contract. Do not demote it to `outputRole:"metrics"` or route refresh through metrics sync when repairing legacy `visualType:"metrics-table"` contamination.
 - A backtest result chart must use time on the X axis. Do not put holdings, tickers, symbols, or target weights into the result chart `dataset`; those belong only in the source `table` widget.
 - Backtest result charts should not add SPY, KODEX 200, or any other benchmark line by default. Set `chartSpec.includeBenchmark=false`, `chartSpec.benchmarkMode="none"`, and `chartSpec.benchmark=""` unless the user explicitly asks for an inline chart comparison line. Inline comparison lines must use `chartSpec.benchmarkMode="inline"`; older `benchmarkMode="ticker"` is not enough.
 - If beta or benchmark-relative metrics are needed, create a separate beta benchmark reference `table` widget and link it through `chartSpec.benchmarkSourceWidgetIds` / `chartSpec.betaBenchmarkWidgetIds`, not as a chart line.
 - A metrics table should be a separate `metrics-table` widget that depends on the backtest chart.
+- DCA / contribution metrics should not create a separate widget type. Use a `metrics-table` with `chartSpec.metricProfile:"dca"` and metric rows that include contribution fields such as `totalContribution`, `netProfit`, `contributionReturn`, `irr`, and `twr`.
 - Use `dependsOn` for widget ids or display ids that must be read before computing this widget.
 - Use `derivedFrom` for explicit fields and roles:
   - `{ "widgetId": "W-001", "field": "dataset", "role": "portfolio_input" }`

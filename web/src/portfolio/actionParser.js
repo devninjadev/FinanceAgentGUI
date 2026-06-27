@@ -1,5 +1,5 @@
 const PORTFOLIO_WIDGET_ACTION_PATTERN =
-  /portfolio_widget|update_current_widget|update_widget|create_widget|delete_widget|resize_widget|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data|run_backtest_chart_widget|run_yfinance_backtest_comparison|create_allocation_chart_from_widget|actionId/i;
+  /portfolio_widget|update_current_widget|update_widget|create_widget|delete_widget|resize_widget|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data|request_backtest_matrix_context|retrieve_backtest_matrix_context|get_backtest_matrix_context|load_backtest_matrix_context|run_backtest_chart_widget|run_yfinance_backtest_comparison|create_allocation_chart_from_widget|actionId/i;
 
 export function stripPortfolioWidgetActionBlocks(answer = "") {
   const text = String(answer || "");
@@ -10,7 +10,7 @@ export function stripPortfolioWidgetActionBlocks(answer = "") {
       PORTFOLIO_WIDGET_ACTION_PATTERN.test(body) ? "" : match
     )
     .replace(/\n?\s*portfolio_widget_action\s*{[\s\S]*$/i, "")
-    .replace(/\n?\s*\{[\s\S]*"(?:action|actionId)"\s*:\s*"(?:create_widget|update_current_widget|update_widget|delete_widget|delete_portfolio_widget|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data|run_backtest_chart_widget|run_yfinance_backtest_comparison|create_allocation_chart_from_widget)"[\s\S]*$/i, "")
+    .replace(/\n?\s*\{[\s\S]*"(?:action|actionId)"\s*:\s*"(?:create_widget|update_current_widget|update_widget|delete_widget|delete_portfolio_widget|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data|request_backtest_matrix_context|retrieve_backtest_matrix_context|get_backtest_matrix_context|load_backtest_matrix_context|run_backtest_chart_widget|run_yfinance_backtest_comparison|create_allocation_chart_from_widget)"[\s\S]*$/i, "")
     .trim();
 }
 

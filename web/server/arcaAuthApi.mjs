@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { readJsonBody, sendJson } from "./codexProbe.mjs";
@@ -52,8 +52,8 @@ function ensureRuntimeDirs() {
   mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
 }
 
-function relativeGuiBuildPath(path) {
-  return path.startsWith(GUIBUILD_ROOT) ? `GuiBuild/${path.slice(GUIBUILD_ROOT.length + 1)}` : path;
+function relativeAppPath(path) {
+  return path.startsWith(GUIBUILD_ROOT) ? relative(GUIBUILD_ROOT, path) || "." : path;
 }
 
 function readSessionSecret() {
@@ -148,9 +148,11 @@ function discoverRunningHandoff() {
         ? "Microsoft Edge"
         : line.includes("Brave Browser")
           ? "Brave Browser"
-          : line.includes("Chromium")
-            ? "Chromium"
-            : "Google Chrome",
+          : line.includes("ChatGPT Atlas")
+            ? "ChatGPT Atlas"
+            : line.includes("Chromium")
+              ? "Chromium"
+              : "Google Chrome",
       executable: match[2].split(" --")[0] || "",
       loginUrl: loginUrl(),
       port: Number(portMatch[1]),
@@ -207,8 +209,8 @@ function publicSessionStatus(extra = {}) {
     capturedAt: secret?.capturedAt || "",
     baseUrl: baseUrl(),
     loginUrl: loginUrl(),
-    sessionFile: relativeGuiBuildPath(SESSION_PATH),
-    profileDir: relativeGuiBuildPath(PROFILE_DIR),
+    sessionFile: relativeAppPath(SESSION_PATH),
+    profileDir: relativeAppPath(PROFILE_DIR),
     source: secret?.source
       ? {
           method: secret.source.method || "",
@@ -237,6 +239,7 @@ function browserCandidates() {
 
   if (process.platform === "darwin") {
     candidates.push(
+      { name: "ChatGPT Atlas", path: "/Applications/ChatGPT Atlas.app/Contents/MacOS/ChatGPT Atlas" },
       { name: "Google Chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" },
       { name: "Chromium", path: "/Applications/Chromium.app/Contents/MacOS/Chromium" },
       { name: "Microsoft Edge", path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" },
@@ -370,7 +373,7 @@ async function startHandoff() {
   const candidates = browserCandidates();
   const browser = candidates[0];
   if (!browser) {
-    throw new Error("Chrome, Edge, Chromium, Brave 실행 파일을 찾지 못했습니다. ARCA_BROWSER_PATH로 브라우저 경로를 지정할 수 있습니다.");
+    throw new Error("ChatGPT Atlas, Chrome, Edge, Chromium, Brave 실행 파일을 찾지 못했습니다. ARCA_BROWSER_PATH로 브라우저 경로를 지정할 수 있습니다.");
   }
 
   const port = await findFreePort();
@@ -442,7 +445,7 @@ async function captureSession() {
       method: "browser-handoff",
       browserName: activeHandoff.browserName,
       browserVersion: activeHandoff.browserVersion || version.Browser || "",
-      profileDir: relativeGuiBuildPath(PROFILE_DIR),
+      profileDir: relativeAppPath(PROFILE_DIR),
     },
   };
   writeFileSync(SESSION_PATH, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600 });

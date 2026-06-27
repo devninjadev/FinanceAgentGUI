@@ -5,7 +5,7 @@ FinanceAgentGUI is a local app plus repairable source code. It should work out o
 ## Compatibility Philosophy
 
 - Prefer clear diagnostics over broad generic advice.
-- Keep every runtime requirement inside `GuiBuild/` or configurable through settings/environment variables.
+- Keep every runtime requirement inside the app tree or configurable through settings/environment variables.
 - Provide override knobs for platform-sensitive paths.
 - Do not expose secrets while debugging.
 - If a platform-specific fix is made, update this document in the same pass.
@@ -17,7 +17,7 @@ FinanceAgentGUI is a local app plus repairable source code. It should work out o
 | Vite/React web app | Intended, tested locally | Intended | Intended |
 | Node local server | Intended, tested locally on Node 22 | Intended with Node 22+ recommended | Intended with Node 22+ recommended |
 | Python helper scripts | Intended with venv | Intended with venv | Intended with venv or PowerShell activation |
-| Arca.live browser handoff start | Tested with Google Chrome | Intended through `which`-detected browser commands | Intended through common Chrome/Edge/Brave install paths |
+| Arca.live browser handoff start | Tested with Google Chrome and ChatGPT Atlas | Intended through `which`-detected browser commands | Intended through common Chrome/Edge/Brave install paths |
 | Arca.live handoff recovery after server restart | Implemented through `ps` scan | Implemented through `ps` scan | Not fully implemented yet |
 
 Windows support for starting a fresh browser handoff is present, but recovering an already-open handoff browser after GUI server restart is still a known improvement area.
@@ -60,7 +60,7 @@ Do not print the session file or raw cookie header. Status UI should show only s
 The handoff code looks for browsers in this order:
 
 - explicit `ARCA_BROWSER_PATH`
-- macOS app paths for Chrome, Chromium, Edge, Brave
+- macOS app paths for ChatGPT Atlas, Chrome, Chromium, Edge, Brave
 - Windows common install paths under `LOCALAPPDATA`, `Program Files`, and `Program Files (x86)`
 - Linux commands resolved by `which`: `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, `microsoft-edge`, `brave-browser`
 
@@ -82,7 +82,7 @@ Tracked references:
 - `config/world-memory-collection.prompt.md`
 
 Do not fix a missing World Memory store by copying in a bundled SQLite file.
-Run `python scripts/world_memory_cli.py init` from `GuiBuild/` if the file is
+Run `python scripts/world_memory_cli.py init` from the repository root if the file is
 absent. If a populated store exists, repair commands must show the target path,
 expected impact, and backup or confirmation boundary before destructive changes.
 
@@ -138,7 +138,7 @@ If login opens a 404 page:
 
 ## Safe Diagnostic Commands
 
-From `GuiBuild/web`:
+From `web`:
 
 ```bash
 npm run build
@@ -180,7 +180,7 @@ When the user says "fix this on my machine":
 1. Identify the OS, shell, Node version, browser used, and exact failing endpoint.
 2. Read `docs/installation.md` and this file.
 3. Check whether `ARCA_BROWSER_PATH` or `ARCA_LOGIN_URL` would solve the issue without code changes.
-4. If code changes are needed, keep them under `GuiBuild/`.
+4. If code changes are needed, keep them under the app tree.
 5. Run `node --check` on edited server modules.
 6. Run `npm run build`.
 7. Start the local server and test the narrow endpoint.

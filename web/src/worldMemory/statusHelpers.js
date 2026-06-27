@@ -20,6 +20,7 @@ export function worldMemoryStatusLabel(status) {
     failed: "실패",
     ok: "정상",
     paused: "일시정지",
+    disabled: "꺼짐",
   };
   return labels[raw] || raw;
 }

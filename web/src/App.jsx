@@ -3,6 +3,7 @@ import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
 import codexLogo from "./assets/codex-logo-transparent.png";
 import antigravityLogo from "./assets/antigravity-logo.png";
 import { AgentSidebar } from "./agent/AgentSidebar.jsx";
+import { ChatCanvas } from "./agent/ChatCanvas.jsx";
 import {
   antigravityModelGroups,
   antigravityPolicyOptions,
@@ -14,6 +15,7 @@ import {
   loadingApprovalOptions,
   loadingModelGroups,
   modelGroupsFromAntigravityCatalog,
+  personaModeOptions,
 } from "./agent/agentOptions.js";
 import { attachmentsSummary } from "./agent/attachments.js";
 import { messageToHistoryText, parseSseEvent } from "./agent/chatProtocol.js";
@@ -96,8 +98,20 @@ const PortfolioWorkspace = React.lazy(() =>
 );
 
 const initialChatMessages = [];
+const personaEligibleScreens = new Set([
+  "chat",
+  "stock",
+  "news-feed",
+  "world-memory",
+  "reports",
+  "earning-calendar",
+  "economic-calendar",
+  "portfolio",
+  "portfolio-canvas",
+]);
 const ARCA_WRITE_URL = "https://arca.live/b/stock/write";
 const ARCA_NOTIFICATION_URL = "https://arca.live/u/notification";
+const ARCA_NOTIFICATION_POLL_INTERVAL_MS = 30000;
 const MEMORY_RECENT_LIMIT = 5;
 const MEMORY_DIALOG_PAGE_SIZE = 20;
 const PORTFOLIO_CANVAS_FILE_SAVE_DEBOUNCE_MS = 450;
@@ -110,6 +124,17 @@ const initialBoardFilters = {
   cutRate: "",
   target: "all",
   keyword: "",
+};
+
+const defaultWorldMemorySettings = {
+  ok: true,
+  enabled: false,
+  configPath: "config/world-memory.user.json",
+  defaultConfigPath: "config/world-memory.defaults.json",
+  settings: {
+    version: 1,
+    enabled: false,
+  },
 };
 
 async function loadPortfolioCanvasStoreFile() {
@@ -184,6 +209,8 @@ const worldMemoryActionsNeedingReportRefresh = new Set([
   "taxonomyRefresh",
   "stateSync",
 ]);
+
+const CHAT_STREAM_RENDER_INTERVAL_MS = 120;
 
 function stripWorldMemoryActionBlocks(answer = "") {
   const text = String(answer || "");
@@ -568,6 +595,7 @@ function App() {
   const [agentUserSettings, setAgentUserSettings] = useState(emptyAgentSettings);
   const [agentSettingsError, setAgentSettingsError] = useState("");
   const [agentOptionsReady, setAgentOptionsReady] = useState(false);
+  const [personaMode, setPersonaMode] = useState("none");
   const [chatMessages, setChatMessages] = useState(initialChatMessages);
   const [portfolioCanvasStore, setPortfolioCanvasStore] = useState(() => readStoredPortfolioCanvasStore());
   const [portfolioSidebarOpen, setPortfolioSidebarOpen] = useState(false);
@@ -630,6 +658,10 @@ function App() {
   const [memoryDialogHasMore, setMemoryDialogHasMore] = useState(false);
   const [memoryDialogTotalCount, setMemoryDialogTotalCount] = useState(0);
   const [deletingMemoryRecordId, setDeletingMemoryRecordId] = useState("");
+  const [worldMemorySettings, setWorldMemorySettings] = useState(defaultWorldMemorySettings);
+  const [worldMemorySettingsBusy, setWorldMemorySettingsBusy] = useState(false);
+  const [worldMemorySettingsSaving, setWorldMemorySettingsSaving] = useState(false);
+  const [worldMemorySettingsError, setWorldMemorySettingsError] = useState("");
   const [worldMemoryStatus, setWorldMemoryStatus] = useState(null);
   const [worldMemoryBusy, setWorldMemoryBusy] = useState(false);
   const [worldMemoryError, setWorldMemoryError] = useState("");
@@ -658,6 +690,7 @@ function App() {
   const newsFeedItemsCountRef = useRef(0);
   const activeModelGroups = agentProvider === "antigravity-sdk" ? antigravityCatalogGroups : modelGroups;
   const activeApprovalOptions = agentProvider === "antigravity-sdk" ? antigravityPolicyOptions : approvalOptions;
+  const worldMemoryEnabled = Boolean(worldMemorySettings?.enabled);
   const selectedModelGroup = useMemo(
     () => activeModelGroups.find((item) => item.slug === model) ?? activeModelGroups[0] ?? fallbackModelGroups[0],
     [model, activeModelGroups]
@@ -696,6 +729,7 @@ function App() {
     [portfolioCanvases, portfolioCanvasStore.activeCanvasId]
   );
   const isPortfolioCanvasView = activeView === "portfolio-canvas" && Boolean(activePortfolioCanvas);
+  const isChatCanvasView = activeView === "chat";
   const activeChatScope = isPortfolioCanvasView
     ? { type: "portfolio-canvas", canvasId: activePortfolioCanvas.id }
     : { type: "system-main", canvasId: "" };
@@ -823,6 +857,35 @@ function App() {
     }
   }
 
+  async function savePersonaMode(nextPersonaMode) {
+    setAgentSettingsError("");
+    try {
+      const response = await fetch("/api/codex/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ personaMode: nextPersonaMode }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setAgentUserSettings(payload.settings || emptyAgentSettings);
+      return payload.settings || emptyAgentSettings;
+    } catch (error) {
+      setAgentSettingsError(error.message);
+      return null;
+    }
+  }
+
+  function updatePersonaMode(nextPersonaMode) {
+    const safePersonaMode = personaModeOptions.some((option) => option.id === nextPersonaMode)
+      ? nextPersonaMode
+      : "none";
+    setPersonaMode(safePersonaMode);
+    void savePersonaMode(safePersonaMode);
+  }
+
   function handleAgentProviderChange(nextProvider) {
     setAgentProvider(nextProvider);
     const savedProviderSettings = agentUserSettings.providers?.[nextProvider] || {};
@@ -896,6 +959,13 @@ function App() {
       return normalizePortfolioChatMessages(canvas?.chatMessages);
     }
     return chatMessages;
+  }
+
+  function startNewChat() {
+    updateChatMessagesForScope(activeChatScope, initialChatMessages);
+    setAttachedArticle(null);
+    setChatAttachments([]);
+    setAttachmentError("");
   }
 
   function resolveChatScope(screen) {
@@ -1021,6 +1091,7 @@ function App() {
 
   function refreshBoard() {
     setBoardFilters((filters) => ({ ...filters }));
+    void loadArcaNotifications();
   }
 
   function handleSidebarItemClick(item) {
@@ -1116,6 +1187,47 @@ function App() {
     }
   }
 
+  async function loadWorldMemorySettings({ quiet = false, refreshStatus = false } = {}) {
+    if (!quiet) {
+      setWorldMemorySettingsBusy(true);
+      setWorldMemorySettingsError("");
+    }
+    try {
+      const response = await fetch("/api/world-memory/settings", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const nextSettings = { ...defaultWorldMemorySettings, ...payload };
+      setWorldMemorySettings(nextSettings);
+      if (refreshStatus && nextSettings.enabled) {
+        await loadWorldMemoryStatus();
+      } else if (!nextSettings.enabled) {
+        setWorldMemoryStatus((current) => ({
+          ...(current || {}),
+          ok: true,
+          enabled: false,
+          settings: nextSettings.settings,
+          configPath: nextSettings.configPath,
+          defaultConfigPath: nextSettings.defaultConfigPath,
+          collector: {
+            ...(current?.collector || {}),
+            status: "disabled",
+            schedulerStarted: false,
+            inFlight: false,
+          },
+        }));
+        setWorldMemoryError("");
+      }
+      return nextSettings;
+    } catch (error) {
+      setWorldMemorySettingsError(error.message);
+      return null;
+    } finally {
+      if (!quiet) setWorldMemorySettingsBusy(false);
+    }
+  }
+
   async function loadWorldMemoryStatus() {
     setWorldMemoryBusy(true);
     setWorldMemoryError("");
@@ -1134,6 +1246,55 @@ function App() {
       setWorldMemoryError(error.message);
     } finally {
       setWorldMemoryBusy(false);
+    }
+  }
+
+  async function updateWorldMemoryEnabled(enabled) {
+    if (worldMemorySettingsSaving) return;
+    setWorldMemorySettingsSaving(true);
+    setWorldMemorySettingsError("");
+    try {
+      const response = await fetch("/api/world-memory/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+
+      const nextSettings = { ...defaultWorldMemorySettings, ...payload };
+      setWorldMemorySettings(nextSettings);
+      setWorldMemoryAgentAction(null);
+      setWorldMemoryFocusedChangeSuggestion(null);
+      if (nextSettings.enabled) {
+        await loadWorldMemoryStatus();
+      } else {
+        setWorldMemoryError("");
+        setWorldMemoryStatus((current) => ({
+          ...(current || {}),
+          ok: true,
+          enabled: false,
+          settings: nextSettings.settings,
+          configPath: nextSettings.configPath,
+          defaultConfigPath: nextSettings.defaultConfigPath,
+          collector: {
+            ...(current?.collector || {}),
+            status: "disabled",
+            schedulerStarted: false,
+            inFlight: false,
+          },
+        }));
+        if (activeViewRef.current === "world-memory") {
+          setActiveView("stock");
+        }
+      }
+    } catch (error) {
+      setWorldMemorySettingsError(error.message);
+    } finally {
+      setWorldMemorySettingsSaving(false);
     }
   }
 
@@ -1730,6 +1891,7 @@ function App() {
       setModelGroups(nextModelGroups);
       setAntigravityCatalogGroups(nextAntigravityModelGroups);
       setAgentUserSettings(nextAgentSettings);
+      setPersonaMode(nextAgentSettings.personaMode || "none");
       applyAgentSelection(nextSelection);
       setAgentOptionsReady(true);
       setCodexStatus({
@@ -1760,6 +1922,10 @@ function App() {
 
   useEffect(() => {
     void loadSharedMemoryStatus();
+  }, []);
+
+  useEffect(() => {
+    void loadWorldMemorySettings({ quiet: true });
   }, []);
 
   useEffect(() => {
@@ -1915,7 +2081,7 @@ function App() {
     }
 
     pollArcaNotifications();
-    const timer = window.setInterval(pollArcaNotifications, 45000);
+    const timer = window.setInterval(pollArcaNotifications, ARCA_NOTIFICATION_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -1932,14 +2098,18 @@ function App() {
     if (activeView !== "settings") return;
     void loadNewsFeedSettings();
     void loadSharedMemoryStatus();
-    void loadWorldMemoryStatus();
+    void loadWorldMemorySettings({ refreshStatus: true });
     void loadArcaAuthStatus({ quiet: true });
   }, [activeView]);
 
   useEffect(() => {
     if (activeView !== "world-memory") return;
+    if (!worldMemoryEnabled) {
+      setActiveView("stock");
+      return;
+    }
     void loadWorldMemoryStatus();
-  }, [activeView]);
+  }, [activeView, worldMemoryEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2074,7 +2244,7 @@ function App() {
       Boolean(parsedAction?.targetWidgetId) ||
       Boolean(parsedAction?.actionId) ||
       Boolean(parsedAction?.dataset || parsedAction?.data || parsedAction?.holdings || parsedAction?.chartSpec || parsedAction?.chart || parsedAction?.functionSpec || parsedAction?.strategySpec || parsedAction?.rules || parsedAction?.dataFiles || parsedAction?.dataSources || parsedAction?.files || parsedAction?.attachments || parsedAction?.metrics || parsedAction?.standardMetrics) ||
-      /widget|delete|remove|artifact|chart|pie|allocation|function|strategy|signal|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data/.test(actionName);
+      /widget|delete|remove|artifact|chart|pie|allocation|function|strategy|signal|render_portfolio_artifact|import_holdings|refresh_canvas_latest_data|request_backtest_matrix_context|retrieve_backtest_matrix_context|get_backtest_matrix_context|load_backtest_matrix_context/.test(actionName);
     if (!looksLikeWidgetAction) return false;
     setPortfolioWidgetAgentAction({
       id: `portfolio_widget_action_${Date.now()}`,
@@ -2179,7 +2349,7 @@ function App() {
     const worldMemoryContext =
       options.worldMemoryContext !== undefined
         ? options.worldMemoryContext
-        : screenForMessage === "world-memory"
+        : worldMemoryEnabled && screenForMessage === "world-memory"
           ? buildWorldMemoryPageContextSnapshot(worldMemoryStatus, worldMemoryActionResult, worldMemoryFocusedChangeSuggestion)
           : null;
     const userMessage = {
@@ -2208,8 +2378,19 @@ function App() {
     let completedAnswer = "";
     let streamedText = "";
     let visibleAssistantTextForCatch = (text) => text;
+    let flushAssistantMessageStream = () => {};
     const abortController = new AbortController();
     activeChatAbortRef.current = abortController;
+    const includeWorldMemoryPageContext =
+      options.includeWorldMemoryContext !== undefined
+        ? Boolean(options.includeWorldMemoryContext)
+        : worldMemoryEnabled && screenForMessage === "world-memory";
+    const includeWorldMemorySearchContext =
+      options.includeWorldMemorySearchContext !== undefined
+        ? Boolean(options.includeWorldMemorySearchContext)
+        : worldMemoryEnabled;
+    const includeNewsFeedSearchContext =
+      options.includeNewsFeedSearchContext !== undefined ? Boolean(options.includeNewsFeedSearchContext) : true;
 
     try {
       const response = await fetch("/api/codex/chat/stream", {
@@ -2223,10 +2404,16 @@ function App() {
           model: selectedModelGroup?.slug,
           reasoning: selectedReasoning?.id,
           approval: selectedApproval?.id,
+          personaMode:
+            options.disablePersonaMode || !personaEligibleScreens.has(screenForMessage)
+              ? "none"
+              : personaMode,
           screen: screenForMessage,
-          includeWorldMemoryContext: true,
+          includeWorldMemoryContext: includeWorldMemoryPageContext,
+          includeWorldMemorySnapshotContext: Boolean(options.includeWorldMemorySnapshotContext),
+          includeWorldMemorySearchContext,
           worldMemoryContext,
-          forceWorldMemoryVectorSearch: Boolean(options.forceWorldMemoryVectorSearch),
+          forceWorldMemoryVectorSearch: worldMemoryEnabled && Boolean(options.forceWorldMemoryVectorSearch),
           worldMemoryVectorSearchQuery: options.worldMemoryVectorSearchQuery || "",
           worldMemoryFocusContext: options.worldMemoryFocusContext || null,
           requireWebSearch: Boolean(options.requireWebSearch),
@@ -2238,6 +2425,7 @@ function App() {
             options.includeNewsFeedContext !== undefined
               ? Boolean(options.includeNewsFeedContext)
               : screenForMessage === "news-feed",
+          includeNewsFeedSearchContext,
           includeSharedMemory: chatScope.type !== "portfolio-canvas",
           memoryScope: chatScope.type,
           canvasId: scopeCanvas?.id || "",
@@ -2277,6 +2465,31 @@ function App() {
         return output;
       };
       visibleAssistantTextForCatch = visibleAssistantText;
+      let streamRenderTimer = null;
+      let lastStreamRenderAt = 0;
+      const renderAssistantStreamText = ({ immediate = false } = {}) => {
+        const render = () => {
+          if (streamRenderTimer) {
+            window.clearTimeout(streamRenderTimer);
+            streamRenderTimer = null;
+          }
+          lastStreamRenderAt = Date.now();
+          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+        };
+        if (immediate) {
+          render();
+          return;
+        }
+        const waitMs = CHAT_STREAM_RENDER_INTERVAL_MS - (Date.now() - lastStreamRenderAt);
+        if (waitMs <= 0) {
+          render();
+          return;
+        }
+        if (!streamRenderTimer) {
+          streamRenderTimer = window.setTimeout(render, waitMs);
+        }
+      };
+      flushAssistantMessageStream = () => renderAssistantStreamText({ immediate: true });
       let latestStatus = {
         type: "status",
         tone: "working",
@@ -2285,6 +2498,14 @@ function App() {
           agentProvider === "antigravity-sdk"
             ? `${selectedModelGroup?.label || "Gemini"} · ${selectedApproval?.label || "Default"} 권한으로 대화 컨텍스트를 전달하고 있습니다.`
             : `${modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
+      };
+      let firstAssistantTokenSeen = false;
+      const notifyFirstAssistantToken = () => {
+        if (firstAssistantTokenSeen) return;
+        firstAssistantTokenSeen = true;
+        if (typeof options.onFirstDelta === "function") {
+          options.onFirstDelta();
+        }
       };
 
       function applyStreamEvent(event) {
@@ -2301,7 +2522,7 @@ function App() {
               data.approval || selectedApproval?.label,
             ].filter(Boolean).join(" · "),
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+          renderAssistantStreamText({ immediate: true });
         }
         if (event.type === "status") {
           latestStatus = {
@@ -2310,13 +2531,16 @@ function App() {
             title: data.title || `${agentProviderLabel} 응답 생성 중`,
             body: data.body || `${agentProviderLabel}가 요청을 처리하고 있습니다.`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+          renderAssistantStreamText({ immediate: true });
         }
         if (event.type === "delta") {
-          streamedText += data.text || data.delta || "";
-          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+          const deltaText = data.text || data.delta || "";
+          if (deltaText) notifyFirstAssistantToken();
+          streamedText += deltaText;
+          renderAssistantStreamText();
         }
         if (event.type === "message") {
+          if (data.text) notifyFirstAssistantToken();
           streamedText = data.text || streamedText;
           latestStatus = {
             type: "status",
@@ -2324,9 +2548,10 @@ function App() {
             title: "응답 수신 중",
             body: `${data.providerLabel || agentProviderLabel}에서 최종 메시지를 받았습니다.`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+          renderAssistantStreamText({ immediate: true });
         }
         if (event.type === "done") {
+          if (data.answer || streamedText) notifyFirstAssistantToken();
           streamedText = data.answer || streamedText || "응답이 비어 있습니다.";
           latestStatus = {
             type: "status",
@@ -2334,7 +2559,7 @@ function App() {
             title: `${data.providerLabel || agentProviderLabel} 응답`,
             body: `${data.model || selectedModelGroup?.slug} · ${data.reasoning || selectedReasoning?.id} · ${Math.max(1, Math.round((data.elapsedMs || 0) / 1000))}초`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: visibleAssistantText(streamedText) }, chatScope);
+          renderAssistantStreamText({ immediate: true });
         }
         if (event.type === "error") {
           throw new Error(data.error || `${agentProviderLabel} stream failed`);
@@ -2357,6 +2582,7 @@ function App() {
       if (tail.trim()) {
         applyStreamEvent(parseSseEvent(tail));
       }
+      flushAssistantMessageStream();
       completedAnswer = streamedText.trim();
       if (completedAnswer) {
         let reportArtifactSaveResult = null;
@@ -2418,7 +2644,7 @@ function App() {
         await saveSharedChatMemory({
           createdAt,
           promptText: displayText,
-          answerText: screenForMessage === "reports" ? visibleAssistantText(completedAnswer) : completedAnswer,
+          answerText: visibleAssistantText(completedAnswer) || "에이전트 액션을 생성했습니다.",
           article: articleForMessage,
           attachments: attachmentsForMessage,
           screen: screenForMessage,
@@ -2475,6 +2701,7 @@ function App() {
       }
     } catch (error) {
       if (error?.name === "AbortError") {
+        flushAssistantMessageStream();
         updateAssistantMessage(
           assistantId,
           {
@@ -2493,6 +2720,7 @@ function App() {
       if (typeof options.onError === "function") {
         options.onError(error);
       }
+      flushAssistantMessageStream();
       updateChatMessagesForScope(chatScope, (messages) =>
         messages.map((message) =>
           message.id === assistantId
@@ -2520,6 +2748,7 @@ function App() {
   }
 
   function askWorldMemoryReportItem(section, item, extra = {}) {
+    if (!worldMemoryEnabled) return;
     const request = buildWorldMemoryAskRequest(section, item, extra);
     const isMemoryChangeSuggestion = section === "memory-change";
     setWorldMemoryFocusedChangeSuggestion(isMemoryChangeSuggestion ? request.focusContext : null);
@@ -2541,6 +2770,34 @@ function App() {
       worldMemoryFocusContext: request.focusContext,
       requireWebSearch: request.requireWebSearch ?? true,
       includeNewsFeedContext: true,
+      disablePersonaMode: isMemoryChangeSuggestion,
+    });
+  }
+
+  function handleReportsBoredResearch(request = {}) {
+    const displayText = request.displayText || "숨은 이슈 리서치";
+    const vectorQuery = [
+      request.issue?.title,
+      request.issue?.signal,
+      request.angle?.promptFocus,
+      displayText,
+    ].filter(Boolean).join(" ");
+    return sendPrompt({
+      promptText: request.promptText,
+      displayText,
+      screen: "reports",
+      forceWorldMemoryVectorSearch: true,
+      worldMemoryVectorSearchQuery: vectorQuery,
+      includeWorldMemorySnapshotContext: true,
+      includeWorldMemorySearchContext: true,
+      includeNewsFeedSearchContext: true,
+      includeNewsFeedContext: false,
+      includeReportCatalog: true,
+      requireWebSearch: true,
+      disablePersonaMode: true,
+      onFirstDelta: request.onFirstDelta,
+      onComplete: request.onComplete,
+      onError: request.onError,
     });
   }
 
@@ -2634,6 +2891,7 @@ function App() {
     setIsSending(true);
 
     let completedAnswer = "";
+    let flushEarningMessageStream = () => {};
 
     try {
       const response = await fetch("/api/codex/chat/stream", {
@@ -2647,7 +2905,10 @@ function App() {
           reasoning: selectedReasoning?.id,
           approval: selectedApproval?.id,
           screen: "earning-calendar",
+          includeWorldMemoryContext: false,
+          includeWorldMemorySearchContext: worldMemoryEnabled,
           includeNewsFeedContext: false,
+          includeNewsFeedSearchContext: true,
           boardContext: null,
           calendarContext: earningCalendarContext,
           attachments: [],
@@ -2665,6 +2926,8 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = "";
       let streamedText = "";
+      let streamRenderTimer = null;
+      let lastStreamRenderAt = 0;
       let latestStatus = {
         type: "status",
         tone: "working",
@@ -2674,6 +2937,29 @@ function App() {
             ? `${selectedModelGroup?.label || "Gemini"} · ${selectedApproval?.label || "Default"} 권한으로 이벤트 컨텍스트를 전달하고 있습니다.`
             : `${modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
       };
+      const renderAssistantStreamText = ({ immediate = false } = {}) => {
+        const render = () => {
+          if (streamRenderTimer) {
+            window.clearTimeout(streamRenderTimer);
+            streamRenderTimer = null;
+          }
+          lastStreamRenderAt = Date.now();
+          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+        };
+        if (immediate) {
+          render();
+          return;
+        }
+        const waitMs = CHAT_STREAM_RENDER_INTERVAL_MS - (Date.now() - lastStreamRenderAt);
+        if (waitMs <= 0) {
+          render();
+          return;
+        }
+        if (!streamRenderTimer) {
+          streamRenderTimer = window.setTimeout(render, waitMs);
+        }
+      };
+      flushEarningMessageStream = () => renderAssistantStreamText({ immediate: true });
 
       function applyStreamEvent(eventChunk) {
         const data = eventChunk.data || {};
@@ -2689,7 +2975,7 @@ function App() {
               data.approval || selectedApproval?.label,
             ].filter(Boolean).join(" · "),
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+          renderAssistantStreamText({ immediate: true });
         }
         if (eventChunk.type === "status") {
           latestStatus = {
@@ -2698,11 +2984,11 @@ function App() {
             title: data.title || `${agentProviderLabel} 어닝 분석 중`,
             body: data.body || `${agentProviderLabel}가 이벤트 발생 여부와 관련 자료를 확인하고 있습니다.`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+          renderAssistantStreamText({ immediate: true });
         }
         if (eventChunk.type === "delta") {
           streamedText += data.text || data.delta || "";
-          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+          renderAssistantStreamText();
         }
         if (eventChunk.type === "message") {
           streamedText = data.text || streamedText;
@@ -2712,7 +2998,7 @@ function App() {
             title: "어닝 분석 수신 중",
             body: `${data.providerLabel || agentProviderLabel}에서 최종 메시지를 받았습니다.`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+          renderAssistantStreamText({ immediate: true });
         }
         if (eventChunk.type === "done") {
           streamedText = data.answer || streamedText || "응답이 비어 있습니다.";
@@ -2722,7 +3008,7 @@ function App() {
             title: `${data.providerLabel || agentProviderLabel} 어닝 분석`,
             body: `${data.model || selectedModelGroup?.slug} · ${data.reasoning || selectedReasoning?.id} · ${Math.max(1, Math.round((data.elapsedMs || 0) / 1000))}초`,
           };
-          updateAssistantMessage(assistantId, { status: latestStatus, text: streamedText });
+          renderAssistantStreamText({ immediate: true });
         }
         if (eventChunk.type === "error") {
           throw new Error(data.error || `${agentProviderLabel} stream failed`);
@@ -2745,6 +3031,7 @@ function App() {
       if (tail.trim()) {
         applyStreamEvent(parseSseEvent(tail));
       }
+      flushEarningMessageStream();
       completedAnswer = streamedText.trim();
       if (completedAnswer) {
         await saveSharedChatMemory({
@@ -2758,6 +3045,7 @@ function App() {
         });
       }
     } catch (error) {
+      flushEarningMessageStream();
       setChatMessages((messages) =>
         messages.map((message) =>
           message.id === assistantId
@@ -2781,7 +3069,10 @@ function App() {
   }
 
   return (
-    <main className="mockup-stage" aria-label="에이전트 sidebar mockup">
+    <main
+      className={isChatCanvasView ? "mockup-stage no-agent-sidebar" : "mockup-stage"}
+      aria-label="에이전트 sidebar mockup"
+    >
       <AppNavigation
         activePortfolioCanvas={activePortfolioCanvas}
         activeView={activeView}
@@ -2806,6 +3097,7 @@ function App() {
         portfolioCanvasMenuId={portfolioCanvasMenuId}
         portfolioCanvases={portfolioCanvases}
         portfolioSidebarOpen={portfolioSidebarOpen}
+        worldMemoryEnabled={worldMemoryEnabled}
       />
 
       {activeView === "settings" ? (
@@ -2813,10 +3105,13 @@ function App() {
           <React.Suspense fallback={<RouteLoading label="설정 불러오는 중" />}>
             <SettingsView
               settings={newsFeedSettings}
-              busy={newsFeedSettingsBusy}
+              busy={newsFeedSettingsBusy || worldMemorySettingsBusy}
               savingFeedId={newsFeedSettingsSavingId}
               error={newsFeedSettingsError}
-              onReload={loadNewsFeedSettings}
+              onReload={() => {
+                void loadNewsFeedSettings();
+                void loadWorldMemorySettings({ refreshStatus: true });
+              }}
               onToggleFeed={toggleNewsFeedSource}
               onPollIntervalChange={updateNewsFeedPollInterval}
               memoryStatus={memoryStatus}
@@ -2843,7 +3138,12 @@ function App() {
               worldMemoryBusy={worldMemoryBusy}
               worldMemoryError={worldMemoryError}
               worldMemoryTechOpen={worldMemoryTechOpen}
+              worldMemorySettings={worldMemorySettings}
+              worldMemorySettingsBusy={worldMemorySettingsBusy}
+              worldMemorySettingsSaving={worldMemorySettingsSaving}
+              worldMemorySettingsError={worldMemorySettingsError}
               onToggleWorldMemoryTech={() => setWorldMemoryTechOpen((open) => !open)}
+              onToggleWorldMemoryEnabled={updateWorldMemoryEnabled}
               onReloadWorldMemory={loadWorldMemoryStatus}
               arcaAuth={{
                 status: arcaAuthStatus,
@@ -2873,19 +3173,77 @@ function App() {
                 speedOptions,
                 speed,
                 onSpeedChange: (nextSpeed) => updateAgentSelection({ speed: nextSpeed }),
+                personaModeOptions,
+                personaMode,
+                onPersonaModeChange: updatePersonaMode,
                 settingsError: agentSettingsError,
                 loading: !agentOptionsReady,
               }}
             />
           </React.Suspense>
         </section>
+      ) : activeView === "chat" ? (
+        <ChatCanvas
+          activeWorldMemoryActionId={worldMemoryAgentAction?.id || ""}
+          addChatAttachmentFiles={addChatAttachmentFiles}
+          agentIcon={agentIcon}
+          agentOptionsReady={agentOptionsReady}
+          agentProviderLabel={agentProviderLabel}
+          attachedArticle={attachedArticle}
+          attachmentError={attachmentError}
+          chatAttachments={chatAttachments}
+          fileInputRef={fileInputRef}
+          handleComposerDragEnter={handleComposerDragEnter}
+          handleComposerDragLeave={handleComposerDragLeave}
+          handleComposerDragOver={handleComposerDragOver}
+          handleComposerDrop={handleComposerDrop}
+          handleComposerPaste={handleComposerPaste}
+          isComposerDragging={isComposerDragging}
+          isSending={isSending}
+          messageStackRef={messageStackRef}
+          onClearAttachedArticle={() => setAttachedArticle(null)}
+          onExecuteWorldMemoryAction={executeWorldMemoryAgentAction}
+          onNewChat={startNewChat}
+          onPromptChange={setPrompt}
+          onRemoveChatAttachment={removeChatAttachment}
+          onSelectApproval={(nextApproval) => updateAgentSelection({ approval: nextApproval })}
+          onSelectModel={(nextModel) => updateAgentSelection({ model: nextModel })}
+          onSelectReasoning={(nextReasoning) => updateAgentSelection({ reasoning: nextReasoning })}
+          onSelectSpeed={(nextSpeed) => updateAgentSelection({ speed: nextSpeed })}
+          onStopSend={stopActiveChatResponse}
+          prompt={prompt}
+          promptHeight={promptHeight}
+          promptOverflow={promptOverflow}
+          promptRef={promptRef}
+          sendPrompt={sendPrompt}
+          toolbarApprovalOptions={toolbarApprovalOptions}
+          toolbarApprovalValue={toolbarApprovalValue}
+          toolbarModelGroups={toolbarModelGroups}
+          toolbarModelValue={toolbarModelValue}
+          toolbarReasoningValue={toolbarReasoningValue}
+          toolbarSpeedValue={toolbarSpeedValue}
+          visibleChatMessages={visibleChatMessages}
+          worldMemoryActionBusy={worldMemoryActionBusy}
+        />
       ) : activeView === "reports" ? (
         <section className="workspace-canvas reports-canvas" aria-label="보고서">
           <React.Suspense fallback={<RouteLoading label="보고서 불러오는 중" />}>
-            <ReportsView refreshSignal={reportRefreshSignal} />
+            <ReportsView
+              refreshSignal={reportRefreshSignal}
+              agentIcon={agentIcon}
+              agentProvider={agentProvider}
+              agentProviderLabel={agentProviderLabel}
+              agentOptionsReady={agentOptionsReady}
+              agentModel={selectedModelGroup?.slug || model}
+              agentReasoning={selectedReasoning?.id || reasoning}
+              agentApproval={selectedApproval?.id || approval}
+              isSending={isSending}
+              worldMemoryEnabled={worldMemoryEnabled}
+              onResearchPrompt={handleReportsBoredResearch}
+            />
           </React.Suspense>
         </section>
-      ) : activeView === "world-memory" ? (
+      ) : activeView === "world-memory" && worldMemoryEnabled ? (
         <section className="workspace-canvas world-memory-canvas" aria-label="World Memory">
           <React.Suspense fallback={<RouteLoading label="World Memory 불러오는 중" />}>
             <WorldMemoryView
@@ -3015,58 +3373,55 @@ function App() {
         />
       )}
 
-      <AgentSidebar
-        addChatAttachmentFiles={addChatAttachmentFiles}
-        agentIcon={agentIcon}
-        agentOptionsReady={agentOptionsReady}
-        agentProvider={agentProvider}
-        agentProviderAvailable={agentProviderAvailable}
-        agentProviderLabel={agentProviderLabel}
-        attachedArticle={attachedArticle}
-        attachmentError={attachmentError}
-        chatAttachments={chatAttachments}
-        codexStatus={codexStatus}
-        commandPreview={commandPreview}
-        fileInputRef={fileInputRef}
-        handleComposerDragEnter={handleComposerDragEnter}
-        handleComposerDragLeave={handleComposerDragLeave}
-        handleComposerDragOver={handleComposerDragOver}
-        handleComposerDrop={handleComposerDrop}
-        handleComposerPaste={handleComposerPaste}
-        isComposerDragging={isComposerDragging}
-        isSending={isSending}
-        messageStackRef={messageStackRef}
-        activeWorldMemoryActionId={worldMemoryAgentAction?.id || ""}
-        onClearAttachedArticle={() => setAttachedArticle(null)}
-        onExecuteWorldMemoryAction={executeWorldMemoryAgentAction}
-        onNewChat={() => {
-          updateChatMessagesForScope(activeChatScope, initialChatMessages);
-          setAttachedArticle(null);
-          setChatAttachments([]);
-          setAttachmentError("");
-        }}
-        onPromptChange={setPrompt}
-        onRemoveChatAttachment={removeChatAttachment}
-        onSelectApproval={(nextApproval) => updateAgentSelection({ approval: nextApproval })}
-        onSelectModel={(nextModel) => updateAgentSelection({ model: nextModel })}
-        onSelectReasoning={(nextReasoning) => updateAgentSelection({ reasoning: nextReasoning })}
-        onSelectSpeed={(nextSpeed) => updateAgentSelection({ speed: nextSpeed })}
-        onStopSend={stopActiveChatResponse}
-        prompt={prompt}
-        promptHeight={promptHeight}
-        promptOverflow={promptOverflow}
-        promptRef={promptRef}
-        selectedProvider={selectedProvider}
-        sendPrompt={sendPrompt}
-        toolbarApprovalOptions={toolbarApprovalOptions}
-        toolbarApprovalValue={toolbarApprovalValue}
-        toolbarModelGroups={toolbarModelGroups}
-        toolbarModelValue={toolbarModelValue}
-        toolbarReasoningValue={toolbarReasoningValue}
-        toolbarSpeedValue={toolbarSpeedValue}
-        visibleChatMessages={visibleChatMessages}
-        worldMemoryActionBusy={worldMemoryActionBusy}
-      />
+      {isChatCanvasView ? null : (
+        <AgentSidebar
+          addChatAttachmentFiles={addChatAttachmentFiles}
+          agentIcon={agentIcon}
+          agentOptionsReady={agentOptionsReady}
+          agentProvider={agentProvider}
+          agentProviderAvailable={agentProviderAvailable}
+          agentProviderLabel={agentProviderLabel}
+          attachedArticle={attachedArticle}
+          attachmentError={attachmentError}
+          chatAttachments={chatAttachments}
+          codexStatus={codexStatus}
+          commandPreview={commandPreview}
+          fileInputRef={fileInputRef}
+          handleComposerDragEnter={handleComposerDragEnter}
+          handleComposerDragLeave={handleComposerDragLeave}
+          handleComposerDragOver={handleComposerDragOver}
+          handleComposerDrop={handleComposerDrop}
+          handleComposerPaste={handleComposerPaste}
+          isComposerDragging={isComposerDragging}
+          isSending={isSending}
+          messageStackRef={messageStackRef}
+          activeWorldMemoryActionId={worldMemoryAgentAction?.id || ""}
+          onClearAttachedArticle={() => setAttachedArticle(null)}
+          onExecuteWorldMemoryAction={executeWorldMemoryAgentAction}
+          onNewChat={startNewChat}
+          onPromptChange={setPrompt}
+          onRemoveChatAttachment={removeChatAttachment}
+          onSelectApproval={(nextApproval) => updateAgentSelection({ approval: nextApproval })}
+          onSelectModel={(nextModel) => updateAgentSelection({ model: nextModel })}
+          onSelectReasoning={(nextReasoning) => updateAgentSelection({ reasoning: nextReasoning })}
+          onSelectSpeed={(nextSpeed) => updateAgentSelection({ speed: nextSpeed })}
+          onStopSend={stopActiveChatResponse}
+          prompt={prompt}
+          promptHeight={promptHeight}
+          promptOverflow={promptOverflow}
+          promptRef={promptRef}
+          selectedProvider={selectedProvider}
+          sendPrompt={sendPrompt}
+          toolbarApprovalOptions={toolbarApprovalOptions}
+          toolbarApprovalValue={toolbarApprovalValue}
+          toolbarModelGroups={toolbarModelGroups}
+          toolbarModelValue={toolbarModelValue}
+          toolbarReasoningValue={toolbarReasoningValue}
+          toolbarSpeedValue={toolbarSpeedValue}
+          visibleChatMessages={visibleChatMessages}
+          worldMemoryActionBusy={worldMemoryActionBusy}
+        />
+      )}
 
       <PortfolioCanvasDeleteDialog
         canvas={pendingDeletePortfolioCanvas}

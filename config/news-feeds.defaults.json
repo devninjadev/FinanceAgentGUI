@@ -2,7 +2,7 @@
   "pollIntervalSeconds": 180,
   "retentionHours": 24,
   "maxItemsPerFeed": 500,
-  "translationBatchSize": 8,
+  "translationBatchSize": 2,
   "feeds": [
     {
       "id": "financialjuice",

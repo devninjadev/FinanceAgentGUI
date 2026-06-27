@@ -27,12 +27,17 @@ import {
 import {
   buildPortfolioMetricsTableSyncPatch,
   portfolioBacktestMetricRows,
+  portfolioMetricColumnsForWidget,
 } from "../src/portfolio/widgetMetrics.js";
 import {
   portfolioWidgetActionMeta,
   normalizePortfolioWidgetNextActionsForState,
   portfolioWidgetPrimaryAction,
 } from "../src/portfolio/widgetActions.js";
+import {
+  portfolioWidgetLooksLikeMetricsTarget,
+  portfolioWidgetUsesYfinanceRefresh,
+} from "../src/portfolio/widgetRoleClassifier.js";
 import { buildDerivedPortfolioWidgetRefreshPrompt } from "../src/portfolio/widgetRefreshPrompts.js";
 import { selectPortfolioWidgetRequestAttachments } from "../src/portfolio/widgetRequestAttachments.js";
 import { buildPortfolioAgentWidgetActionApplyState } from "../src/portfolio/widgetAgentActionApply.js";
@@ -302,6 +307,35 @@ test("portfolio action payload without explicit action does not create a widget 
 
   assert.equal(applyState.status, "missing-target");
   assert.equal(applyState.widgets.length, 0);
+});
+
+test("targetless update_widget payload is not treated as create by prompt wording", () => {
+  const applyState = buildPortfolioAgentWidgetActionApplyState({
+    agentWidgetAction: {
+      answer: [
+        "```portfolio_widget_action",
+        JSON.stringify({
+          action: "update_widget",
+          widget: {
+            title: "월간 리밸런싱 설명",
+            kind: "함수 위젯",
+            visualType: "markdown",
+            markdown: "기존 함수 위젯에 월간 리밸런싱을 추가합니다.",
+          },
+        }),
+        "```",
+      ].join("\n"),
+      request: { prompt: "기존 흐름을 갱신" },
+      canvasId: "canvas-strategy",
+    },
+    canvasId: "canvas-strategy",
+    currentWidgets: [],
+    nextDisplayIndex: 1,
+  });
+
+  assert.equal(applyState.status, "missing-target");
+  assert.equal(applyState.widgets.length, 0);
+  assert.equal(applyState.nextDisplayIndex, 1);
 });
 
 test("backtest refresh and benchmark controls ignore natural-language widget text", () => {
@@ -855,6 +889,49 @@ test("stored backtest result line widgets expose refresh without legacy nextActi
   assert.equal(action, "run_backtest_chart_widget");
   assert.equal(meta.buttonLabel, "새로고침");
   assert.equal(meta.executable, true);
+});
+
+test("stored backtest results keep refresh when legacy visual type says metrics table", () => {
+  const widget = {
+    id: "w-backtest",
+    displayId: "W-003",
+    title: "VOO 일시불 vs 월 100달러 DCA 백테스트",
+    kind: "백테스트 비교",
+    visualType: "metrics-table",
+    status: "ready",
+    outputRole: "backtest_result",
+    nextActions: ["run_backtest_chart_widget"],
+    dependsOn: ["W-001", "W-002"],
+    chartSpec: {
+      type: "metrics-table",
+      sourceWidgetIds: ["W-001"],
+      strategyWidgetIds: ["W-002"],
+      series: [
+        { name: "VOO Buy & Hold", data: [100, 101, 102] },
+        { name: "VOO 월 100달러 DCA", data: [0, 100, 201] },
+      ],
+      metrics: [
+        { name: "VOO Buy & Hold", endingValue: 102 },
+        { name: "VOO 월 100달러 DCA", endingValue: 201 },
+      ],
+    },
+  };
+  const action = portfolioWidgetPrimaryAction(widget, "strategy-research");
+  const meta = portfolioWidgetActionMeta(action, widget.status);
+
+  assert.equal(portfolioWidgetLooksLikeMetricsTarget(widget), false);
+  assert.equal(portfolioWidgetUsesYfinanceRefresh(widget), true);
+  assert.deepEqual(normalizePortfolioWidgetNextActionsForState(widget), ["run_backtest_chart_widget"]);
+  assert.equal(action, "run_backtest_chart_widget");
+  assert.equal(meta.buttonLabel, "새로고침");
+  assert.equal(meta.executable, true);
+
+  const repairOnlyWidget = {
+    ...widget,
+    nextActions: ["repair_widget_dependencies"],
+  };
+  assert.deepEqual(normalizePortfolioWidgetNextActionsForState(repairOnlyWidget), ["repair_widget_dependencies"]);
+  assert.equal(portfolioWidgetPrimaryAction(repairOnlyWidget, "strategy-research"), "run_backtest_chart_widget");
 });
 
 test("portfolio canvas assistant messages preserve long visible output", () => {
@@ -1448,7 +1525,7 @@ test("markdown widgets hide only the duplicated first title heading", () => {
   assert.match(distinct, /^## 핵심 판단/m);
 });
 
-test("markdown actions targeting an existing non-markdown widget create a new widget instead of converting it", () => {
+test("markdown actions targeting an existing non-markdown widget are rejected instead of creating a fake update", () => {
   const currentWidgets = normalizePortfolioWidgets([
     {
       id: "w-source",
@@ -1484,17 +1561,135 @@ test("markdown actions targeting an existing non-markdown widget create a new wi
     now: "2026-06-25T00:00:00.000Z",
   });
 
-  assert.equal(state.status, "created");
-  assert.equal(state.widgets.length, 2);
+  assert.equal(state.status, "action-contract-invalid");
+  assert.equal(state.widgets.length, 1);
   assert.equal(state.widgets[0].id, "w-source");
   assert.equal(state.widgets[0].visualType, "table");
   assert.equal(state.widgets[0].title, "QQQ 원본");
-  assert.equal(state.widgets[1].visualType, "markdown");
-  assert.equal(state.widgets[1].kind, "마크다운 위젯");
-  assert.equal(state.widgets[1].w, 3);
-  assert.equal(state.widgets[1].h, 3);
-  assert.deepEqual(state.widgets[1].dependsOn, []);
-  assert.deepEqual(state.widgets[1].nextActions, []);
+  assert.equal(state.contractError.code, "target_type_mismatch");
+  assert.equal(state.widgets.some((widget) => widget.displayId === "W-002"), false);
+});
+
+test("function-labelled markdown updates are rejected unless they carry a function contract", () => {
+  const currentWidgets = normalizePortfolioWidgets([
+    {
+      id: "w-function",
+      displayId: "W-002",
+      title: "AAPL -> CRM 스왑",
+      kind: "함수 위젯",
+      visualType: "function",
+      functionSpec: {
+        language: "portfolio-matrix-dsl",
+        executionMode: "matrix-dsl",
+        outputs: ["signal_matrix"],
+        program: [{ op: "swap", fromAsset: "AAPL", toAsset: "CRM" }],
+      },
+    },
+  ]);
+  const answer = [
+    "```portfolio_widget_action",
+    JSON.stringify({
+      action: "update_widget",
+      widgetDisplayId: "W-002",
+      widget: {
+        title: "AAPL -> CRM 스왑 + 월간 리밸런싱",
+        kind: "함수 위젯",
+        visualType: "markdown",
+        markdown: "월 1회 리밸런싱을 추가하면 됩니다.",
+      },
+    }),
+    "```",
+  ].join("\n");
+  const state = buildPortfolioAgentWidgetActionApplyState({
+    agentWidgetAction: {
+      answer,
+      request: { prompt: "기존 함수 위젯을 월간 리밸런싱으로 갱신" },
+    },
+    currentWidgets,
+    nextDisplayIndex: 3,
+    nowMs: 12345,
+    now: "2026-06-25T00:00:00.000Z",
+  });
+
+  assert.equal(state.status, "action-contract-invalid");
+  assert.equal(state.widgets.length, 1);
+  assert.equal(state.widgets[0].visualType, "function");
+  assert.equal(state.widgets[0].functionSpec.program.length, 1);
+  assert.equal(state.contractError.code, "target_type_mismatch");
+});
+
+test("function updates with blank markdown fields still preserve and update the function contract", () => {
+  const currentWidgets = normalizePortfolioWidgets([
+    {
+      id: "w-source",
+      displayId: "W-001",
+      title: "M7 입력",
+      visualType: "table",
+      dataset: [{ ticker: "AAPL", label: "AAPL", value: 100 }],
+    },
+    {
+      id: "w-function",
+      displayId: "W-005",
+      title: "AAPL -> CRM 스왑",
+      kind: "함수 위젯",
+      visualType: "function",
+      outputRole: "signal_matrix",
+      dependsOn: ["w-source"],
+      functionSpec: {
+        language: "portfolio-matrix-dsl",
+        executionMode: "matrix-dsl",
+        outputs: ["signal_matrix"],
+        program: [{ op: "swap", fromAsset: "AAPL", toAsset: "CRM" }],
+      },
+    },
+  ]);
+  const answer = [
+    "```portfolio_widget_action",
+    JSON.stringify({
+      action: "update_widget",
+      actionId: "update_function_widget",
+      widgetId: "w-function",
+      widgetDisplayId: "W-005",
+      widget: {
+        displayId: "W-005",
+        title: "AAPL -> CRM 스왑 + 월간 리밸런싱",
+        kind: "함수 위젯",
+        visualType: "function",
+        markdown: "",
+        echarts: [],
+        functionSpec: {
+          language: "portfolio-matrix-dsl",
+          version: 1,
+          executionMode: "matrix-dsl",
+          inputs: ["source_matrix"],
+          outputs: ["signal_matrix"],
+          program: [
+            { op: "rebalance", method: "periodic", frequency: "monthly", target: "target_weights" },
+            { op: "swap", fromAsset: "AAPL", toAsset: "CRM", effective: { anchor: "run_start", offsetMonths: 3, snap: "next_trading_day" } },
+          ],
+        },
+      },
+    }),
+    "```",
+  ].join("\n");
+  const state = buildPortfolioAgentWidgetActionApplyState({
+    agentWidgetAction: {
+      answer,
+      request: { action: "edit", widget: currentWidgets[1], prompt: "W-005에 월간 리밸런싱을 추가해줘" },
+    },
+    currentWidgets,
+    nextDisplayIndex: 6,
+    nowMs: 12345,
+    now: "2026-06-25T00:00:00.000Z",
+  });
+
+  const updated = state.widgets.find((widget) => widget.id === "w-function");
+  assert.equal(state.status, "updated");
+  assert.equal(state.contractError, undefined);
+  assert.equal(updated.visualType, "function");
+  assert.equal(updated.functionSpec.program.length, 2);
+  assert.equal(updated.functionSpec.program[0].op, "rebalance");
+  assert.equal(updated.signalMatrix.program[0].op, "rebalance");
 });
 
 test("dependency repair responses cannot create markdown widgets for existing line targets", () => {
@@ -1821,6 +2016,73 @@ test("portfolio matrix dsl rejects unsupported operations without faking signal 
   assert.equal(signalMatrix.compiler.issues[0].code, "UNSUPPORTED_OP");
 });
 
+test("portfolio matrix dsl accepts swap allocation events as pending executable intent", () => {
+  const signalMatrix = compilePortfolioMatrixDslSignalMatrix({
+    functionSpec: {
+      language: "portfolio-matrix-dsl",
+      executionMode: "matrix-dsl",
+      outputs: ["signal_matrix"],
+      program: [
+        {
+          op: "swap",
+          from: "META",
+          to: "LLY",
+          effective: { anchor: "run_start", offsetMonths: 6, snap: "next_trading_day" },
+          weightPolicy: "preserve_value",
+        },
+      ],
+    },
+  });
+
+  assert.equal(signalMatrix.status, "pending-source");
+  assert.equal(signalMatrix.compiler.issues.length, 0);
+  assert.deepEqual(signalMatrix.compiler.ops, ["swap"]);
+  assert.equal(signalMatrix.program[0].fromAsset, "META");
+  assert.equal(signalMatrix.program[0].toAsset, "LLY");
+  assert.equal(signalMatrix.program[0].effective.offsetMonths, 6);
+});
+
+test("portfolio matrix dsl accepts dca contribution events as pending executable intent", () => {
+  const signalMatrix = compilePortfolioMatrixDslSignalMatrix({
+    functionSpec: {
+      language: "portfolio-matrix-dsl",
+      executionMode: "matrix-dsl",
+      outputs: ["signal_matrix"],
+      program: [
+        {
+          op: "dca",
+          amount: 1000,
+          frequency: "monthly",
+          dayOfMonth: 1,
+          targetWeights: { QQQ: 0.7, TLT: 0.3 },
+        },
+      ],
+    },
+  });
+
+  assert.equal(signalMatrix.status, "pending-source");
+  assert.equal(signalMatrix.compiler.issues.length, 0);
+  assert.deepEqual(signalMatrix.compiler.ops, ["dca"]);
+  assert.equal(signalMatrix.program[0].amount, 1000);
+  assert.equal(signalMatrix.program[0].frequency, "monthly");
+  assert.deepEqual(signalMatrix.program[0].targetWeights, { QQQ: 0.7, TLT: 0.3 });
+});
+
+test("portfolio matrix dsl rejects incomplete swap allocation events", () => {
+  const signalMatrix = compilePortfolioMatrixDslSignalMatrix({
+    functionSpec: {
+      language: "portfolio-matrix-dsl",
+      executionMode: "matrix-dsl",
+      outputs: ["signal_matrix"],
+      program: [{ op: "swap", fromAsset: "META" }],
+    },
+  });
+
+  assert.equal(signalMatrix.status, "unsupported_op");
+  assert.equal(signalMatrix.rowCount, 0);
+  assert.equal(signalMatrix.compiler.issues[0].code, "UNSUPPORTED_OP");
+});
+
 test("backtest preparation accepts ready portfolio-matrix-dsl signal matrix rows", () => {
   const widgets = normalizePortfolioWidgets([
     {
@@ -1879,6 +2141,157 @@ test("backtest preparation accepts ready portfolio-matrix-dsl signal matrix rows
   assert.equal(preparation.status, "ready");
   assert.equal(preparation.supportedStrategySpecs[0].strategySpec.type, "portfolio_matrix_dsl");
   assert.equal(preparation.supportedStrategySpecs[0].strategySpec.supported, true);
+});
+
+test("backtest preparation supports portfolio-matrix-dsl swap function widgets", () => {
+  const widgets = normalizePortfolioWidgets([
+    {
+      id: "w-source",
+      displayId: "W-001",
+      title: "M7 균등",
+      visualType: "table",
+      status: "ready",
+      outputRole: "source_matrix",
+      dataset: [
+        { ticker: "AAPL", label: "AAPL", value: 14.2857 },
+        { ticker: "MSFT", label: "MSFT", value: 14.2857 },
+        { ticker: "NVDA", label: "NVDA", value: 14.2857 },
+        { ticker: "AMZN", label: "AMZN", value: 14.2857 },
+        { ticker: "GOOGL", label: "GOOGL", value: 14.2857 },
+        { ticker: "META", label: "META", value: 14.2857 },
+        { ticker: "TSLA", label: "TSLA", value: 14.2857 },
+      ],
+    },
+    {
+      id: "w-swap",
+      displayId: "W-002",
+      title: "6개월 뒤 META를 LLY로 스왑",
+      visualType: "function",
+      status: "ready",
+      outputRole: "signal_matrix",
+      functionSpec: {
+        language: "portfolio-matrix-dsl",
+        executionMode: "matrix-dsl",
+        outputs: ["signal_matrix"],
+        program: [
+          {
+            op: "swap",
+            fromAsset: "META",
+            toAsset: "LLY",
+            effective: { anchor: "run_start", offsetMonths: 6, snap: "next_trading_day" },
+          },
+        ],
+      },
+    },
+    {
+      id: "w-backtest",
+      displayId: "W-003",
+      title: "M7 META→LLY 스왑 백테스트",
+      visualType: "line",
+      status: "stale",
+      outputRole: "backtest_result",
+      nextActions: ["run_backtest_chart_widget"],
+      dependsOn: ["W-001", "W-002"],
+    },
+  ]);
+  const preparation = buildPortfolioBacktestChartPreparation({
+    widget: widgets.find((widget) => widget.id === "w-backtest"),
+    widgets,
+  });
+
+  assert.equal(widgets[1].signalMatrix.status, "pending-source");
+  assert.equal(preparation.status, "ready");
+  assert.equal(preparation.supportedStrategySpecs[0].strategySpec.type, "portfolio_matrix_dsl");
+  assert.equal(preparation.supportedStrategySpecs[0].strategySpec.supported, true);
+  assert.equal(preparation.supportedStrategySpecs[0].strategySpec.functionSpec.program[0].op, "swap");
+});
+
+test("backtest preparation treats portfolio-swap target portfolios as target inputs, not chart variants", () => {
+  const widgets = normalizePortfolioWidgets([
+    {
+      id: "w-source-a",
+      displayId: "W-001",
+      title: "A 포트폴리오: 성장주 중심",
+      visualType: "table",
+      status: "ready",
+      outputRole: "source_matrix",
+      dataset: [
+        { ticker: "NVDA", label: "NVDA", value: 25 },
+        { ticker: "MSFT", label: "MSFT", value: 20 },
+        { ticker: "AAPL", label: "AAPL", value: 20 },
+        { ticker: "AMZN", label: "AMZN", value: 20 },
+        { ticker: "META", label: "META", value: 15 },
+      ],
+    },
+    {
+      id: "w-source-b",
+      displayId: "W-002",
+      title: "B 포트폴리오: 분산 방어형",
+      visualType: "table",
+      status: "ready",
+      outputRole: "source_matrix",
+      dataset: [
+        { ticker: "BRK-B", label: "BRK-B", value: 25 },
+        { ticker: "LLY", label: "LLY", value: 20 },
+        { ticker: "COST", label: "COST", value: 20 },
+        { ticker: "JPM", label: "JPM", value: 20 },
+        { ticker: "XOM", label: "XOM", value: 15 },
+      ],
+    },
+    {
+      id: "w-portfolio-swap",
+      displayId: "W-003",
+      title: "6개월 뒤 A에서 B로 이전",
+      visualType: "function",
+      status: "ready",
+      outputRole: "signal_matrix",
+      functionSpec: {
+        language: "portfolio-matrix-dsl",
+        executionMode: "matrix-dsl",
+        inputs: ["W-001", "W-002"],
+        outputs: ["signal_matrix"],
+        program: [
+          {
+            op: "portfolio_swap",
+            when: "months_since_run_start >= 6",
+            fromLabel: "A",
+            toLabel: "B",
+            targetWeights: {
+              "BRK-B": 0.25,
+              LLY: 0.2,
+              COST: 0.2,
+              JPM: 0.2,
+              XOM: 0.15,
+            },
+          },
+        ],
+      },
+    },
+    {
+      id: "w-backtest",
+      displayId: "W-004",
+      title: "A 보유 후 B 이전 백테스트",
+      visualType: "line",
+      status: "stale",
+      outputRole: "backtest_result",
+      nextActions: ["run_backtest_chart_widget"],
+      dependsOn: ["W-001", "W-002", "W-003"],
+    },
+  ]);
+  const preparation = buildPortfolioBacktestChartPreparation({
+    widget: widgets.find((widget) => widget.id === "w-backtest"),
+    widgets,
+  });
+
+  assert.equal(preparation.status, "ready");
+  assert.equal(preparation.supportedStrategySpecs[0].strategySpec.type, "portfolio_matrix_dsl");
+  assert.deepEqual(
+    preparation.backtestRequests.map((request) => [request.source.displayId, request.variant, request.strategyWidget?.displayId || ""]),
+    [
+      ["W-001", "buy_hold", ""],
+      ["W-001", "strategy", "W-003"],
+    ]
+  );
 });
 
 test("backtest preparation supports threshold drift rebalance function widgets", () => {
@@ -2498,6 +2911,209 @@ test("backtest result model aligns multiple scenario runs by relative trading da
   assert.deepEqual(model.series[1].data, [100, 103, null]);
 });
 
+test("backtest result model scales buy-and-hold to explicit lump-sum principal", () => {
+  const source = { id: "w-source", displayId: "W-001", title: "VOO 일시불 $1,200 입력" };
+  const scenarioRun = { runId: "base", label: "최근 12개월" };
+  const model = buildPortfolioBacktestChartResultModel({
+    results: [
+      {
+        label: "VOO 일시불 $1,200 Buy & Hold",
+        variant: "buy_hold",
+        source,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 100 },
+            { date: "2026-01-03", portfolio: 110 },
+          ],
+          metrics: {
+            standard: {
+              name: "VOO Buy & Hold",
+              endingValue: 110,
+              cumulativeReturn: 10,
+              cagr: 10,
+              mdd: -1,
+            },
+          },
+        },
+      },
+      {
+        label: "VOO 월 $100 DCA 누적",
+        variant: "strategy",
+        source,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 100 },
+            { date: "2026-01-03", portfolio: 1200 },
+          ],
+          metrics: {
+            metricProfile: "dca",
+            standard: {
+              name: "VOO DCA",
+              endingValue: 1200,
+              totalContribution: 1300,
+              netProfit: 0,
+              contributionReturn: 0,
+              cumulativeReturn: 0,
+              irr: 0,
+              twr: 0,
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(model.series[0].data, [1200, 1320]);
+  assert.equal(model.metrics[0].endingValue, 1320);
+  assert.equal(model.metrics[0].totalContribution, 1200);
+  assert.equal(model.metrics[0].netProfit, 120);
+  assert.equal(model.metrics[0].contributionReturn, 10);
+  assert.equal(model.metrics[0].contributionCount, 1);
+  assert.equal(model.metrics[1].totalContribution, 1300);
+});
+
+test("backtest result model scales weight-only buy-and-hold to matching DCA contribution total", () => {
+  const source = { id: "w-source", displayId: "W-001", title: "VOO 100% 입력 포트폴리오" };
+  const holdings = [{ ticker: "VOO", value: 100, weight: 100, inputMode: "weight" }];
+  const scenarioRun = { runId: "base", label: "최근 12개월" };
+  const model = buildPortfolioBacktestChartResultModel({
+    results: [
+      {
+        label: "VOO Buy & Hold",
+        variant: "buy_hold",
+        source,
+        holdings,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 100 },
+            { date: "2026-01-03", portfolio: 110 },
+          ],
+          metrics: {
+            standard: {
+              name: "VOO Buy & Hold",
+              endingValue: 110,
+              cumulativeReturn: 10,
+              cagr: 10,
+              mdd: -1,
+            },
+          },
+        },
+      },
+      {
+        label: "VOO 월 $100 DCA",
+        variant: "strategy",
+        source,
+        holdings,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 0 },
+            { date: "2026-01-03", portfolio: 1200 },
+          ],
+          metrics: {
+            metricProfile: "dca",
+            standard: {
+              name: "VOO DCA",
+              endingValue: 1200,
+              totalContribution: 1200,
+              netProfit: 0,
+              contributionReturn: 0,
+              cumulativeReturn: 0,
+              irr: 0,
+              twr: 0,
+              contributionCount: 12,
+              averageContribution: 100,
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(model.series[0].data, [1200, 1320]);
+  assert.equal(model.metrics[0].endingValue, 1320);
+  assert.equal(model.metrics[0].totalContribution, 1200);
+  assert.equal(model.metrics[0].netProfit, 120);
+  assert.equal(model.metrics[0].contributionReturn, 10);
+  assert.equal(model.metrics[0].contributionCount, 1);
+  assert.equal(model.metrics[1].totalContribution, 1200);
+});
+
+test("backtest result model reads lump-sum principal from preserved widget prompt", () => {
+  const source = {
+    id: "w-source",
+    displayId: "W-001",
+    title: "VOO 100% 입력 포트폴리오",
+    prompt: "VOO 1200달러 일시불 투자 VS 한 달에 100달러씩 DCA. 테스트 해줘.",
+  };
+  const holdings = [{ ticker: "VOO", value: 100, weight: 100, inputMode: "weight" }];
+  const scenarioRun = { runId: "base", label: "최근 12개월" };
+  const model = buildPortfolioBacktestChartResultModel({
+    results: [
+      {
+        label: "VOO Buy & Hold",
+        variant: "buy_hold",
+        source,
+        holdings,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 100 },
+            { date: "2026-01-03", portfolio: 110 },
+          ],
+          metrics: {
+            standard: {
+              name: "VOO Buy & Hold",
+              endingValue: 110,
+              cumulativeReturn: 10,
+              cagr: 10,
+              mdd: -1,
+            },
+          },
+        },
+      },
+      {
+        label: "VOO 월 $100 DCA",
+        variant: "strategy",
+        source,
+        holdings,
+        scenarioRun,
+        payload: {
+          series: [
+            { date: "2026-01-02", portfolio: 0 },
+            { date: "2026-01-03", portfolio: 1300 },
+          ],
+          metrics: {
+            metricProfile: "dca",
+            standard: {
+              name: "VOO DCA",
+              endingValue: 1300,
+              totalContribution: 1300,
+              netProfit: 0,
+              contributionReturn: 0,
+              cumulativeReturn: 0,
+              irr: 0,
+              twr: 0,
+              contributionCount: 13,
+              averageContribution: 100,
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(model.series[0].data, [1200, 1320]);
+  assert.equal(model.metrics[0].endingValue, 1320);
+  assert.equal(model.metrics[0].totalContribution, 1200);
+  assert.equal(model.metrics[0].netProfit, 120);
+  assert.equal(model.metrics[0].contributionReturn, 10);
+  assert.equal(model.metrics[1].totalContribution, 1300);
+});
+
 test("backtest payload carries scenario, source, and signal matrix roles", () => {
   const sourceWidget = {
     id: "w-source",
@@ -2703,7 +3319,7 @@ test("targeted metrics-table markdown updates are rejected instead of creating r
     nowMs: 5500,
   });
 
-  assert.equal(applyState.status, "target-type-mismatch");
+  assert.equal(applyState.status, "action-contract-invalid");
   assert.equal(applyState.widgets.length, 2);
   assert.equal(applyState.nextDisplayIndex, 6);
   assert.equal(applyState.contractError.code, "target_type_mismatch");
@@ -2785,6 +3401,85 @@ test("backtest refresh marks dependent metrics tables synced instead of stale", 
   assert.equal(portfolioBacktestMetricRows(metricsWidget, widgets)[0].endingValue, 101);
 });
 
+test("backtest refresh replaces stale copied metrics table rows from dependency", () => {
+  const currentWidgets = normalizePortfolioWidgets([
+    {
+      id: "w-source",
+      displayId: "W-001",
+      title: "VOO 일시불 $1,200 입력",
+      visualType: "table",
+      dataset: [{ ticker: "VOO", label: "VOO", value: 100 }],
+    },
+    {
+      id: "w-backtest",
+      displayId: "W-003",
+      title: "VOO 일시불 vs 월 $100 DCA 백테스트",
+      visualType: "line",
+      outputRole: "backtest_result",
+      dependsOn: ["w-source"],
+      nextActions: ["run_backtest_chart_widget"],
+      chartSpec: { type: "line" },
+    },
+    {
+      id: "w-metrics",
+      displayId: "W-004",
+      title: "VOO 일시불 vs 월 $100 DCA 평가 테이블",
+      visualType: "metrics-table",
+      outputRole: "metrics",
+      dependsOn: ["w-backtest"],
+      status: "stale",
+      staleReason: "W-003 백테스트 비교 차트 변경으로 재계산이 필요합니다.",
+      nextActions: ["update_derived_widget"],
+      chartSpec: {
+        type: "metrics-table",
+        metrics: [{ name: "VOO 일시불 Buy & Hold", endingValue: 1565.98, totalContribution: 1300 }],
+      },
+    },
+  ]);
+  const resultModel = {
+    xLabels: ["2025-06-27", "2026-06-26"],
+    series: [{ name: "VOO 일시불 Buy & Hold", type: "line", data: [1200, 1440] }],
+    variantCount: 1,
+    metrics: [{ name: "VOO 일시불 Buy & Hold", endingValue: 1440, totalContribution: 1200, netProfit: 240, contributionReturn: 20 }],
+    standardMetrics: [{ name: "VOO 일시불 Buy & Hold", endingValue: 1440, totalContribution: 1200, netProfit: 240, contributionReturn: 20 }],
+    bestMetric: { name: "VOO 일시불 Buy & Hold", cumulativeReturn: 20 },
+    issues: [],
+    scenarioRuns: [],
+  };
+  const widgets = buildPortfolioBacktestReadyWidgets({
+    currentWidgets,
+    widget: currentWidgets[1],
+    resultModel,
+    dependencyModel: {
+      existingYScale: "",
+      sourceIds: ["w-source"],
+      strategyIds: [],
+      betaReferenceIds: [],
+      dependencyIds: ["w-source"],
+      chartSourceWidgetIds: ["w-source"],
+      derivedRows: [{ widgetId: "w-source", field: "dataset", role: "portfolio_input" }],
+      strategyDerivedRows: [],
+    },
+    preparation: {
+      runnableSources: [{ source: currentWidgets[0], holdings: [{ ticker: "VOO", value: 100 }] }],
+      supportedStrategySpecs: [],
+      unsupportedStrategyLabels: [],
+      includeBenchmark: false,
+      normalizedBenchmark: "",
+      betaReferenceLabel: "",
+    },
+    backtestPeriod: "custom",
+    isMetricsTarget: (widget) => widget.visualType === "metrics-table",
+  });
+  const metricsWidget = widgets.find((widget) => widget.id === "w-metrics");
+  const rows = portfolioBacktestMetricRows(metricsWidget, widgets);
+
+  assert.equal(metricsWidget.status, "ready");
+  assert.equal(metricsWidget.chartSpec.metrics[0].totalContribution, 1200);
+  assert.equal(rows[0].totalContribution, 1200);
+  assert.equal(rows[0].endingValue, 1440);
+});
+
 test("metrics table sync patch clears stale state when dependency metrics exist", () => {
   const widgets = normalizePortfolioWidgets([
     {
@@ -2818,6 +3513,92 @@ test("metrics table sync patch clears stale state when dependency metrics exist"
   assert.equal(synced.nextActions.includes("update_derived_widget"), false);
   assert.equal(synced.chartSpec.type, "metrics-table");
   assert.equal(synced.chartSpec.metricColumns.length > 0, true);
+});
+
+test("metrics table switches to DCA columns when cashflow metrics exist", () => {
+  const widgets = normalizePortfolioWidgets([
+    {
+      id: "w-backtest",
+      displayId: "W-004",
+      title: "VOO 매월 적립식 백테스트",
+      visualType: "line",
+      outputRole: "backtest_result",
+      chartSpec: {
+        type: "line",
+        metricProfile: "dca",
+        metrics: [
+          {
+            name: "VOO DCA",
+            endingValue: 14230,
+            totalContribution: 12000,
+            netProfit: 2230,
+            contributionReturn: 18.58,
+            irr: 14.2,
+            twr: 11.9,
+            mdd: -8.4,
+            volatility: 17.2,
+            sharpe: 1.21,
+            contributionCount: 12,
+            averageContribution: 1000,
+          },
+        ],
+      },
+    },
+    {
+      id: "w-metrics",
+      displayId: "W-005",
+      title: "VOO 적립식 평가지표",
+      visualType: "metrics-table",
+      outputRole: "metrics",
+      dependsOn: ["w-backtest"],
+      chartSpec: { type: "metrics-table", metricProfile: "dca" },
+    },
+  ]);
+  const metricsWidget = widgets[1];
+  const rows = portfolioBacktestMetricRows(metricsWidget, widgets);
+  const columns = portfolioMetricColumnsForWidget(metricsWidget, rows);
+  const synced = buildPortfolioMetricsTableSyncPatch(metricsWidget, widgets, "2026-06-26T00:00:00.000Z");
+
+  assert.equal(rows[0].netProfit, 2230);
+  assert.equal(rows[0].contributionReturn, 18.58);
+  assert.deepEqual(
+    columns.map((column) => column.key),
+    [
+      "name",
+      "endingValue",
+      "totalContribution",
+      "netProfit",
+      "contributionReturn",
+      "irr",
+      "twr",
+      "mdd",
+      "volatility",
+      "sharpe",
+      "contributionCount",
+      "averageContribution",
+    ]
+  );
+  assert.deepEqual(synced.chartSpec.metricColumns.map((column) => column.key), columns.map((column) => column.key));
+});
+
+test("metrics table preserves explicit metric column selections", () => {
+  const widget = {
+    visualType: "metrics-table",
+    chartSpec: {
+      type: "metrics-table",
+      metricProfile: "dca",
+      metricColumns: ["name", "endingValue", "irr"],
+    },
+  };
+  const columns = portfolioMetricColumnsForWidget(widget, [
+    { name: "VOO DCA", endingValue: 14230, totalContribution: 12000, irr: 14.2 },
+  ]);
+
+  assert.deepEqual(columns, [
+    { key: "name", label: "포트폴리오" },
+    { key: "endingValue", label: "Ending Value" },
+    { key: "irr", label: "IRR/MWR" },
+  ]);
 });
 
 test("multiple period comparison classification requires an explicit boolean flag", () => {

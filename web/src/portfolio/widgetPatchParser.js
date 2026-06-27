@@ -293,6 +293,7 @@ export function buildPortfolioWidgetPatchFromAgentAnswer(answer, request = {}) {
         parsedWidget.eCharts,
         parsedWidget.echartsOptions,
         parsedWidget.echartsOption,
+        markdown,
         parsedWidget.option,
         parsedWidget.sections,
         parsedWidget.chartSpec?.echarts,

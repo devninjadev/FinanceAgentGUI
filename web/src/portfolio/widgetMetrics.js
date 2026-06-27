@@ -17,9 +17,37 @@ export const portfolioBacktestMetricColumns = [
   { key: "beta", label: "BETA" },
 ];
 
+export const portfolioDcaMetricColumns = [
+  { key: "name", label: "포트폴리오" },
+  { key: "endingValue", label: "평가액" },
+  { key: "totalContribution", label: "누적 납입금" },
+  { key: "netProfit", label: "손익" },
+  { key: "contributionReturn", label: "납입 수익률" },
+  { key: "irr", label: "IRR/MWR" },
+  { key: "twr", label: "TWR" },
+  { key: "mdd", label: "MDD" },
+  { key: "volatility", label: "Volatility" },
+  { key: "sharpe", label: "Sharpe" },
+];
+
+const portfolioMetricColumnLabelByKey = new Map(
+  [...portfolioDcaMetricColumns, ...portfolioBacktestMetricColumns].map((column) => [column.key, column.label])
+);
+
 function portfolioMetricNumber(value) {
   const number = Number(String(value ?? "").replace(/[,%\s]/g, ""));
   return Number.isFinite(number) ? number : null;
+}
+
+function normalizePortfolioMetricProfile(value = "") {
+  const token = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (["dca", "cashflow", "cash_flow", "contribution", "contribution_based", "installment", "periodic_buy"].includes(token)) {
+    return "dca";
+  }
+  return "standard";
 }
 
 export function normalizePortfolioBacktestMetricRow(row = {}, fallbackName = "") {
@@ -37,6 +65,12 @@ export function normalizePortfolioBacktestMetricRow(row = {}, fallbackName = "")
     ),
     endingValue: portfolioMetricNumber(pick("endingValue", "ending_value", "Ending Value", "finalValue", "endValue")),
     totalContribution: portfolioMetricNumber(pick("totalContribution", "total_contribution", "Total Contribution", "contribution")),
+    netProfit: portfolioMetricNumber(pick("netProfit", "net_profit", "profit", "pnl", "totalProfit", "total_profit", "손익")),
+    contributionReturn: portfolioMetricNumber(pick("contributionReturn", "contribution_return", "returnOnContribution", "return_on_contribution", "profitReturn", "납입 수익률")),
+    irr: portfolioMetricNumber(pick("irr", "IRR", "mwr", "MWR", "moneyWeightedReturn", "money_weighted_return")),
+    twr: portfolioMetricNumber(pick("twr", "TWR", "timeWeightedReturn", "time_weighted_return")),
+    contributionCount: portfolioMetricNumber(pick("contributionCount", "contribution_count", "cashflowCount", "cashflow_count", "payments", "납입 횟수")),
+    averageContribution: portfolioMetricNumber(pick("averageContribution", "average_contribution", "avgContribution", "avg_contribution", "monthlyContribution", "monthly_contribution", "평균 납입금")),
     cumulativeReturn: portfolioMetricNumber(pick("cumulativeReturn", "cumulative_return", "Cumulative Return", "portfolioReturn", "return")),
     cagr: portfolioMetricNumber(pick("cagr", "CAGR", "annualizedReturn", "annualized_return")),
     mdd: portfolioMetricNumber(pick("mdd", "MDD", "portfolioMaxDrawdown", "maxDrawdown", "max_drawdown")),
@@ -62,6 +96,38 @@ const portfolioBacktestMetricValueKeys = [
   "total_contribution",
   "Total Contribution",
   "contribution",
+  "netProfit",
+  "net_profit",
+  "profit",
+  "pnl",
+  "totalProfit",
+  "total_profit",
+  "contributionReturn",
+  "contribution_return",
+  "returnOnContribution",
+  "return_on_contribution",
+  "profitReturn",
+  "irr",
+  "IRR",
+  "mwr",
+  "MWR",
+  "moneyWeightedReturn",
+  "money_weighted_return",
+  "twr",
+  "TWR",
+  "timeWeightedReturn",
+  "time_weighted_return",
+  "contributionCount",
+  "contribution_count",
+  "cashflowCount",
+  "cashflow_count",
+  "payments",
+  "averageContribution",
+  "average_contribution",
+  "avgContribution",
+  "avg_contribution",
+  "monthlyContribution",
+  "monthly_contribution",
   "cumulativeReturn",
   "cumulative_return",
   "Cumulative Return",
@@ -111,24 +177,6 @@ function portfolioBacktestMetricCandidateRows(value) {
   return rows.length ? rows : [];
 }
 
-function portfolioBacktestMetricRowsLookPlaceholder(rows = []) {
-  if (!Array.isArray(rows) || !rows.length) return false;
-  const metricKeys = portfolioBacktestMetricValueKeys.filter((key) => !["return"].includes(key));
-  return rows.every((row) => {
-    const name = cleanPortfolioWidgetText(row?.name || row?.title || row?.portfolioName || row?.label || "", 80);
-    const genericName = !name || /^항목\s*\d+$/i.test(name) || /^포트폴리오\s*\d+$/i.test(name);
-    if (!genericName) return false;
-    const values = metricKeys
-      .map((key) => row?.[key])
-      .filter((value) => value !== undefined && value !== null && value !== "");
-    if (!values.length) return true;
-    return values.every((value) => {
-      const number = portfolioMetricNumber(value);
-      return number === null || Math.abs(number) < 0.000001;
-    });
-  });
-}
-
 export function portfolioBacktestMetricRows(widget, widgets = []) {
   const ownCandidates = [
     widget?.chartSpec?.metrics,
@@ -150,7 +198,7 @@ export function portfolioBacktestMetricRows(widget, widgets = []) {
     ])
     .map(portfolioBacktestMetricCandidateRows)
     .find((rows) => rows.length);
-  if (dependencySource && (!ownSource || portfolioBacktestMetricRowsLookPlaceholder(ownSource))) {
+  if (dependencySource) {
     return dependencySource
       .slice(0, 24)
       .map((row, index) => normalizePortfolioBacktestMetricRow(row, row.name || row.title || row.portfolioName || `포트폴리오 ${index + 1}`))
@@ -170,6 +218,50 @@ export function portfolioBacktestMetricRows(widget, widgets = []) {
     .slice(0, 24)
     .map((row, index) => normalizePortfolioBacktestMetricRow(row, row.name || row.title || row.portfolioName || `포트폴리오 ${index + 1}`))
     .filter(Boolean);
+}
+
+function portfolioMetricRowsHaveDcaValues(rows = []) {
+  return rows.some((row) =>
+    ["netProfit", "contributionReturn", "irr", "twr", "contributionCount", "averageContribution"].some(
+      (key) => row?.[key] !== null && row?.[key] !== undefined && row?.[key] !== ""
+    )
+  );
+}
+
+function normalizePortfolioMetricColumns(value = []) {
+  if (!Array.isArray(value) || !value.length) return [];
+  return value
+    .map((column) => {
+      if (typeof column === "string") {
+        const key = cleanPortfolioWidgetText(column, 40);
+        if (!key) return null;
+        return { key, label: portfolioMetricColumnLabelByKey.get(key) || key };
+      }
+      if (!column || typeof column !== "object" || Array.isArray(column)) return null;
+      const key = cleanPortfolioWidgetText(column.key || column.field || column.name, 40);
+      if (!key) return null;
+      return {
+        key,
+        label: cleanPortfolioWidgetText(column.label || column.title || portfolioMetricColumnLabelByKey.get(key) || key, 40),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 16);
+}
+
+export function portfolioMetricColumnsForWidget(widget = {}, rows = []) {
+  const chartSpec = widget?.chartSpec && typeof widget.chartSpec === "object" ? widget.chartSpec : {};
+  const explicitColumns = normalizePortfolioMetricColumns(chartSpec.metricColumns || widget?.metricColumns);
+  if (explicitColumns.length) return explicitColumns;
+  const profile = normalizePortfolioMetricProfile(chartSpec.metricProfile || chartSpec.profile || widget?.metricProfile);
+  if (profile === "dca" || portfolioMetricRowsHaveDcaValues(rows)) {
+    const optionalColumns = [
+      rows.some((row) => row?.contributionCount !== null && row?.contributionCount !== undefined) ? { key: "contributionCount", label: "납입 횟수" } : null,
+      rows.some((row) => row?.averageContribution !== null && row?.averageContribution !== undefined) ? { key: "averageContribution", label: "평균 납입금" } : null,
+    ].filter(Boolean);
+    return [...portfolioDcaMetricColumns, ...optionalColumns];
+  }
+  return portfolioBacktestMetricColumns;
 }
 
 function normalizePortfolioMetricActionToken(value = "") {
@@ -197,10 +289,9 @@ export function buildPortfolioMetricsTableSyncPatch(widget, widgets = [], now = 
     chartSpec: {
       ...chartSpec,
       type: "metrics-table",
-      metricColumns:
-        Array.isArray(chartSpec.metricColumns) && chartSpec.metricColumns.length
-          ? chartSpec.metricColumns
-          : portfolioBacktestMetricColumns,
+      metrics: rows,
+      standardMetrics: rows,
+      metricColumns: portfolioMetricColumnsForWidget(widget, rows),
     },
     nextActions,
     staleReason: "",
@@ -215,7 +306,7 @@ export function formatPortfolioMetricCell(row, key) {
   const value = row[key];
   if (value === null || value === undefined || value === "") return "-";
   const digits = ["sharpe", "sortino", "calmar", "upi", "beta"].includes(key) ? 3 : 2;
-  const suffix = ["cumulativeReturn", "cagr", "mdd", "volatility", "ulcer"].includes(key) ? "%" : "";
+  const suffix = ["cumulativeReturn", "cagr", "mdd", "volatility", "ulcer", "contributionReturn", "irr", "twr"].includes(key) ? "%" : "";
   const formatted = Number(value).toLocaleString("en-US", {
     maximumFractionDigits: digits,
     minimumFractionDigits: Number.isInteger(Number(value)) ? 0 : Math.min(2, digits),

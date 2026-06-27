@@ -116,6 +116,10 @@ const fallbackModelGroups = [
   },
 ];
 
+const fallbackPersonaModeOptions = [
+  { id: "none", label: "사용하지 않음", detail: "일반 채팅도 기본 업무 응답으로 유지합니다." },
+];
+
 const NEWS_FEED_POLL_INTERVAL_OPTIONS = Array.from({ length: 10 }, (_, index) => {
   const minutes = index + 1;
   return {
@@ -334,6 +338,42 @@ function AgentSettingsSection({
           value={loading ? "loading" : speed}
           options={safeSpeedOptions}
           onChange={onSpeedChange}
+          disabled={loading}
+        />
+      </div>
+    </section>
+  );
+}
+
+function PersonaModeSection({
+  personaModeOptions = [],
+  personaMode = "none",
+  onPersonaModeChange = () => {},
+  loading = false,
+}) {
+  const safePersonaModeOptions = personaModeOptions.length ? personaModeOptions : fallbackPersonaModeOptions;
+  const selectedPersonaModeOption =
+    safePersonaModeOptions.find((option) => option.id === personaMode) ?? safePersonaModeOptions[0];
+
+  return (
+    <section className="settings-section settings-persona-section" aria-labelledby="persona-mode-settings-title">
+      <div className="settings-section-header">
+        <h2 id="persona-mode-settings-title">페르소나 모드</h2>
+        <span>일반 채팅</span>
+      </div>
+
+      <div className="settings-persona-control">
+        <SettingsSelectField
+          id="settings-persona-mode"
+          label="페르소나 모드"
+          value={loading ? "none" : selectedPersonaModeOption?.id || "none"}
+          options={safePersonaModeOptions}
+          onChange={onPersonaModeChange}
+          description={
+            loading
+              ? ""
+              : `${selectedPersonaModeOption?.detail || ""} 코딩, 월드 메모리, 번역, 보고서 작성에는 적용하지 않습니다.`
+          }
           disabled={loading}
         />
       </div>
@@ -657,11 +697,11 @@ function ArcaNotificationAuthSection({
       <dl className="arca-auth-meta">
         <div>
           <dt>저장 파일</dt>
-          <dd>{status?.sessionFile || "GuiBuild/data/secrets/arca-session.json"}</dd>
+          <dd>{status?.sessionFile || "data/secrets/arca-session.json"}</dd>
         </div>
         <div>
           <dt>브라우저 프로필</dt>
-          <dd>{status?.profileDir || "GuiBuild/data/arca-browser-profile"}</dd>
+          <dd>{status?.profileDir || "data/arca-browser-profile"}</dd>
         </div>
         <div>
           <dt>쿠키 이름</dt>
@@ -707,7 +747,12 @@ export default function SettingsView({
   worldMemoryBusy,
   worldMemoryError,
   worldMemoryTechOpen,
+  worldMemorySettings,
+  worldMemorySettingsBusy,
+  worldMemorySettingsSaving,
+  worldMemorySettingsError,
   onToggleWorldMemoryTech,
+  onToggleWorldMemoryEnabled,
   onReloadWorldMemory,
   arcaAuth,
 }) {
@@ -717,6 +762,13 @@ export default function SettingsView({
     1,
     Math.min(10, Math.round(Number(settings?.pollIntervalSeconds || 180) / 60))
   );
+  const {
+    personaModeOptions = [],
+    personaMode = "none",
+    onPersonaModeChange = () => {},
+    loading: agentSettingsLoading = false,
+    ...agentSettingsSection
+  } = agentSettings || {};
 
   return (
     <div className="settings-shell">
@@ -738,7 +790,7 @@ export default function SettingsView({
           </div>
         ) : null}
 
-        <AgentSettingsSection {...agentSettings} />
+        <AgentSettingsSection {...agentSettingsSection} loading={agentSettingsLoading} />
 
         <SharedMemorySection
           status={memoryStatus}
@@ -757,7 +809,12 @@ export default function SettingsView({
           busy={worldMemoryBusy}
           error={worldMemoryError}
           techOpen={worldMemoryTechOpen}
+          settings={worldMemorySettings}
+          settingsBusy={worldMemorySettingsBusy}
+          settingsSaving={worldMemorySettingsSaving}
+          settingsError={worldMemorySettingsError}
           onToggleTech={onToggleWorldMemoryTech}
+          onToggleEnabled={onToggleWorldMemoryEnabled}
           onReload={onReloadWorldMemory}
         />
 
@@ -825,6 +882,13 @@ export default function SettingsView({
             />
           </div>
         </section>
+
+        <PersonaModeSection
+          personaModeOptions={personaModeOptions}
+          personaMode={personaMode}
+          onPersonaModeChange={onPersonaModeChange}
+          loading={agentSettingsLoading}
+        />
       </section>
 
       <SharedMemoryDialog {...memoryDialog} onDeleteRecord={onDeleteMemoryRecord} />
@@ -837,9 +901,17 @@ function WorldMemoryDiagnosticsSection({
   busy,
   error,
   techOpen,
+  settings,
+  settingsBusy = false,
+  settingsSaving = false,
+  settingsError = "",
   onToggleTech,
+  onToggleEnabled,
   onReload,
 }) {
+  const enabled = Boolean(settings?.enabled ?? status?.enabled);
+  const toggleBusy = settingsBusy || settingsSaving;
+  const displayError = enabled ? error : "";
   const dependencies = status?.dependencies;
   const dependencyIssues = dependencies?.issues || [];
   const rows = status?.audit?.json?.rows || [];
@@ -861,90 +933,119 @@ function WorldMemoryDiagnosticsSection({
     <section className="settings-section settings-memory-section" aria-labelledby="world-memory-settings-title">
       <div className="settings-section-header">
         <h2 id="world-memory-settings-title">World Memory Engine</h2>
-        <span>{worldMemoryStatusLabel(status)} · 6시간 주기</span>
+        <span>{enabled ? `${worldMemoryStatusLabel(status)} · 6시간 주기` : "꺼짐 · 사이드바 숨김"}</span>
+      </div>
+
+      <div className={enabled ? "settings-feature-row is-enabled" : "settings-feature-row is-disabled"}>
+        <div className="settings-source-main">
+          <strong className="settings-feature-title">월드 메모리 사용</strong>
+          <em className={settingsError ? "is-error" : undefined}>
+            {settingsError ||
+              (enabled
+                ? `${settings?.configPath || "config/world-memory.user.json"}에 켜짐 상태를 저장합니다.`
+                : "꺼짐 상태에서는 사이드바 메뉴와 에이전트 전역 컨텍스트를 숨깁니다.")}
+          </em>
+        </div>
+        <button
+          type="button"
+          className={enabled ? "settings-toggle is-on" : "settings-toggle"}
+          role="switch"
+          aria-checked={enabled}
+          disabled={toggleBusy}
+          onClick={() => onToggleEnabled?.(!enabled)}
+        >
+          <span className="settings-toggle-track">
+            <span className="settings-toggle-thumb" />
+          </span>
+          <span>{settingsSaving ? "저장 중" : enabled ? "켜짐" : "꺼짐"}</span>
+        </button>
       </div>
 
       <div className="settings-memory-grid">
-        <div className={error ? "settings-agent-diagnostic is-error" : "settings-agent-diagnostic is-ok"}>
-          {error ? <AlertTriangle size={16} strokeWidth={2.2} /> : <Database size={16} strokeWidth={2.2} />}
+        <div className={displayError ? "settings-agent-diagnostic is-error" : enabled ? "settings-agent-diagnostic is-ok" : "settings-agent-diagnostic"}>
+          {displayError ? <AlertTriangle size={16} strokeWidth={2.2} /> : <Database size={16} strokeWidth={2.2} />}
           <div>
-            <strong>{error ? "월드 메모리 상태 확인 필요" : "독립 월드 메모리 저장소"}</strong>
+            <strong>{displayError ? "월드 메모리 상태 확인 필요" : "독립 월드 메모리 저장소"}</strong>
             <p>
-              {error ||
-                `${status?.paths?.dbPath || "data/world-memory/world_issue_log.sqlite3"} · 최근 성공 ${formatDateTime(
-                  status?.collector?.lastSuccessfulAt
-                )}`}
+              {displayError ||
+                (enabled
+                  ? `${status?.paths?.dbPath || "data/world-memory/world_issue_log.sqlite3"} · 최근 성공 ${formatDateTime(
+                      status?.collector?.lastSuccessfulAt
+                    )}`
+                  : `${settings?.configPath || "config/world-memory.user.json"} · 기본 꺼짐`)}
             </p>
           </div>
         </div>
 
-        <button className="settings-memory-refresh" type="button" onClick={onReload} disabled={busy}>
+        <button className="settings-memory-refresh" type="button" onClick={onReload} disabled={busy || !enabled}>
           {busy ? <LoaderCircle size={15} strokeWidth={2.2} /> : <RefreshCw size={15} strokeWidth={2.2} />}
           <span>{busy ? "다시 읽는 중" : "월드 메모리 다시 읽기"}</span>
         </button>
       </div>
 
-      <div className="settings-subsection" aria-labelledby="world-memory-tech-title">
-        <button
-          className="settings-subsection-header settings-memory-collapse"
-          type="button"
-          aria-expanded={techOpen}
-          aria-controls="world-memory-tech-details"
-          onClick={onToggleTech}
-        >
-          <div className="settings-memory-collapse-title">
-            {techOpen ? <ChevronDown size={16} strokeWidth={2.2} /> : <ChevronRight size={16} strokeWidth={2.2} />}
-            <h3 id="world-memory-tech-title">기술 세부사항</h3>
-          </div>
-          <span>{techOpen ? "펼침" : "접힘"}</span>
-        </button>
-
-        {techOpen ? (
-          <div className="settings-world-memory-details" id="world-memory-tech-details">
-            <div className="world-memory-dependency-list">
-              {["pandas", "requests", "yfinance", "sentence_transformers"].map((name) => {
-                const installed = Boolean(dependencies?.modules?.[name]);
-                return (
-                  <span className={installed ? "is-installed" : "is-missing"} key={name}>
-                    {installed ? <CheckCircle2 size={14} strokeWidth={2.2} /> : <AlertTriangle size={14} strokeWidth={2.2} />}
-                    {name}
-                  </span>
-                );
-              })}
+      {enabled ? (
+        <div className="settings-subsection" aria-labelledby="world-memory-tech-title">
+          <button
+            className="settings-subsection-header settings-memory-collapse"
+            type="button"
+            aria-expanded={techOpen}
+            aria-controls="world-memory-tech-details"
+            onClick={onToggleTech}
+          >
+            <div className="settings-memory-collapse-title">
+              {techOpen ? <ChevronDown size={16} strokeWidth={2.2} /> : <ChevronRight size={16} strokeWidth={2.2} />}
+              <h3 id="world-memory-tech-title">기술 세부사항</h3>
             </div>
+            <span>{techOpen ? "펼침" : "접힘"}</span>
+          </button>
 
-            {dependencyIssues.length ? (
-              <div className="world-memory-issues">
-                {dependencyIssues.map((issue, index) => (
-                  <p key={`${issue.code}-${index}`}>
-                    <strong>{issue.status}</strong> {issue.message}
-                    {issue.installCommand ? <code>{issue.installCommand}</code> : null}
-                  </p>
+          {techOpen ? (
+            <div className="settings-world-memory-details" id="world-memory-tech-details">
+              <div className="world-memory-dependency-list">
+                {["pandas", "requests", "yfinance", "sentence_transformers"].map((name) => {
+                  const installed = Boolean(dependencies?.modules?.[name]);
+                  return (
+                    <span className={installed ? "is-installed" : "is-missing"} key={name}>
+                      {installed ? <CheckCircle2 size={14} strokeWidth={2.2} /> : <AlertTriangle size={14} strokeWidth={2.2} />}
+                      {name}
+                    </span>
+                  );
+                })}
+              </div>
+
+              {dependencyIssues.length ? (
+                <div className="world-memory-issues">
+                  {dependencyIssues.map((issue, index) => (
+                    <p key={`${issue.code}-${index}`}>
+                      <strong>{issue.status}</strong> {issue.message}
+                      {issue.installCommand ? <code>{issue.installCommand}</code> : null}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="world-memory-table">
+                {techRows.map(([label, value]) => (
+                  <div className="world-memory-table-row" key={label}>
+                    <span>{label}</span>
+                    <strong>{String(value ?? "-")}</strong>
+                  </div>
                 ))}
               </div>
-            ) : null}
 
-            <div className="world-memory-table">
-              {techRows.map(([label, value]) => (
-                <div className="world-memory-table-row" key={label}>
-                  <span>{label}</span>
-                  <strong>{String(value ?? "-")}</strong>
-                </div>
-              ))}
+              <div className="world-memory-table">
+                {rows.slice(0, 12).map((row) => (
+                  <div className="world-memory-table-row" key={row.Metric}>
+                    <span>{row.Metric}</span>
+                    <strong>{String(row.Value ?? "")}</strong>
+                  </div>
+                ))}
+                {!rows.length ? <div className="settings-empty">Audit 결과가 아직 없습니다.</div> : null}
+              </div>
             </div>
-
-            <div className="world-memory-table">
-              {rows.slice(0, 12).map((row) => (
-                <div className="world-memory-table-row" key={row.Metric}>
-                  <span>{row.Metric}</span>
-                  <strong>{String(row.Value ?? "")}</strong>
-                </div>
-              ))}
-              {!rows.length ? <div className="settings-empty">Audit 결과가 아직 없습니다.</div> : null}
-            </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
