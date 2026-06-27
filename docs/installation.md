@@ -1,12 +1,13 @@
 # Installation And Local Run Guide
 
-This document is for people or local agents setting up FinanceAgentGUI from the repository root.
+This document is for people or local agents setting up FinanceAgentGUI from the
+project folder.
 
 The app is intentionally a local web console. It runs a local server, opens in a browser, and stores user-specific state under local `data/` and `logs/` directories.
 
 ## Supported Shape
 
-- Distribution root: repository root
+- Project folder: wherever the user cloned or downloaded this repository
 - Web app: `web`
 - Frontend: Vite + React
 - Local server/API layer: Node.js modules under `web/server`
@@ -14,12 +15,8 @@ The app is intentionally a local web console. It runs a local server, opens in a
 - Runtime state: `data`
 - Runtime logs: `logs`
 
-Do not require files outside the repository root for normal installation or execution.
-
-For GitHub publishing, the repository root should be the app root itself. If a
-local development wrapper contains this app in `GuiBuild/`, publish the contents
-of `GuiBuild/`; do not publish the wrapper with `GuiBuild/` as a top-level
-folder.
+Do not require files outside the project folder for normal installation or
+execution.
 
 ## Prerequisites
 

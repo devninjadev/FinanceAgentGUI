@@ -6,14 +6,18 @@ This file is injected into local agents called from FinanceAgentGUI. The agent m
 
 The agent is not the product roadmap owner. It is the user's local assistant inside the web app sidebar: it interprets the current screen, diagnostics, logs, selected job, and available GUI actions.
 
-## GitHub Publishing Boundary
+## Project Root
 
-This app tree is the public GitHub repository root. In the development wrapper it may live inside a folder named `GuiBuild/`, but releases for `devninjadev/FinanceAgentGUI` must publish this folder's contents directly at the remote root.
+Treat the folder containing this file as the app root. Users may clone or
+download the project into any folder name, so install, runtime, and repair
+instructions should be written relative to this project folder.
 
-- The public GitHub repository must show `web/`, `docs/`, `scripts/`, `README.md`, `LICENSE`, and `AGENTS.md` at top level.
-- The public GitHub repository must not show a top-level `GuiBuild/` folder.
-- Do not document install, runtime, or repair steps as if users need to `cd GuiBuild` after cloning the public repository.
-- Before a release tag is pushed, verify the remote root listing and release archive shape match this boundary.
+- Keep user-facing paths rooted at `web/`, `docs/`, `scripts/`, `data/`, and
+  `logs/`.
+- Do not assume a parent folder, sibling repository, or machine-specific local
+  path.
+- Runtime data, generated reports, credentials, browser profiles, logs, caches,
+  and local databases must remain local unless the user explicitly exports them.
 
 ## Response Defaults
 

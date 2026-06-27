@@ -2,15 +2,10 @@
 
 FinanceAgentGUI is a local browser-based operations console for finance automation.
 
-The repository root is the distributable app root. The app runs locally on
-`127.0.0.1`; runtime data, secrets, logs, reports, browser profiles, shared
-memory, and World Memory databases are stored locally and excluded from Git.
-
-## Repository Shape
-
-On GitHub, this app's contents should be at the repository root. If you are
-working from a local development wrapper where the app lives in `GuiBuild/`,
-publish the contents of that folder, not the wrapper folder itself.
+Download or clone this project into any folder and run commands from that
+project folder. The app runs locally on `127.0.0.1`; runtime data, secrets,
+logs, reports, browser profiles, shared memory, and World Memory databases are
+stored locally and excluded from Git.
 
 ## Getting Started
 
