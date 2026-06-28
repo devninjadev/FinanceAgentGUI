@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Filter from "lucide-react/dist/esm/icons/filter.js";
 import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 
@@ -12,6 +13,96 @@ const calendarWeekdays = [
 ];
 
 const EARNINGS_LIMIT = 1000;
+
+const economicCountryGroupOrder = ["아시아", "북미", "남미", "유럽", "오세아니아", "아프리카", "기타"];
+
+const economicCountryCodeAliases = {
+  EA: "EMU",
+  EZ: "EMU",
+  UK: "GB",
+};
+
+const economicCountryFallbacks = [
+  ["AE", "아랍에미리트", "🇦🇪", "아시아"],
+  ["BH", "바레인", "🇧🇭", "아시아"],
+  ["CN", "중국 본토", "🇨🇳", "아시아"],
+  ["HK", "홍콩", "🇭🇰", "아시아"],
+  ["ID", "인도네시아", "🇮🇩", "아시아"],
+  ["IL", "이스라엘", "🇮🇱", "아시아"],
+  ["IN", "인도", "🇮🇳", "아시아"],
+  ["JP", "일본", "🇯🇵", "아시아"],
+  ["KR", "대한민국", "🇰🇷", "아시아"],
+  ["KW", "쿠웨이트", "🇰🇼", "아시아"],
+  ["MY", "말레이시아", "🇲🇾", "아시아"],
+  ["OM", "오만", "🇴🇲", "아시아"],
+  ["PH", "필리핀", "🇵🇭", "아시아"],
+  ["QA", "카타르", "🇶🇦", "아시아"],
+  ["SA", "사우디아라비아", "🇸🇦", "아시아"],
+  ["SG", "싱가포르", "🇸🇬", "아시아"],
+  ["TH", "태국", "🇹🇭", "아시아"],
+  ["TR", "튀르키예", "🇹🇷", "아시아"],
+  ["TW", "대만", "🇹🇼", "아시아"],
+  ["VN", "베트남", "🇻🇳", "아시아"],
+  ["CA", "캐나다", "🇨🇦", "북미"],
+  ["MX", "멕시코", "🇲🇽", "북미"],
+  ["US", "미국", "🇺🇸", "북미"],
+  ["AR", "아르헨티나", "🇦🇷", "남미"],
+  ["BR", "브라질", "🇧🇷", "남미"],
+  ["CL", "칠레", "🇨🇱", "남미"],
+  ["CO", "콜롬비아", "🇨🇴", "남미"],
+  ["PE", "페루", "🇵🇪", "남미"],
+  ["AT", "오스트리아", "🇦🇹", "유럽"],
+  ["BE", "벨기에", "🇧🇪", "유럽"],
+  ["BG", "불가리아", "🇧🇬", "유럽"],
+  ["CH", "스위스", "🇨🇭", "유럽"],
+  ["CY", "키프로스", "🇨🇾", "유럽"],
+  ["CZ", "체코", "🇨🇿", "유럽"],
+  ["DE", "독일", "🇩🇪", "유럽"],
+  ["DK", "덴마크", "🇩🇰", "유럽"],
+  ["EE", "에스토니아", "🇪🇪", "유럽"],
+  ["EMU", "유로존", "🇪🇺", "유럽"],
+  ["ES", "스페인", "🇪🇸", "유럽"],
+  ["EU", "유럽연합", "🇪🇺", "유럽"],
+  ["FI", "핀란드", "🇫🇮", "유럽"],
+  ["FR", "프랑스", "🇫🇷", "유럽"],
+  ["GB", "영국", "🇬🇧", "유럽"],
+  ["GR", "그리스", "🇬🇷", "유럽"],
+  ["HR", "크로아티아", "🇭🇷", "유럽"],
+  ["HU", "헝가리", "🇭🇺", "유럽"],
+  ["IE", "아일랜드", "🇮🇪", "유럽"],
+  ["IS", "아이슬란드", "🇮🇸", "유럽"],
+  ["IT", "이탈리아", "🇮🇹", "유럽"],
+  ["LT", "리투아니아", "🇱🇹", "유럽"],
+  ["LU", "룩셈부르크", "🇱🇺", "유럽"],
+  ["LV", "라트비아", "🇱🇻", "유럽"],
+  ["MT", "몰타", "🇲🇹", "유럽"],
+  ["NL", "네덜란드", "🇳🇱", "유럽"],
+  ["NO", "노르웨이", "🇳🇴", "유럽"],
+  ["PL", "폴란드", "🇵🇱", "유럽"],
+  ["PT", "포르투갈", "🇵🇹", "유럽"],
+  ["RO", "루마니아", "🇷🇴", "유럽"],
+  ["RU", "러시아", "🇷🇺", "유럽"],
+  ["SE", "스웨덴", "🇸🇪", "유럽"],
+  ["SI", "슬로베니아", "🇸🇮", "유럽"],
+  ["SK", "슬로바키아", "🇸🇰", "유럽"],
+  ["UA", "우크라이나", "🇺🇦", "유럽"],
+  ["AU", "호주", "🇦🇺", "오세아니아"],
+  ["NZ", "뉴질랜드", "🇳🇿", "오세아니아"],
+  ["EG", "이집트", "🇪🇬", "아프리카"],
+  ["GH", "가나", "🇬🇭", "아프리카"],
+  ["KE", "케냐", "🇰🇪", "아프리카"],
+  ["MW", "말라위", "🇲🇼", "아프리카"],
+  ["MZ", "모잠비크", "🇲🇿", "아프리카"],
+  ["NG", "나이지리아", "🇳🇬", "아프리카"],
+  ["TZ", "탄자니아", "🇹🇿", "아프리카"],
+  ["UG", "우간다", "🇺🇬", "아프리카"],
+  ["ZA", "남아프리카공화국", "🇿🇦", "아프리카"],
+  ["ZM", "잠비아", "🇿🇲", "아프리카"],
+].map(([code, country, flag, continent]) => ({ code, country, flag, continent }));
+
+const economicCountryFallbackByCode = new Map(
+  economicCountryFallbacks.map((country) => [country.code, country])
+);
 
 function startOfLocalDay(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -257,6 +348,87 @@ function economicImpactLabel(value) {
 function economicDisplayValue(value) {
   const text = String(value ?? "").trim();
   return text || "-";
+}
+
+function normalizeEconomicCountryCode(value) {
+  const code = String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+  return economicCountryCodeAliases[code] || code;
+}
+
+function flagForEconomicCountryCode(code) {
+  if (!/^[A-Z]{2}$/.test(code)) return "•";
+  return String.fromCodePoint(...[...code].map((character) => 0x1f1e6 + character.charCodeAt(0) - 65));
+}
+
+function normalizeSelectedCountryCodes(codes) {
+  const normalized = Array.isArray(codes)
+    ? codes.map(normalizeEconomicCountryCode).filter(Boolean)
+    : [];
+  return [...new Set(normalized)].sort((left, right) => left.localeCompare(right));
+}
+
+function economicCountryOptionFromCode(code) {
+  const safeCode = normalizeEconomicCountryCode(code);
+  const fallback = economicCountryFallbackByCode.get(safeCode);
+  return fallback || {
+    code: safeCode,
+    country: safeCode || "기타",
+    flag: safeCode ? flagForEconomicCountryCode(safeCode) : "•",
+    continent: "기타",
+  };
+}
+
+function compareEconomicCountries(left, right) {
+  return (
+    String(left.country || "").localeCompare(String(right.country || ""), "ko-KR") ||
+    String(left.code || "").localeCompare(String(right.code || ""))
+  );
+}
+
+function buildEconomicCountryOptions(events, selectedCountryCodes) {
+  const options = new Map(economicCountryFallbacks.map((country) => [country.code, country]));
+
+  for (const event of events) {
+    const code = normalizeEconomicCountryCode(event?.countryCode || event?.sourceRegion);
+    if (!code) continue;
+    const fallback = economicCountryOptionFromCode(code);
+    options.set(code, {
+      ...fallback,
+      country: event.country || fallback.country,
+      flag: event.flag || fallback.flag,
+    });
+  }
+
+  for (const code of selectedCountryCodes) {
+    if (!options.has(code)) options.set(code, economicCountryOptionFromCode(code));
+  }
+
+  return [...options.values()].sort(compareEconomicCountries);
+}
+
+function groupEconomicCountryOptions(countryOptions, query) {
+  const normalizedQuery = String(query || "").trim().toLocaleLowerCase("ko-KR");
+  const matches = countryOptions.filter((option) => {
+    if (!normalizedQuery) return true;
+    return (
+      String(option.country || "").toLocaleLowerCase("ko-KR").includes(normalizedQuery) ||
+      String(option.code || "").toLocaleLowerCase("ko-KR").includes(normalizedQuery)
+    );
+  });
+  return economicCountryGroupOrder
+    .map((continent) => ({
+      continent,
+      countries: matches
+        .filter((option) => option.continent === continent)
+        .sort(compareEconomicCountries),
+    }))
+    .filter((group) => group.countries.length > 0);
+}
+
+function filterEconomicEventsByCountry(events, selectedCountryCodes) {
+  if (!selectedCountryCodes.length) return events;
+  const selected = new Set(selectedCountryCodes);
+  return events.filter((event) => selected.has(normalizeEconomicCountryCode(event?.countryCode || event?.sourceRegion)));
 }
 
 function EconomicImpactBars({ level }) {
@@ -796,6 +968,87 @@ export function EarningCalendarView({
   );
 }
 
+function EconomicCountryFilterModal({
+  countryGroups,
+  countryOptions,
+  query,
+  selectedCountryCodes,
+  onQueryChange,
+  onToggleCountry,
+  onSelectAll,
+  onClearAll,
+  onClose,
+}) {
+  const selectedCountrySet = useMemo(() => new Set(selectedCountryCodes), [selectedCountryCodes]);
+
+  return (
+    <div
+      className="economic-country-filter-panel"
+      role="dialog"
+      aria-label="국가 필터"
+    >
+      <div className="economic-country-filter-top">
+        <div className="economic-country-filter-search-row">
+          <form
+            className="economic-country-filter-search-form"
+            onSubmit={(event) => event.preventDefault()}
+          >
+            <input
+              type="search"
+              value={query}
+              placeholder="국가명 검색"
+              aria-label="국가명 검색"
+              onChange={(event) => onQueryChange(event.target.value)}
+            />
+          </form>
+          <button
+            className="economic-country-filter-close"
+            type="button"
+            aria-label="국가 필터 닫기"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="economic-country-filter-links">
+          <button type="button" onClick={onSelectAll} disabled={!countryOptions.length}>
+            전부 선택
+          </button>
+          <button type="button" onClick={onClearAll}>
+            전부 선택 해제
+          </button>
+        </div>
+      </div>
+
+      <div className="economic-country-filter-list">
+        {countryGroups.length ? (
+          countryGroups.map((group) => (
+            <section className="economic-country-filter-group" key={group.continent}>
+              <h3>{group.continent}</h3>
+              <div className="economic-country-filter-options">
+                {group.countries.map((country) => (
+                  <label className="economic-country-filter-option" key={country.code}>
+                    <input
+                      type="checkbox"
+                      checked={selectedCountrySet.has(country.code)}
+                      onChange={(event) => onToggleCountry(country.code, event.target.checked)}
+                    />
+                    <span className="economic-country-filter-flag" aria-hidden="true">{country.flag || "•"}</span>
+                    <span>{country.country}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          ))
+        ) : (
+          <div className="economic-country-filter-empty">검색 결과 없음</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function EconomicCalendarView({ onContextChange }) {
   const [weekStart, setWeekStart] = useState(() => startOfCalendarWeek(new Date()));
   const [selectedDateKey, setSelectedDateKey] = useState(() => calendarDateKey(new Date()));
@@ -803,11 +1056,30 @@ export function EconomicCalendarView({ onContextChange }) {
   const [meta, setMeta] = useState(null);
   const [loadState, setLoadState] = useState({ status: "loading", error: "" });
   const [refreshSequence, setRefreshSequence] = useState(0);
+  const [countryFilterOpen, setCountryFilterOpen] = useState(false);
+  const [countryFilterQuery, setCountryFilterQuery] = useState("");
+  const [selectedCountryCodes, setSelectedCountryCodes] = useState([]);
+  const [countrySettingsError, setCountrySettingsError] = useState("");
+  const countryFilterRef = useRef(null);
+  const lastSavedCountryFilterKeyRef = useRef("");
   const weekDates = useMemo(
     () => calendarWeekdays.map((_weekday, index) => addCalendarDays(weekStart, index)),
     [weekStart]
   );
-  const eventsByDate = useMemo(() => groupEconomicEventsByDate(events), [events]);
+  const countryFilterActive = selectedCountryCodes.length > 0;
+  const filteredEvents = useMemo(
+    () => filterEconomicEventsByCountry(events, selectedCountryCodes),
+    [events, selectedCountryCodes]
+  );
+  const countryOptions = useMemo(
+    () => buildEconomicCountryOptions(events, selectedCountryCodes),
+    [events, selectedCountryCodes]
+  );
+  const countryGroups = useMemo(
+    () => groupEconomicCountryOptions(countryOptions, countryFilterQuery),
+    [countryFilterQuery, countryOptions]
+  );
+  const eventsByDate = useMemo(() => groupEconomicEventsByDate(filteredEvents), [filteredEvents]);
   const selectedEvents = useMemo(
     () => eventsByDate.get(selectedDateKey) || [],
     [eventsByDate, selectedDateKey]
@@ -818,18 +1090,66 @@ export function EconomicCalendarView({ onContextChange }) {
         weekStart,
         weekDates,
         selectedDateKey,
-        events,
+        events: filteredEvents,
         eventsByDate,
         selectedEvents,
         meta,
         loadState,
       }),
-    [weekStart, weekDates, selectedDateKey, events, eventsByDate, selectedEvents, meta, loadState]
+    [weekStart, weekDates, selectedDateKey, filteredEvents, eventsByDate, selectedEvents, meta, loadState]
   );
 
   useEffect(() => {
     onContextChange?.(contextSnapshot);
   }, [contextSnapshot, onContextChange]);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/economic-calendar/settings", { cache: "no-store" })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || "Economic Calendar 설정을 불러오지 못했습니다.");
+        }
+        return payload;
+      })
+      .then((payload) => {
+        if (!active) return;
+        const nextCodes = normalizeSelectedCountryCodes(payload.settings?.countryFilter?.selectedCountryCodes);
+        setSelectedCountryCodes(nextCodes);
+        lastSavedCountryFilterKeyRef.current = nextCodes.join("|");
+        setCountrySettingsError("");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setCountrySettingsError(error.message || "Economic Calendar 설정을 불러오지 못했습니다.");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!countryFilterOpen) return undefined;
+
+    function handlePointerDown(event) {
+      if (countryFilterRef.current && !countryFilterRef.current.contains(event.target)) {
+        setCountryFilterOpen(false);
+      }
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") setCountryFilterOpen(false);
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [countryFilterOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -889,7 +1209,64 @@ export function EconomicCalendarView({ onContextChange }) {
     setRefreshSequence((current) => current + 1);
   }
 
+  function saveEconomicCountryFilterSelection(nextCodes) {
+    const selectedCountryCodes = normalizeSelectedCountryCodes(nextCodes);
+    fetch("/api/economic-calendar/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({
+        countryFilter: {
+          selectedCountryCodes,
+        },
+      }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || "Economic Calendar 설정을 저장하지 못했습니다.");
+        }
+        return payload;
+      })
+      .then((payload) => {
+        const savedCodes = normalizeSelectedCountryCodes(payload.settings?.countryFilter?.selectedCountryCodes);
+        lastSavedCountryFilterKeyRef.current = savedCodes.join("|");
+        if (savedCodes.join("|") !== selectedCountryCodes.join("|")) {
+          setSelectedCountryCodes(savedCodes);
+        }
+        setCountrySettingsError("");
+      })
+      .catch((error) => {
+        setCountrySettingsError(error.message || "Economic Calendar 설정을 저장하지 못했습니다.");
+      });
+  }
+
+  function toggleEconomicCountryFilter(code, checked) {
+    const safeCode = normalizeEconomicCountryCode(code);
+    if (!safeCode) return;
+    const nextCodes = checked
+      ? normalizeSelectedCountryCodes([...selectedCountryCodes, safeCode])
+      : normalizeSelectedCountryCodes(selectedCountryCodes.filter((item) => item !== safeCode));
+    setSelectedCountryCodes(nextCodes);
+    saveEconomicCountryFilterSelection(nextCodes);
+  }
+
+  function selectAllEconomicCountries() {
+    const nextCodes = normalizeSelectedCountryCodes(countryOptions.map((country) => country.code));
+    setSelectedCountryCodes(nextCodes);
+    saveEconomicCountryFilterSelection(nextCodes);
+  }
+
+  function clearAllEconomicCountries() {
+    saveEconomicCountryFilterSelection([]);
+    setSelectedCountryCodes([]);
+  }
+
   const isLoadingEconomicCalendar = loadState.status === "loading";
+  const selectedDateEventsBeforeFilter = (groupEconomicEventsByDate(events).get(selectedDateKey) || []).length;
+  const filterButtonTitle = countryFilterActive
+    ? `국가 필터 ${selectedCountryCodes.length}개 선택됨`
+    : "국가 필터";
 
   const statusClass = [
     "economic-calendar-data-status",
@@ -981,9 +1358,41 @@ export function EconomicCalendarView({ onContextChange }) {
               <h2 id="economic-event-list-title">{formatKoreanDateTitle(selectedDateKey)}</h2>
               <p>
                 {selectedEvents.length
-                  ? `${selectedEvents.length}개 이벤트 · ${economicImpactLabel(Math.max(...selectedEvents.map((event) => Number(event.importance || 1))))} 중요도 포함`
-                  : "선택한 날짜에는 등록된 경제 이벤트가 없습니다."}
+                  ? [
+                      `${selectedEvents.length}개 이벤트`,
+                      `${economicImpactLabel(Math.max(...selectedEvents.map((event) => Number(event.importance || 1))))} 중요도 포함`,
+                      countryFilterActive ? `국가 ${selectedCountryCodes.length}개 선택` : "",
+                    ].filter(Boolean).join(" · ")
+                  : countryFilterActive && selectedDateEventsBeforeFilter
+                    ? "선택한 국가의 경제 이벤트가 없습니다."
+                    : "선택한 날짜에는 등록된 경제 이벤트가 없습니다."}
               </p>
+            </div>
+            <div className="economic-country-filter-anchor" ref={countryFilterRef}>
+              <button
+                className={countryFilterActive ? "economic-country-filter-button is-active" : "economic-country-filter-button"}
+                type="button"
+                aria-label={filterButtonTitle}
+                title={countrySettingsError ? `${filterButtonTitle} · ${countrySettingsError}` : filterButtonTitle}
+                aria-expanded={countryFilterOpen}
+                onClick={() => setCountryFilterOpen((open) => !open)}
+              >
+                <Filter size={17} strokeWidth={2.2} />
+              </button>
+
+              {countryFilterOpen ? (
+                <EconomicCountryFilterModal
+                  countryGroups={countryGroups}
+                  countryOptions={countryOptions}
+                  query={countryFilterQuery}
+                  selectedCountryCodes={selectedCountryCodes}
+                  onQueryChange={setCountryFilterQuery}
+                  onToggleCountry={toggleEconomicCountryFilter}
+                  onSelectAll={selectAllEconomicCountries}
+                  onClearAll={clearAllEconomicCountries}
+                  onClose={() => setCountryFilterOpen(false)}
+                />
+              ) : null}
             </div>
           </header>
 
@@ -1038,6 +1447,8 @@ export function EconomicCalendarView({ onContextChange }) {
             <div className="economic-detail-empty is-error">{loadState.error}</div>
           ) : loadState.status === "loading" ? (
             <div className="economic-detail-empty">경제지표 캐시를 불러오는 중입니다.</div>
+          ) : countryFilterActive && selectedDateEventsBeforeFilter ? (
+            <div className="economic-detail-empty">선택한 국가의 경제 이벤트가 없습니다.</div>
           ) : (
             <div className="economic-detail-empty">선택한 날짜에는 경제 이벤트가 없습니다.</div>
           )}

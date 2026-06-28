@@ -33,6 +33,7 @@ Thumbs.db
 # Generated local feed/calendar caches
 /data/news-feed.json
 /data/*-cache.json
+/data/*-settings.json
 
 # Python runtime artifacts
 __pycache__/

@@ -132,6 +132,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/economic-calendar/settings")) {
+    await handleEconomicCalendarEndpoint("settings", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/portfolio/canvases")) {
     await handlePortfolioEndpoint("canvases", req, res);
     return;

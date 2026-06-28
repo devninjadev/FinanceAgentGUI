@@ -91,6 +91,10 @@ export function codexApiPlugin() {
         await handleEconomicCalendarEndpoint("events", req, res);
       });
 
+      server.middlewares.use("/api/economic-calendar/settings", async (req, res) => {
+        await handleEconomicCalendarEndpoint("settings", req, res);
+      });
+
       server.middlewares.use("/api/portfolio/canvases", async (req, res) => {
         await handlePortfolioEndpoint("canvases", req, res);
       });

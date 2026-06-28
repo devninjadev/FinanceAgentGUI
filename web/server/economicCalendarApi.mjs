@@ -2,12 +2,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sendJson } from "./codexProbe.mjs";
+import { readJsonBody, sendJson } from "./codexProbe.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
 const DATA_DIR = join(GUIBUILD_ROOT, "data");
 const ECONOMIC_STORE_PATH = join(DATA_DIR, "economic-calendar-cache.json");
+const ECONOMIC_SETTINGS_PATH = join(DATA_DIR, "economic-calendar-settings.json");
 const DEFAULT_DAYS = 6;
 const DEFAULT_LIMIT = 100;
 const MAX_DAYS = 45;
@@ -25,11 +26,204 @@ const PYTHON_UTF8_ENV = {
 
 const cache = new Map();
 
+const fallbackEconomicCalendarSettings = {
+  version: 1,
+  updatedAt: "",
+  countryFilter: {
+    selectedCountryCodes: [],
+  },
+};
+
+const ECONOMIC_COUNTRY_CODE_ALIASES = Object.freeze({
+  EA: "EMU",
+  EZ: "EMU",
+  UK: "GB",
+});
+
+const ECONOMIC_COUNTRY_LABELS = Object.freeze({
+  AE: ["아랍에미리트", "🇦🇪"],
+  AR: ["아르헨티나", "🇦🇷"],
+  AT: ["오스트리아", "🇦🇹"],
+  AU: ["호주", "🇦🇺"],
+  BE: ["벨기에", "🇧🇪"],
+  BG: ["불가리아", "🇧🇬"],
+  BH: ["바레인", "🇧🇭"],
+  BR: ["브라질", "🇧🇷"],
+  CA: ["캐나다", "🇨🇦"],
+  CH: ["스위스", "🇨🇭"],
+  CL: ["칠레", "🇨🇱"],
+  CN: ["중국 본토", "🇨🇳"],
+  CO: ["콜롬비아", "🇨🇴"],
+  CY: ["키프로스", "🇨🇾"],
+  CZ: ["체코", "🇨🇿"],
+  DE: ["독일", "🇩🇪"],
+  DK: ["덴마크", "🇩🇰"],
+  EA: ["유로존", "🇪🇺"],
+  EE: ["에스토니아", "🇪🇪"],
+  EG: ["이집트", "🇪🇬"],
+  EMU: ["유로존", "🇪🇺"],
+  ES: ["스페인", "🇪🇸"],
+  EU: ["유럽연합", "🇪🇺"],
+  EZ: ["유로존", "🇪🇺"],
+  FI: ["핀란드", "🇫🇮"],
+  FR: ["프랑스", "🇫🇷"],
+  GB: ["영국", "🇬🇧"],
+  GH: ["가나", "🇬🇭"],
+  GR: ["그리스", "🇬🇷"],
+  HK: ["홍콩", "🇭🇰"],
+  HR: ["크로아티아", "🇭🇷"],
+  HU: ["헝가리", "🇭🇺"],
+  ID: ["인도네시아", "🇮🇩"],
+  IE: ["아일랜드", "🇮🇪"],
+  IL: ["이스라엘", "🇮🇱"],
+  IN: ["인도", "🇮🇳"],
+  IS: ["아이슬란드", "🇮🇸"],
+  IT: ["이탈리아", "🇮🇹"],
+  JP: ["일본", "🇯🇵"],
+  KE: ["케냐", "🇰🇪"],
+  KR: ["대한민국", "🇰🇷"],
+  KW: ["쿠웨이트", "🇰🇼"],
+  LT: ["리투아니아", "🇱🇹"],
+  LU: ["룩셈부르크", "🇱🇺"],
+  LV: ["라트비아", "🇱🇻"],
+  MT: ["몰타", "🇲🇹"],
+  MX: ["멕시코", "🇲🇽"],
+  MW: ["말라위", "🇲🇼"],
+  MY: ["말레이시아", "🇲🇾"],
+  MZ: ["모잠비크", "🇲🇿"],
+  NG: ["나이지리아", "🇳🇬"],
+  NL: ["네덜란드", "🇳🇱"],
+  NO: ["노르웨이", "🇳🇴"],
+  NZ: ["뉴질랜드", "🇳🇿"],
+  OM: ["오만", "🇴🇲"],
+  PE: ["페루", "🇵🇪"],
+  PH: ["필리핀", "🇵🇭"],
+  PL: ["폴란드", "🇵🇱"],
+  PT: ["포르투갈", "🇵🇹"],
+  QA: ["카타르", "🇶🇦"],
+  RO: ["루마니아", "🇷🇴"],
+  RU: ["러시아", "🇷🇺"],
+  SA: ["사우디아라비아", "🇸🇦"],
+  SE: ["스웨덴", "🇸🇪"],
+  SG: ["싱가포르", "🇸🇬"],
+  SI: ["슬로베니아", "🇸🇮"],
+  SK: ["슬로바키아", "🇸🇰"],
+  TH: ["태국", "🇹🇭"],
+  TR: ["튀르키예", "🇹🇷"],
+  TZ: ["탄자니아", "🇹🇿"],
+  TW: ["대만", "🇹🇼"],
+  UG: ["우간다", "🇺🇬"],
+  UA: ["우크라이나", "🇺🇦"],
+  UK: ["영국", "🇬🇧"],
+  US: ["미국", "🇺🇸"],
+  VN: ["베트남", "🇻🇳"],
+  ZA: ["남아프리카공화국", "🇿🇦"],
+  ZM: ["잠비아", "🇿🇲"],
+});
+
 function clampNumber(value, fallback, min, max) {
   if (value === null || value === undefined || value === "") return fallback;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(numeric)));
+}
+
+function normalizeEconomicCountryCode(value) {
+  const code = String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+  return ECONOMIC_COUNTRY_CODE_ALIASES[code] || code;
+}
+
+function normalizeSelectedCountryCodes(value) {
+  const rawCodes = Array.isArray(value) ? value : [];
+  return [...new Set(rawCodes.map(normalizeEconomicCountryCode).filter(Boolean))]
+    .slice(0, 250)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeEconomicCalendarSettings(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const countryFilter = source.countryFilter && typeof source.countryFilter === "object"
+    ? source.countryFilter
+    : {};
+  return {
+    version: 1,
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : "",
+    countryFilter: {
+      selectedCountryCodes: normalizeSelectedCountryCodes(countryFilter.selectedCountryCodes),
+    },
+  };
+}
+
+function readEconomicCalendarSettings() {
+  if (!existsSync(ECONOMIC_SETTINGS_PATH)) return normalizeEconomicCalendarSettings(fallbackEconomicCalendarSettings);
+
+  try {
+    return normalizeEconomicCalendarSettings({
+      ...fallbackEconomicCalendarSettings,
+      ...JSON.parse(readFileSync(ECONOMIC_SETTINGS_PATH, "utf8")),
+    });
+  } catch {
+    return normalizeEconomicCalendarSettings(fallbackEconomicCalendarSettings);
+  }
+}
+
+function writeEconomicCalendarSettingsPatch(patch = {}) {
+  const source = patch && typeof patch === "object" ? patch : {};
+  const rawCountryFilter = source.countryFilter && typeof source.countryFilter === "object"
+    ? source.countryFilter
+    : source;
+  const nextSettings = normalizeEconomicCalendarSettings({
+    ...readEconomicCalendarSettings(),
+    updatedAt: new Date().toISOString(),
+    countryFilter: {
+      selectedCountryCodes: normalizeSelectedCountryCodes(rawCountryFilter.selectedCountryCodes),
+    },
+  });
+
+  mkdirSync(DATA_DIR, { recursive: true });
+  const tmpPath = `${ECONOMIC_SETTINGS_PATH}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(nextSettings, null, 2)}\n`);
+  renameSync(tmpPath, ECONOMIC_SETTINGS_PATH);
+  return nextSettings;
+}
+
+function publicEconomicCalendarSettingsSnapshot() {
+  const settings = readEconomicCalendarSettings();
+  return {
+    ok: true,
+    configPath: "data/economic-calendar-settings.json",
+    settings,
+  };
+}
+
+function flagForIsoAlpha2(code) {
+  if (!/^[A-Z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(...[...code].map((character) => 0x1f1e6 + character.charCodeAt(0) - 65));
+}
+
+export function economicCountryDisplayForRegion(value) {
+  const code = normalizeEconomicCountryCode(value);
+  if (!code) {
+    return { code: "", country: "기타", flag: "•" };
+  }
+
+  const [country, flag] = ECONOMIC_COUNTRY_LABELS[code] || [code, flagForIsoAlpha2(code) || "•"];
+  return { code, country, flag };
+}
+
+export function normalizeEconomicCalendarEventCountry(event = {}) {
+  const rawSourceCode = String(event.countryCode || event.sourceRegion || "").trim().toUpperCase().replace(/\s+/g, "");
+  const sourceCode = normalizeEconomicCountryCode(rawSourceCode);
+  if (!sourceCode) return event;
+
+  const display = economicCountryDisplayForRegion(sourceCode);
+  return {
+    ...event,
+    country: display.country,
+    countryCode: display.code,
+    flag: display.flag,
+    sourceRegion: event.sourceRegion || rawSourceCode || display.code,
+  };
 }
 
 function findPythonCommand() {
@@ -134,7 +328,7 @@ function readEconomicStore() {
       cachedFinalizedRanges: Array.isArray(parsed.cachedFinalizedRanges)
         ? parsed.cachedFinalizedRanges.filter((range) => parseDateKey(range?.startDate) && parseDateKey(range?.endDate))
         : [],
-      events: Array.isArray(parsed.events) ? parsed.events : [],
+      events: Array.isArray(parsed.events) ? parsed.events.map(normalizeEconomicCalendarEventCountry) : [],
     };
   } catch {
     return emptyEconomicStore();
@@ -144,7 +338,11 @@ function readEconomicStore() {
 function writeEconomicStore(store) {
   mkdirSync(DATA_DIR, { recursive: true });
   const tmpPath = `${ECONOMIC_STORE_PATH}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(store, null, 2)}\n`);
+  const normalizedStore = {
+    ...store,
+    events: Array.isArray(store.events) ? store.events.map(normalizeEconomicCalendarEventCountry) : [],
+  };
+  writeFileSync(tmpPath, `${JSON.stringify(normalizedStore, null, 2)}\n`);
   renameSync(tmpPath, ECONOMIC_STORE_PATH);
 }
 
@@ -198,13 +396,15 @@ function sortEconomicEvents(events) {
 function mergeEconomicEvents(existingEvents, fetchedEvents) {
   const merged = new Map();
 
-  for (const event of existingEvents) {
+  for (const rawEvent of existingEvents) {
+    const event = normalizeEconomicCalendarEventCountry(rawEvent);
     const key = eventCacheKey(event);
     if (!key.trim() || !eventDateKey(event)) continue;
     merged.set(key, event);
   }
 
-  for (const event of fetchedEvents) {
+  for (const rawEvent of fetchedEvents) {
+    const event = normalizeEconomicCalendarEventCountry(rawEvent);
     const key = eventCacheKey(event);
     if (!key.trim() || !eventDateKey(event)) continue;
     merged.set(key, event);
@@ -254,7 +454,7 @@ function cachedFinalizedRangeCovers(ranges, startDate, endDate) {
 
 function filterEconomicEvents(events, startDate, endDate) {
   return sortEconomicEvents(
-    events.filter((event) => {
+    events.map(normalizeEconomicCalendarEventCountry).filter((event) => {
       const dateKey = eventDateKey(event);
       return dateKey && dateKey >= startDate && dateKey < endDate;
     })
@@ -325,28 +525,91 @@ except Exception as exc:
 
 KST = ZoneInfo("Asia/Seoul")
 
+COUNTRY_CODE_ALIASES = {
+    "EA": "EMU",
+    "EZ": "EMU",
+    "UK": "GB",
+}
+
 COUNTRY_LABELS = {
+    "AE": ("아랍에미리트", "🇦🇪"),
+    "AR": ("아르헨티나", "🇦🇷"),
+    "AT": ("오스트리아", "🇦🇹"),
+    "AU": ("호주", "🇦🇺"),
+    "BE": ("벨기에", "🇧🇪"),
+    "BG": ("불가리아", "🇧🇬"),
+    "BH": ("바레인", "🇧🇭"),
+    "BR": ("브라질", "🇧🇷"),
     "US": ("미국", "🇺🇸"),
     "CA": ("캐나다", "🇨🇦"),
     "MX": ("멕시코", "🇲🇽"),
-    "BR": ("브라질", "🇧🇷"),
-    "CN": ("중국 본토", "🇨🇳"),
-    "HK": ("홍콩", "🇭🇰"),
-    "JP": ("일본", "🇯🇵"),
-    "KR": ("대한민국", "🇰🇷"),
-    "IN": ("인도", "🇮🇳"),
-    "AU": ("호주", "🇦🇺"),
-    "NZ": ("뉴질랜드", "🇳🇿"),
-    "GB": ("영국", "🇬🇧"),
-    "UK": ("영국", "🇬🇧"),
-    "EU": ("유럽연합", "🇪🇺"),
-    "EMU": ("유로존", "🇪🇺"),
-    "EZ": ("유로존", "🇪🇺"),
-    "DE": ("독일", "🇩🇪"),
-    "FR": ("프랑스", "🇫🇷"),
-    "IT": ("이탈리아", "🇮🇹"),
-    "ES": ("스페인", "🇪🇸"),
     "CH": ("스위스", "🇨🇭"),
+    "CL": ("칠레", "🇨🇱"),
+    "CN": ("중국 본토", "🇨🇳"),
+    "CO": ("콜롬비아", "🇨🇴"),
+    "CY": ("키프로스", "🇨🇾"),
+    "CZ": ("체코", "🇨🇿"),
+    "DE": ("독일", "🇩🇪"),
+    "DK": ("덴마크", "🇩🇰"),
+    "EA": ("유로존", "🇪🇺"),
+    "EE": ("에스토니아", "🇪🇪"),
+    "EG": ("이집트", "🇪🇬"),
+    "EMU": ("유로존", "🇪🇺"),
+    "ES": ("스페인", "🇪🇸"),
+    "EU": ("유럽연합", "🇪🇺"),
+    "EZ": ("유로존", "🇪🇺"),
+    "FI": ("핀란드", "🇫🇮"),
+    "FR": ("프랑스", "🇫🇷"),
+    "GB": ("영국", "🇬🇧"),
+    "GH": ("가나", "🇬🇭"),
+    "GR": ("그리스", "🇬🇷"),
+    "HK": ("홍콩", "🇭🇰"),
+    "HR": ("크로아티아", "🇭🇷"),
+    "HU": ("헝가리", "🇭🇺"),
+    "ID": ("인도네시아", "🇮🇩"),
+    "IE": ("아일랜드", "🇮🇪"),
+    "IL": ("이스라엘", "🇮🇱"),
+    "IN": ("인도", "🇮🇳"),
+    "IS": ("아이슬란드", "🇮🇸"),
+    "IT": ("이탈리아", "🇮🇹"),
+    "JP": ("일본", "🇯🇵"),
+    "KE": ("케냐", "🇰🇪"),
+    "KR": ("대한민국", "🇰🇷"),
+    "KW": ("쿠웨이트", "🇰🇼"),
+    "LT": ("리투아니아", "🇱🇹"),
+    "LU": ("룩셈부르크", "🇱🇺"),
+    "LV": ("라트비아", "🇱🇻"),
+    "MT": ("몰타", "🇲🇹"),
+    "MY": ("말레이시아", "🇲🇾"),
+    "MW": ("말라위", "🇲🇼"),
+    "MZ": ("모잠비크", "🇲🇿"),
+    "NG": ("나이지리아", "🇳🇬"),
+    "NL": ("네덜란드", "🇳🇱"),
+    "NO": ("노르웨이", "🇳🇴"),
+    "NZ": ("뉴질랜드", "🇳🇿"),
+    "OM": ("오만", "🇴🇲"),
+    "PE": ("페루", "🇵🇪"),
+    "PH": ("필리핀", "🇵🇭"),
+    "PL": ("폴란드", "🇵🇱"),
+    "PT": ("포르투갈", "🇵🇹"),
+    "QA": ("카타르", "🇶🇦"),
+    "RO": ("루마니아", "🇷🇴"),
+    "RU": ("러시아", "🇷🇺"),
+    "SA": ("사우디아라비아", "🇸🇦"),
+    "SE": ("스웨덴", "🇸🇪"),
+    "SG": ("싱가포르", "🇸🇬"),
+    "SI": ("슬로베니아", "🇸🇮"),
+    "SK": ("슬로바키아", "🇸🇰"),
+    "TH": ("태국", "🇹🇭"),
+    "TR": ("튀르키예", "🇹🇷"),
+    "TZ": ("탄자니아", "🇹🇿"),
+    "TW": ("대만", "🇹🇼"),
+    "UG": ("우간다", "🇺🇬"),
+    "UA": ("우크라이나", "🇺🇦"),
+    "UK": ("영국", "🇬🇧"),
+    "VN": ("베트남", "🇻🇳"),
+    "ZA": ("남아프리카공화국", "🇿🇦"),
+    "ZM": ("잠비아", "🇿🇲"),
 }
 
 HIGH_IMPORTANCE_KEYWORDS = (
@@ -378,11 +641,17 @@ def clean_region(value):
     text = clean_text(value)
     if text == "-":
         return ""
-    return text.upper().replace(" ", "")
+    code = text.upper().replace(" ", "")
+    return COUNTRY_CODE_ALIASES.get(code, code)
+
+def flag_for_iso_alpha2(code):
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + ord(character) - ord("A")) for character in code)
 
 def country_for_region(region):
     code = clean_region(region)
-    label, flag = COUNTRY_LABELS.get(code, (code or "기타", "•"))
+    label, flag = COUNTRY_LABELS.get(code, (code or "기타", flag_for_iso_alpha2(code) or "•"))
     return code, label, flag
 
 def format_value(value):
@@ -615,6 +884,28 @@ function runYfinanceEconomicCalendar({ startDate, endDate, limit, force }) {
 }
 
 export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
+  if (endpoint === "settings") {
+    try {
+      if (req.method === "GET") {
+        sendJson(res, publicEconomicCalendarSettingsSnapshot());
+        return;
+      }
+
+      if (req.method === "PUT" || req.method === "PATCH" || req.method === "POST") {
+        const body = await readJsonBody(req, 64 * 1024);
+        writeEconomicCalendarSettingsPatch(body);
+        sendJson(res, publicEconomicCalendarSettingsSnapshot());
+        return;
+      }
+
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
+      return;
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "economic calendar settings failed" }, 400);
+      return;
+    }
+  }
+
   if (endpoint !== "events") {
     sendJson(res, { ok: false, error: "unknown economic calendar endpoint" }, 404);
     return;
