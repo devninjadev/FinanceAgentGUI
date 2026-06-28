@@ -13,6 +13,12 @@ import Star from "lucide-react/dist/esm/icons/star.js";
 import User from "lucide-react/dist/esm/icons/user.js";
 import { formatCount } from "../utils/formatters.js";
 
+function displayBoardAuthor(author) {
+  return String(author || "")
+    .replace(/#\d+\b/g, "")
+    .trim();
+}
+
 function BoardCategoryRail({ categories, activeCategory, onSelect }) {
   const safeCategories = categories?.length ? categories : [{ name: "", label: "전체" }];
   return (
@@ -34,9 +40,10 @@ function BoardCategoryRail({ categories, activeCategory, onSelect }) {
 }
 
 function AuthorName({ row }) {
+  const author = displayBoardAuthor(row.author);
   return (
-    <span className="board-author" title={row.author || ""}>
-      <span>{row.author || "-"}</span>
+    <span className="board-author" title={author}>
+      <span>{author || "-"}</span>
       {row.authorFixed || row.authorManager ? <CheckCircle2 size={14} strokeWidth={2.2} /> : null}
       {row.accountUser && !row.authorFixed && !row.authorManager ? <User size={14} strokeWidth={2.2} /> : null}
     </span>
