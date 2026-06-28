@@ -175,6 +175,7 @@ The following are local runtime data and should not be committed:
 - `data/shared-memory/*` except `.gitkeep`
 - `data/world-memory/*` except `.gitkeep`
 - `data/news-feed.json`
+- `data/news-feed-read-state.json`
 - `data/*-cache.json`
 - `logs/*`
 

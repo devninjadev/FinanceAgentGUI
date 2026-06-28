@@ -186,8 +186,37 @@ button {
   font-weight: 650;
 }
 
-.nav-item-text {
+.nav-item-label {
   flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-item-label .nav-item-text {
+  flex: 0 1 auto;
+}
+
+.nav-item > .nav-item-text {
+  flex: 1 1 auto;
+}
+
+.nav-unread-count {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid #c7c7c7;
+  border-radius: 5px;
+  background: #d7d7d7;
+  color: #2d2d2d;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .nav-status-dot {
@@ -7717,7 +7746,9 @@ button {
 }
 
 .economic-event-name {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
   max-width: 100%;
   color: #282828;
@@ -7731,6 +7762,23 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.economic-event-original,
+.economic-event-translation-status {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #888888;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.economic-event-translation-status.is-failed {
+  color: #b35050;
 }
 
 .economic-detail-empty {

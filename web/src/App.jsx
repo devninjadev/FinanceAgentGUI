@@ -688,6 +688,7 @@ function App() {
   const portfolioCanvasStoreRef = useRef(portfolioCanvasStore);
   const portfolioCanvasFileReadyRef = useRef(false);
   const newsFeedItemsCountRef = useRef(0);
+  const newsFeedLatestTranslatedAtRef = useRef("");
   const activeModelGroups = agentProvider === "antigravity-sdk" ? antigravityCatalogGroups : modelGroups;
   const activeApprovalOptions = agentProvider === "antigravity-sdk" ? antigravityPolicyOptions : approvalOptions;
   const worldMemoryEnabled = Boolean(worldMemorySettings?.enabled);
@@ -1131,6 +1132,7 @@ function App() {
       setNewsFeedStatus((current) => ({
         ...(current || {}),
         itemCount: payload.itemCount,
+        readState: payload.readState || current?.readState,
         offset: payload.offset,
         limit: payload.limit,
         hasMore: payload.hasMore,
@@ -1648,6 +1650,23 @@ function App() {
     }
   }
 
+  async function markNewsFeedOpened() {
+    try {
+      const response = await fetch("/api/news-feed/read-state", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setNewsFeedStatus(payload);
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
   async function toggleNewsFeedSource(feedId, enabled) {
     setNewsFeedSettingsSavingId(feedId);
     setNewsFeedSettingsError("");
@@ -1995,6 +2014,10 @@ function App() {
   }, [newsFeedItems.length]);
 
   useEffect(() => {
+    newsFeedLatestTranslatedAtRef.current = newsFeedStatus?.readState?.latestTranslatedAt || "";
+  }, [newsFeedStatus?.readState?.latestTranslatedAt]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function pollNewsFeedStatus() {
@@ -2005,11 +2028,13 @@ function App() {
           throw new Error(payload.error || `HTTP ${response.status}`);
         }
         if (cancelled) return;
+        const latestTranslatedAt = payload.readState?.latestTranslatedAt || "";
         setNewsFeedStatus(payload);
 
         if (
           activeViewRef.current === "news-feed" &&
-          Number(payload.itemCount || 0) !== newsFeedItemsCountRef.current
+          (Number(payload.itemCount || 0) !== newsFeedItemsCountRef.current ||
+            latestTranslatedAt !== newsFeedLatestTranslatedAtRef.current)
         ) {
           const itemsResponse = await fetch(`/api/news-feed/items?limit=${NEWS_FEED_PAGE_SIZE}&offset=0`, {
             cache: "no-store",
@@ -2019,6 +2044,7 @@ function App() {
             setNewsFeedStatus((current) => ({
               ...(current || {}),
               itemCount: itemsPayload.itemCount,
+              readState: itemsPayload.readState || current?.readState,
               offset: itemsPayload.offset,
               limit: itemsPayload.limit,
               hasMore: itemsPayload.hasMore,
@@ -2090,8 +2116,21 @@ function App() {
 
   useEffect(() => {
     if (activeView !== "news-feed") return;
-    void refreshNewsFeedStatus();
-    void loadNewsFeedItems({ reset: true });
+    let cancelled = false;
+
+    async function openNewsFeed() {
+      await markNewsFeedOpened();
+      if (cancelled) return;
+      await loadNewsFeedItems({ reset: true });
+      if (!cancelled) {
+        void refreshNewsFeedStatus();
+      }
+    }
+
+    void openNewsFeed();
+    return () => {
+      cancelled = true;
+    };
   }, [activeView]);
 
   useEffect(() => {

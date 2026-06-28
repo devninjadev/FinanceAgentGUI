@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyEconomicEventNameTranslations,
   economicCountryDisplayForRegion,
+  mergeEconomicEventNamesIntoTranslationMemory,
   normalizeEconomicCalendarEventCountry,
+  normalizeEconomicTranslationMemory,
 } from "../server/economicCalendarApi.mjs";
 
 test("economic calendar maps yfinance region codes to Korean country labels and flags", () => {
@@ -76,4 +79,50 @@ test("economic calendar keeps unknown region labels conservative but still deriv
     country: "XX",
     flag: "🇽🇽",
   });
+});
+
+test("economic calendar registers unseen event names in translation memory without pretranslating", () => {
+  const { memory, changed } = mergeEconomicEventNamesIntoTranslationMemory(
+    normalizeEconomicTranslationMemory(),
+    [
+      { eventName: "CPI MM*" },
+      { eventName: "CPI MM*" },
+      { eventName: "Retail Sales YY*" },
+    ],
+    "2026-06-29T00:00:00.000Z"
+  );
+
+  assert.equal(changed, true);
+  assert.equal(Object.keys(memory.entries).length, 2);
+  assert.equal(memory.entries["CPI MM*"].status, "pending");
+  assert.equal(memory.entries["CPI MM*"].textKo, "");
+  assert.equal(memory.entries["Retail Sales YY*"].status, "pending");
+});
+
+test("economic calendar applies translated event names from translation memory", () => {
+  const memory = normalizeEconomicTranslationMemory({
+    entries: {
+      "CPI MM*": {
+        sourceText: "CPI MM*",
+        textKo: "KO:CPI MM*",
+        status: "translated",
+        model: "test-model",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    applyEconomicEventNameTranslations([{ eventName: "CPI MM*", actual: "1.2" }], memory),
+    [
+      {
+        eventName: "CPI MM*",
+        actual: "1.2",
+        eventNameKo: "KO:CPI MM*",
+        eventNameTranslationStatus: "translated",
+        eventNameTranslationModel: "test-model",
+        eventNameTranslationReasoning: "",
+        eventNameTranslationError: "",
+      },
+    ]
+  );
 });

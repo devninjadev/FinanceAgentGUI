@@ -39,6 +39,10 @@ export function codexApiPlugin() {
         await handleNewsFeedEndpoint("status", req, res);
       });
 
+      server.middlewares.use("/api/news-feed/read-state", async (req, res) => {
+        await handleNewsFeedEndpoint("read-state", req, res);
+      });
+
       server.middlewares.use("/api/news-feed/items", async (req, res) => {
         await handleNewsFeedEndpoint("items", req, res);
       });
@@ -93,6 +97,10 @@ export function codexApiPlugin() {
 
       server.middlewares.use("/api/economic-calendar/settings", async (req, res) => {
         await handleEconomicCalendarEndpoint("settings", req, res);
+      });
+
+      server.middlewares.use("/api/economic-calendar/translations", async (req, res) => {
+        await handleEconomicCalendarEndpoint("translations", req, res);
       });
 
       server.middlewares.use("/api/portfolio/canvases", async (req, res) => {

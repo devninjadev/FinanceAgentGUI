@@ -27,6 +27,7 @@ const DEFAULT_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.defaults.json");
 const USER_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.user.json");
 const LEGACY_CONFIG_PATH = join(CONFIG_DIR, "news-feeds.json");
 const STORE_PATH = join(DATA_DIR, "news-feed.json");
+const READ_STATE_PATH = join(DATA_DIR, "news-feed-read-state.json");
 const DEFAULT_POLL_INTERVAL_SECONDS = 180;
 const DEFAULT_RETENTION_HOURS = 24;
 const DEFAULT_TRANSLATION_BATCH_SIZE = 2;
@@ -100,6 +101,11 @@ const fallbackConfig = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function timestampMs(value) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function sleep(ms) {
@@ -441,6 +447,77 @@ function writeStore(store) {
   return nextStore;
 }
 
+function emptyReadState() {
+  return {
+    version: 1,
+    updatedAt: nowIso(),
+    lastOpenedAt: "",
+  };
+}
+
+function readNewsFeedReadState() {
+  ensureDirs();
+  if (!existsSync(READ_STATE_PATH)) {
+    return emptyReadState();
+  }
+  try {
+    const readState = JSON.parse(readFileSync(READ_STATE_PATH, "utf8"));
+    return {
+      ...emptyReadState(),
+      ...readState,
+      lastOpenedAt: typeof readState.lastOpenedAt === "string" ? readState.lastOpenedAt : "",
+    };
+  } catch {
+    return emptyReadState();
+  }
+}
+
+function writeNewsFeedReadState(readState) {
+  ensureDirs();
+  const nextReadState = {
+    ...emptyReadState(),
+    ...readState,
+    updatedAt: nowIso(),
+  };
+  writeFileSync(READ_STATE_PATH, `${JSON.stringify(nextReadState, null, 2)}\n`);
+  return nextReadState;
+}
+
+function newsFeedReadStateSnapshot(store, readState = readNewsFeedReadState()) {
+  const lastOpenedMs = timestampMs(readState.lastOpenedAt);
+  let unreadTranslatedCount = 0;
+  let latestTranslatedAt = "";
+  let latestTranslatedMs = 0;
+
+  for (const item of store.items) {
+    if (item.translationStatus !== "translated") continue;
+    const translatedMs = timestampMs(item.translatedAt);
+    if (!translatedMs) continue;
+    if (translatedMs > latestTranslatedMs) {
+      latestTranslatedMs = translatedMs;
+      latestTranslatedAt = item.translatedAt;
+    }
+    if (translatedMs > lastOpenedMs) {
+      unreadTranslatedCount += 1;
+    }
+  }
+
+  return {
+    lastOpenedAt: readState.lastOpenedAt,
+    unreadTranslatedCount,
+    latestTranslatedAt,
+    path: "data/news-feed-read-state.json",
+  };
+}
+
+function markNewsFeedOpened() {
+  const readState = writeNewsFeedReadState({
+    ...readNewsFeedReadState(),
+    lastOpenedAt: nowIso(),
+  });
+  return publicSnapshot({ limit: 0, readState });
+}
+
 function publicItem(item) {
   const {
     sourceFingerprint,
@@ -513,7 +590,8 @@ function collectorStatusFromStore(store, config) {
   };
 }
 
-function publicSnapshot({ limit = 80, offset = 0 } = {}) {
+function publicSnapshot({ limit = 80, offset = 0, readState = null } = {}) {
+  const snapshotReadState = readState || readNewsFeedReadState();
   const config = readNewsFeedConfig();
   const store = readStore();
   const sortedItems = store.items
@@ -533,6 +611,7 @@ function publicSnapshot({ limit = 80, offset = 0 } = {}) {
       enabled: feed.enabled,
     })),
     itemCount: sortedItems.length,
+    readState: newsFeedReadStateSnapshot(store, snapshotReadState),
     offset,
     limit,
     hasMore: offset + items.length < sortedItems.length,
@@ -1160,6 +1239,21 @@ export async function handleNewsFeedEndpoint(kind, req, res) {
         return;
       }
       sendJson(res, publicSnapshot({ limit: 0 }));
+      return;
+    }
+
+    if (kind === "read-state") {
+      if (req.method === "GET") {
+        sendJson(res, publicSnapshot({ limit: 0 }));
+        return;
+      }
+
+      if (req.method === "POST" || req.method === "PATCH") {
+        sendJson(res, markNewsFeedOpened());
+        return;
+      }
+
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
       return;
     }
 

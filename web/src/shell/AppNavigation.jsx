@@ -52,6 +52,11 @@ function NavStatusDot({ health }) {
   );
 }
 
+function formatUnreadBadgeCount(value) {
+  const count = Math.max(0, Math.trunc(Number(value || 0)));
+  return count.toLocaleString("ko-KR");
+}
+
 export function AppNavigation({
   activePortfolioCanvas,
   activeView,
@@ -105,6 +110,13 @@ export function AppNavigation({
                   const isPortfolioItem = item.view === "portfolio";
                   const isPortfolioSurface = activeView === "portfolio" || activeView === "portfolio-canvas";
                   const isActiveItem = isPortfolioItem ? isPortfolioSurface : item.view === activeView;
+                  const showNewsFeedUnreadBadge = item.statusKey === "newsFeed" && !isActiveItem;
+                  const newsFeedUnreadCount =
+                    showNewsFeedUnreadBadge
+                      ? Math.max(0, Math.trunc(Number(newsFeedStatus?.readState?.unreadTranslatedCount || 0)))
+                      : 0;
+                  const newsFeedUnreadText =
+                    newsFeedUnreadCount > 0 ? `+${formatUnreadBadgeCount(newsFeedUnreadCount)}` : "0";
                   return (
                     <React.Fragment key={item.label}>
                       <button
@@ -121,7 +133,17 @@ export function AppNavigation({
                         aria-expanded={isPortfolioItem ? portfolioSidebarOpen : undefined}
                       >
                         <Icon size={16} strokeWidth={2} />
-                        <span className="nav-item-text">{item.label}</span>
+                        <span className="nav-item-label">
+                          <span className="nav-item-text">{item.label}</span>
+                          {showNewsFeedUnreadBadge ? (
+                            <span
+                              className="nav-unread-count"
+                              aria-label={`안 읽은 News Feed ${formatUnreadBadgeCount(newsFeedUnreadCount)}개`}
+                            >
+                              {newsFeedUnreadText}
+                            </span>
+                          ) : null}
+                        </span>
                         <NavStatusDot health={itemStatusHealth} />
                         {isPortfolioItem ? (
                           <PortfolioChevron className="nav-item-chevron" size={15} strokeWidth={2.2} />

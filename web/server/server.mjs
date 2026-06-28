@@ -67,6 +67,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/news-feed/read-state")) {
+    await handleNewsFeedEndpoint("read-state", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/news-feed/items")) {
     await handleNewsFeedEndpoint("items", req, res);
     return;
@@ -134,6 +139,11 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/economic-calendar/settings")) {
     await handleEconomicCalendarEndpoint("settings", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/economic-calendar/translations")) {
+    await handleEconomicCalendarEndpoint("translations", req, res);
     return;
   }
 

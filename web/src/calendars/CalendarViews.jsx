@@ -13,6 +13,7 @@ const calendarWeekdays = [
 ];
 
 const EARNINGS_LIMIT = 1000;
+const ECONOMIC_TRANSLATION_POLL_MS = 3000;
 
 const economicCountryGroupOrder = ["아시아", "북미", "남미", "유럽", "오세아니아", "아프리카", "기타"];
 
@@ -350,6 +351,61 @@ function economicDisplayValue(value) {
   return text || "-";
 }
 
+function normalizeEconomicTranslationKey(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function translationMemoryShouldPoll(memory) {
+  if (!memory || typeof memory !== "object") return false;
+  return Boolean(memory.inFlight);
+}
+
+function applyEconomicTranslationMemoryToEvents(events, memory) {
+  const entries = Array.isArray(memory?.entries) ? memory.entries : [];
+  if (!entries.length || !Array.isArray(events) || !events.length) return events;
+
+  const entryByKey = new Map();
+  for (const entry of entries) {
+    const key = normalizeEconomicTranslationKey(entry?.key || entry?.sourceText);
+    if (key) entryByKey.set(key, entry);
+  }
+  if (!entryByKey.size) return events;
+
+  let changed = false;
+  const nextEvents = events.map((event) => {
+    const key = normalizeEconomicTranslationKey(event?.eventName);
+    const entry = key ? entryByKey.get(key) : null;
+    if (!entry) return event;
+
+    const status = String(entry.status || (entry.textKo ? "translated" : "pending")).trim() || "pending";
+    const patch = {
+      eventNameKo: status === "translated" ? String(entry.textKo || "").trim() : "",
+      eventNameTranslationStatus: status,
+      eventNameTranslationModel: String(entry.model || ""),
+      eventNameTranslationReasoning: String(entry.reasoning || ""),
+      eventNameTranslationError: String(entry.error || ""),
+    };
+
+    if (
+      event.eventNameKo === patch.eventNameKo &&
+      event.eventNameTranslationStatus === patch.eventNameTranslationStatus &&
+      event.eventNameTranslationModel === patch.eventNameTranslationModel &&
+      event.eventNameTranslationReasoning === patch.eventNameTranslationReasoning &&
+      event.eventNameTranslationError === patch.eventNameTranslationError
+    ) {
+      return event;
+    }
+
+    changed = true;
+    return {
+      ...event,
+      ...patch,
+    };
+  });
+
+  return changed ? nextEvents : events;
+}
+
 function normalizeEconomicCountryCode(value) {
   const code = String(value || "").trim().toUpperCase().replace(/\s+/g, "");
   return economicCountryCodeAliases[code] || code;
@@ -529,6 +585,9 @@ function economicCalendarEventForContext(event, index) {
     importance: Number(event.importance || 0),
     importanceLabel: economicImpactLabel(event.importance),
     eventName: event.eventName || "",
+    eventNameKo: event.eventNameKo || "",
+    eventNameTranslationStatus: event.eventNameTranslationStatus || "",
+    eventNameTranslationModel: event.eventNameTranslationModel || "",
     period: event.period || "",
     actual: event.actual || "",
     forecast: event.forecast || "",
@@ -579,7 +638,7 @@ function buildEconomicCalendarContextSnapshot({
         maxImportanceLabel: rows.length ? economicImpactLabel(maxImportance) : "",
         highImpactEvents: rows
           .filter((event) => Number(event.importance || 0) >= 3)
-          .map((event) => event.eventName)
+          .map((event) => event.eventNameKo || event.eventName)
           .slice(0, 8),
       };
     }),
@@ -589,6 +648,7 @@ function buildEconomicCalendarContextSnapshot({
       source: meta?.source || "yfinance",
       updatedAt: meta?.updatedAt || "",
       cache: meta?.cache || null,
+      translationMemory: meta?.translationMemory || null,
     },
     nextActionHint:
       "사용자가 현재 보이는 경제지표 일정, 특정 날짜, 국가, 중요도, 발표/예측/이전 값을 물으면 이 스냅샷을 우선 참고한다.",
@@ -1054,6 +1114,7 @@ export function EconomicCalendarView({ onContextChange }) {
   const [selectedDateKey, setSelectedDateKey] = useState(() => calendarDateKey(new Date()));
   const [events, setEvents] = useState([]);
   const [meta, setMeta] = useState(null);
+  const [translationMemory, setTranslationMemory] = useState(null);
   const [loadState, setLoadState] = useState({ status: "loading", error: "" });
   const [refreshSequence, setRefreshSequence] = useState(0);
   const [countryFilterOpen, setCountryFilterOpen] = useState(false);
@@ -1173,7 +1234,9 @@ export function EconomicCalendarView({ onContextChange }) {
           updatedAt: payload.updatedAt || "",
           rowCount: payload.rowCount ?? nextEvents.length,
           cache: payload.persistentCache || null,
+          translationMemory: payload.translationMemory || null,
         });
+        setTranslationMemory(payload.translationMemory || null);
         setLoadState({ status: "ready", error: "" });
       })
       .catch((error) => {
@@ -1187,6 +1250,41 @@ export function EconomicCalendarView({ onContextChange }) {
 
     return () => controller.abort();
   }, [refreshSequence, weekStart]);
+
+  useEffect(() => {
+    if (!translationMemoryShouldPoll(translationMemory)) return undefined;
+
+    let active = true;
+    let timer = null;
+
+    async function pollTranslationMemory() {
+      try {
+        const response = await fetch("/api/economic-calendar/translations?limit=1000", { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || "Economic Calendar 번역 메모리를 불러오지 못했습니다.");
+        }
+        if (!active) return;
+
+        const nextMemory = payload.translationMemory || null;
+        setTranslationMemory(nextMemory);
+        setMeta((current) => current ? { ...current, translationMemory: nextMemory } : current);
+        setEvents((currentEvents) => applyEconomicTranslationMemoryToEvents(currentEvents, nextMemory));
+      } catch {
+        if (!active) return;
+      }
+    }
+
+    timer = window.setInterval(() => {
+      void pollTranslationMemory();
+    }, ECONOMIC_TRANSLATION_POLL_MS);
+    void pollTranslationMemory();
+
+    return () => {
+      active = false;
+      if (timer) window.clearInterval(timer);
+    };
+  }, [translationMemory?.inFlight]);
 
   useEffect(() => {
     const visibleKeys = new Set(weekDates.map(calendarDateKey));
@@ -1277,7 +1375,7 @@ export function EconomicCalendarView({ onContextChange }) {
       ? "경제지표 캐시를 불러오는 중"
       : loadState.status === "error"
         ? loadState.error
-        : `${meta?.rowCount ?? events.length}개 이벤트 · ${meta?.source || "yfinance"} · ${meta?.timezone || "Asia/Seoul"} · ${meta?.cache?.path || "data/economic-calendar-cache.json"}`;
+        : "";
 
   return (
     <div className="calendar-shell economic-calendar-shell">
@@ -1285,7 +1383,7 @@ export function EconomicCalendarView({ onContextChange }) {
         <header className="calendar-header economic-calendar-header">
           <div>
             <h1 id="economic-calendar-title">Economic Calendar</h1>
-            <p>{formatCalendarRange(weekStart, addCalendarDays(weekStart, 5))} · yfinance · 발표 / 예측 / 이전</p>
+            <p>{formatCalendarRange(weekStart, addCalendarDays(weekStart, 5))} · KST(UTC+9) · yfinance</p>
           </div>
 
           <div className="calendar-toolbar" aria-label="Economic Calendar controls">
@@ -1314,10 +1412,12 @@ export function EconomicCalendarView({ onContextChange }) {
           </div>
         </header>
 
-        <div className={statusClass}>
-          {isLoadingEconomicCalendar ? <LoaderCircle size={15} strokeWidth={2.2} className="is-spinning" /> : null}
-          <span>{statusMessage}</span>
-        </div>
+        {statusMessage ? (
+          <div className={statusClass}>
+            {isLoadingEconomicCalendar ? <LoaderCircle size={15} strokeWidth={2.2} className="is-spinning" /> : null}
+            <span>{statusMessage}</span>
+          </div>
+        ) : null}
 
         <div className="economic-week-strip" aria-label="월요일부터 토요일까지 경제 캘린더">
           {weekDates.map((date, index) => {
@@ -1415,6 +1515,9 @@ export function EconomicCalendarView({ onContextChange }) {
                     const previous = selectedEvents[index - 1];
                     const showTime = !previous || previous.time !== event.time;
                     const showCountry = showTime || previous.country !== event.country;
+                    const translatedEventName = String(event.eventNameKo || "").trim();
+                    const originalEventName = economicDisplayValue(event.eventName);
+                    const translationStatus = String(event.eventNameTranslationStatus || "").trim();
                     return (
                       <tr key={event.id || `${event.dateKey}-${event.time}-${event.eventName}`}>
                         <td className="economic-col-time">{showTime ? event.time || "-" : ""}</td>
@@ -1431,7 +1534,14 @@ export function EconomicCalendarView({ onContextChange }) {
                         </td>
                         <td>
                           <span className="economic-event-name">
-                            <span>{economicDisplayValue(event.eventName)}</span>
+                            <span>{translatedEventName || originalEventName}</span>
+                            {translatedEventName ? (
+                              <small className="economic-event-original">{originalEventName}</small>
+                            ) : translationStatus && translationStatus !== "translated" ? (
+                              <small className={`economic-event-translation-status is-${translationStatus}`}>
+                                {translationStatus === "failed" ? "번역 실패" : "번역 대기"}
+                              </small>
+                            ) : null}
                           </span>
                         </td>
                         <td className="economic-col-value is-actual">{economicDisplayValue(event.actual)}</td>

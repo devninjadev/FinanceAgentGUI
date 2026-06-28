@@ -1,22 +1,31 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readJsonBody, sendJson } from "./codexProbe.mjs";
+import { getCodexOptions, readJsonBody, runAntigravityGenerate, sendJson } from "./codexProbe.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
 const DATA_DIR = join(GUIBUILD_ROOT, "data");
 const ECONOMIC_STORE_PATH = join(DATA_DIR, "economic-calendar-cache.json");
 const ECONOMIC_SETTINGS_PATH = join(DATA_DIR, "economic-calendar-settings.json");
+const ECONOMIC_TRANSLATION_MEMORY_PATH = join(DATA_DIR, "economic-calendar-translation-memory.json");
 const DEFAULT_DAYS = 6;
 const DEFAULT_LIMIT = 100;
 const MAX_DAYS = 45;
 const MAX_LIMIT = 100;
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const ECONOMIC_FETCH_TIMEOUT_MS = 45000;
+const ECONOMIC_TRANSLATION_TIMEOUT_MS = 60000;
+const ECONOMIC_TRANSLATION_BATCH_SIZE = 12;
+const ECONOMIC_TRANSLATION_TITLE_MAX_CHARS = 220;
 const FINALIZED_CACHE_AFTER_HOURS = 24;
 const FINALIZED_CACHE_AFTER_MS = FINALIZED_CACHE_AFTER_HOURS * 60 * 60 * 1000;
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
+const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
+const ANTIGRAVITY_FALLBACK_MODEL = "gemini-3.5-flash";
 const PYTHON_UTF8_ENV = {
   ...process.env,
   PYTHONIOENCODING: "utf-8",
@@ -25,6 +34,7 @@ const PYTHON_UTF8_ENV = {
 };
 
 const cache = new Map();
+const translationRuntimeKey = Symbol.for("financeAgentGui.economicCalendarTranslations");
 
 const fallbackEconomicCalendarSettings = {
   version: 1,
@@ -193,6 +203,565 @@ function publicEconomicCalendarSettingsSnapshot() {
     ok: true,
     configPath: "data/economic-calendar-settings.json",
     settings,
+  };
+}
+
+function emptyEconomicTranslationMemory() {
+  return {
+    version: 1,
+    source: "economic-calendar-event-name",
+    updatedAt: "",
+    entries: {},
+  };
+}
+
+function normalizeEconomicEventNameKey(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeEconomicTranslationEntry(key, entry = {}) {
+  const sourceText = normalizeEconomicEventNameKey(entry.sourceText || key);
+  const textKo = String(entry.textKo || "").trim();
+  const rawStatus = String(entry.status || "").trim();
+  const status = textKo
+    ? "translated"
+    : ["pending", "translating", "failed"].includes(rawStatus)
+      ? rawStatus === "translating" ? "pending" : rawStatus
+      : "pending";
+
+  return {
+    sourceText,
+    textKo,
+    status,
+    firstSeenAt: typeof entry.firstSeenAt === "string" ? entry.firstSeenAt : "",
+    lastSeenAt: typeof entry.lastSeenAt === "string" ? entry.lastSeenAt : "",
+    hitCount: Number.isFinite(Number(entry.hitCount)) ? Math.max(0, Number(entry.hitCount)) : 0,
+    translatedAt: typeof entry.translatedAt === "string" ? entry.translatedAt : "",
+    model: typeof entry.model === "string" ? entry.model : "",
+    reasoning: typeof entry.reasoning === "string" ? entry.reasoning : "",
+    attempts: Number.isFinite(Number(entry.attempts)) ? Math.max(0, Number(entry.attempts)) : 0,
+    lastAttemptAt: typeof entry.lastAttemptAt === "string" ? entry.lastAttemptAt : "",
+    error: typeof entry.error === "string" ? entry.error : "",
+  };
+}
+
+export function normalizeEconomicTranslationMemory(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const rawEntries = source.entries && typeof source.entries === "object" ? source.entries : {};
+  const entries = {};
+  for (const [rawKey, rawEntry] of Object.entries(rawEntries)) {
+    const key = normalizeEconomicEventNameKey(rawKey);
+    if (!key) continue;
+    entries[key] = normalizeEconomicTranslationEntry(key, rawEntry);
+  }
+  return {
+    ...emptyEconomicTranslationMemory(),
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : "",
+    entries,
+  };
+}
+
+function readEconomicTranslationMemory() {
+  if (!existsSync(ECONOMIC_TRANSLATION_MEMORY_PATH)) return emptyEconomicTranslationMemory();
+
+  try {
+    return normalizeEconomicTranslationMemory(JSON.parse(readFileSync(ECONOMIC_TRANSLATION_MEMORY_PATH, "utf8")));
+  } catch {
+    return emptyEconomicTranslationMemory();
+  }
+}
+
+function writeEconomicTranslationMemory(memory) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const nextMemory = normalizeEconomicTranslationMemory({
+    ...memory,
+    updatedAt: new Date().toISOString(),
+  });
+  const tmpPath = `${ECONOMIC_TRANSLATION_MEMORY_PATH}.tmp`;
+  writeFileSync(tmpPath, `${JSON.stringify(nextMemory, null, 2)}\n`);
+  renameSync(tmpPath, ECONOMIC_TRANSLATION_MEMORY_PATH);
+  return nextMemory;
+}
+
+function economicEventNameStrings(events = []) {
+  const names = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    const name = normalizeEconomicEventNameKey(typeof event === "string" ? event : event?.eventName);
+    if (name) names.push(name);
+  }
+  return [...new Set(names)];
+}
+
+export function mergeEconomicEventNamesIntoTranslationMemory(memory, events, now = new Date().toISOString()) {
+  const nextMemory = normalizeEconomicTranslationMemory(memory);
+  let changed = false;
+
+  for (const sourceText of economicEventNameStrings(events)) {
+    const key = normalizeEconomicEventNameKey(sourceText);
+    if (!key) continue;
+    const previous = nextMemory.entries[key];
+    if (!previous) {
+      nextMemory.entries[key] = normalizeEconomicTranslationEntry(key, {
+        sourceText,
+        status: "pending",
+        firstSeenAt: now,
+        lastSeenAt: now,
+        hitCount: 1,
+      });
+      changed = true;
+      continue;
+    }
+
+    const nextEntry = {
+      ...previous,
+      sourceText: previous.sourceText || sourceText,
+      firstSeenAt: previous.firstSeenAt || now,
+      lastSeenAt: now,
+      hitCount: Number(previous.hitCount || 0) + 1,
+    };
+    if (JSON.stringify(nextEntry) !== JSON.stringify(previous)) {
+      nextMemory.entries[key] = nextEntry;
+      changed = true;
+    }
+  }
+
+  return { memory: nextMemory, changed };
+}
+
+function ensureEconomicEventNameTranslationMemory(events = []) {
+  const { memory, changed } = mergeEconomicEventNamesIntoTranslationMemory(readEconomicTranslationMemory(), events);
+  return changed ? writeEconomicTranslationMemory(memory) : memory;
+}
+
+function economicTranslationRuntime() {
+  if (!globalThis[translationRuntimeKey]) {
+    globalThis[translationRuntimeKey] = {
+      inFlight: null,
+      lastStartedAt: "",
+      lastFinishedAt: "",
+      lastError: "",
+    };
+  }
+  return globalThis[translationRuntimeKey];
+}
+
+function economicTranslationMemoryStats(memory = readEconomicTranslationMemory()) {
+  const entries = Object.values(normalizeEconomicTranslationMemory(memory).entries);
+  const runtime = economicTranslationRuntime();
+  return {
+    path: "data/economic-calendar-translation-memory.json",
+    totalCount: entries.length,
+    translatedCount: entries.filter((entry) => entry.status === "translated" && entry.textKo).length,
+    pendingCount: entries.filter((entry) => entry.status === "pending").length,
+    failedCount: entries.filter((entry) => entry.status === "failed").length,
+    inFlight: Boolean(runtime.inFlight),
+    lastStartedAt: runtime.lastStartedAt,
+    lastFinishedAt: runtime.lastFinishedAt,
+    lastError: runtime.lastError,
+    updatedAt: memory.updatedAt || "",
+  };
+}
+
+function publicEconomicTranslationMemorySnapshot({ limit = 300 } = {}) {
+  const memory = readEconomicTranslationMemory();
+  const entries = Object.entries(memory.entries)
+    .map(([key, entry]) => ({ key, ...entry }))
+    .sort((left, right) =>
+      String(right.lastSeenAt || "").localeCompare(String(left.lastSeenAt || "")) ||
+      String(left.sourceText || "").localeCompare(String(right.sourceText || ""))
+    )
+    .slice(0, Math.max(1, Math.min(1000, Number(limit) || 300)));
+
+  return {
+    ok: true,
+    translationMemory: {
+      ...economicTranslationMemoryStats(memory),
+      entries,
+    },
+  };
+}
+
+export function applyEconomicEventNameTranslations(events = [], memory = readEconomicTranslationMemory()) {
+  const entries = normalizeEconomicTranslationMemory(memory).entries;
+  return (Array.isArray(events) ? events : []).map((event) => {
+    const key = normalizeEconomicEventNameKey(event?.eventName);
+    const entry = key ? entries[key] : null;
+    return {
+      ...event,
+      eventNameKo: entry?.status === "translated" ? entry.textKo || "" : "",
+      eventNameTranslationStatus: entry?.status || (key ? "pending" : ""),
+      eventNameTranslationModel: entry?.model || "",
+      eventNameTranslationReasoning: entry?.reasoning || "",
+      eventNameTranslationError: entry?.error || "",
+    };
+  });
+}
+
+function latestAntigravityTranslationModel(options) {
+  const catalogModels = Array.isArray(options.antigravityModelCatalog?.models)
+    ? options.antigravityModelCatalog.models.filter((item) => item?.selectable && item?.name)
+    : [];
+  return (
+    catalogModels[0]?.name ||
+    options.selected?.model ||
+    options.antigravity?.vertex?.model ||
+    ANTIGRAVITY_FALLBACK_MODEL
+  );
+}
+
+function codexEconomicTranslationModel(options) {
+  const group = options.modelGroups?.[0];
+  if (!group?.slug) throw new Error("Codex 모델 카탈로그가 비어 있습니다.");
+
+  const supported = (group.reasoningLevels || []).map((level) => level.id);
+  const reasoning =
+    ["minimal", "low", "medium", "high", "xhigh"].find((level) => supported.includes(level)) ||
+    group.defaultReasoningLevel ||
+    supported[0] ||
+    "low";
+
+  return {
+    provider: "codex-cli",
+    providerLabel: "Codex CLI",
+    model: group.slug,
+    modelLabel: group.slug,
+    reasoning,
+  };
+}
+
+function antigravityEconomicTranslationModel(options) {
+  const status = options.antigravity || {};
+  if (!status.ready) {
+    throw new Error(status.detail || status.error || "Antigravity SDK가 번역에 사용할 준비가 되지 않았습니다.");
+  }
+
+  const project = status.vertex?.project || "";
+  const location = status.vertex?.location || "global";
+  if (!project) throw new Error("Antigravity SDK 번역을 위한 Vertex project가 설정되지 않았습니다.");
+
+  const model = latestAntigravityTranslationModel(options);
+  return {
+    provider: ANTIGRAVITY_PROVIDER_ID,
+    providerLabel: "Antigravity SDK",
+    model,
+    modelLabel: `Antigravity SDK · ${location}/${model}`,
+    reasoning: ANTIGRAVITY_TRANSLATION_REASONING,
+    thinkingLevel: ANTIGRAVITY_TRANSLATION_THINKING_LEVEL,
+    project,
+    location,
+  };
+}
+
+function chooseEconomicTranslationModel() {
+  const options = getCodexOptions();
+  const selectedProvider = options.selected?.provider || "";
+
+  if (selectedProvider === ANTIGRAVITY_PROVIDER_ID) {
+    return antigravityEconomicTranslationModel(options);
+  }
+
+  if (!options.codex?.available) {
+    throw new Error(options.codex?.error || "codex command not found");
+  }
+
+  return codexEconomicTranslationModel(options);
+}
+
+function truncateEconomicTranslationText(value) {
+  const text = normalizeEconomicEventNameKey(value);
+  if (text.length <= ECONOMIC_TRANSLATION_TITLE_MAX_CHARS) return text;
+  return `${text.slice(0, ECONOMIC_TRANSLATION_TITLE_MAX_CHARS).trim()} ... [truncated]`;
+}
+
+function economicEventNameTranslationPrompt(items) {
+  const input = items.map((item) => ({
+    id: item.id,
+    eventName: truncateEconomicTranslationText(item.sourceText),
+  }));
+
+  return [
+    "경제 캘린더 이벤트명을 한국어로 번역한다.",
+    "출력은 JSON 객체 하나만 반환한다.",
+    "입력 문자열의 의미를 보존하고, 거시경제/중앙은행/시장 지표 용어는 한국 투자자가 읽기 자연스럽게 옮긴다.",
+    "요약하지 말고 이벤트명만 번역한다. 별표(*)나 약어가 원문에 있으면 필요한 경우 보존한다.",
+    "없는 정보를 추가하지 않는다.",
+    "",
+    "반환 형식:",
+    '{"translations":[{"id":"입력 id","textKo":"한국어 이벤트명"}]}',
+    "",
+    "입력 JSON:",
+    JSON.stringify({ items: input }, null, 2),
+  ].join("\n");
+}
+
+function parseTranslationJsonPayload(text) {
+  const raw = String(text || "").trim();
+  if (!raw) throw new Error("번역 응답이 비어 있습니다.");
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) return JSON.parse(fenced[1]);
+    const objectMatch = raw.match(/\{[\s\S]*\}/);
+    if (objectMatch) return JSON.parse(objectMatch[0]);
+    throw new Error("번역 응답을 JSON으로 해석하지 못했습니다.");
+  }
+}
+
+function runCodexEconomicTranslationBatch(items, modelInfo) {
+  return new Promise((resolveBatch, reject) => {
+    const tempDir = mkdtempSync(join(tmpdir(), "finance-agent-economic-calendar-"));
+    const outputPath = join(tempDir, "translation.json");
+    const schemaPath = join(tempDir, "schema.json");
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        translations: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string" },
+              textKo: { type: "string" },
+            },
+            required: ["id", "textKo"],
+          },
+        },
+      },
+      required: ["translations"],
+    };
+    writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`);
+
+    const args = [
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "--ignore-rules",
+      "-C",
+      WEB_ROOT,
+      "-s",
+      "read-only",
+      "-m",
+      modelInfo.model,
+      "-c",
+      `model_reasoning_effort="${modelInfo.reasoning}"`,
+      "--output-schema",
+      schemaPath,
+      "-o",
+      outputPath,
+      economicEventNameTranslationPrompt(items),
+    ];
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const child = spawn("codex", args, {
+      cwd: WEB_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+      },
+    });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGTERM");
+      rmSync(tempDir, { recursive: true, force: true });
+      reject(new Error("경제 캘린더 이벤트명 번역 시간이 초과되었습니다."));
+    }, ECONOMIC_TRANSLATION_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rmSync(tempDir, { recursive: true, force: true });
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        const output = existsSync(outputPath) ? readFileSync(outputPath, "utf8") : stdout;
+        if (code !== 0) throw new Error((stderr || output || `codex exited ${code}`).trim());
+        resolveBatch(parseTranslationJsonPayload(output));
+      } catch (error) {
+        reject(error);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
+}
+
+async function runAntigravityEconomicTranslationBatch(items, modelInfo) {
+  const result = await runAntigravityGenerate({
+    prompt: economicEventNameTranslationPrompt(items),
+    model: modelInfo.model,
+    project: modelInfo.project,
+    location: modelInfo.location,
+    webGrounding: false,
+    thinkingLevel: modelInfo.thinkingLevel,
+  });
+  return parseTranslationJsonPayload(result.answer);
+}
+
+async function translateEconomicEventNames(items) {
+  if (!items.length) return { translations: [], model: "", reasoning: "" };
+  const modelInfo = chooseEconomicTranslationModel();
+  const translations = [];
+
+  for (let index = 0; index < items.length; index += ECONOMIC_TRANSLATION_BATCH_SIZE) {
+    const batch = items.slice(index, index + ECONOMIC_TRANSLATION_BATCH_SIZE);
+    const payload =
+      modelInfo.provider === ANTIGRAVITY_PROVIDER_ID
+        ? await runAntigravityEconomicTranslationBatch(batch, modelInfo)
+        : await runCodexEconomicTranslationBatch(batch, modelInfo);
+    translations.push(...(Array.isArray(payload.translations) ? payload.translations : []));
+  }
+
+  return {
+    translations,
+    model: modelInfo.modelLabel || modelInfo.model,
+    reasoning: modelInfo.reasoning,
+  };
+}
+
+function pendingEconomicTranslationItems(memory) {
+  return Object.entries(normalizeEconomicTranslationMemory(memory).entries)
+    .map(([key, entry]) => ({ id: key, key, sourceText: entry.sourceText || key, entry }))
+    .filter((item) => item.entry.status === "pending" && !item.entry.textKo)
+    .sort((left, right) =>
+      String(right.entry.lastSeenAt || "").localeCompare(String(left.entry.lastSeenAt || "")) ||
+      left.sourceText.localeCompare(right.sourceText)
+    );
+}
+
+function economicTranslationAutoRunEnabled() {
+  return process.env.ECONOMIC_CALENDAR_TRANSLATION_DISABLED !== "1";
+}
+
+function startPendingEconomicEventNameTranslation() {
+  if (!economicTranslationAutoRunEnabled()) return null;
+  const runtime = economicTranslationRuntime();
+  if (runtime.inFlight) return runtime.inFlight;
+
+  runtime.inFlight = (async () => {
+    while (true) {
+      let memory = readEconomicTranslationMemory();
+      const pendingItems = pendingEconomicTranslationItems(memory);
+      if (!pendingItems.length) break;
+
+      const startedAt = new Date().toISOString();
+      runtime.lastStartedAt = startedAt;
+      runtime.lastError = "";
+      memory.entries = {
+        ...memory.entries,
+        ...Object.fromEntries(
+          pendingItems.map((item) => [
+            item.key,
+            {
+              ...item.entry,
+              status: "translating",
+              attempts: Number(item.entry.attempts || 0) + 1,
+              lastAttemptAt: startedAt,
+              error: "",
+            },
+          ])
+        ),
+      };
+      memory = writeEconomicTranslationMemory(memory);
+
+      try {
+        const translated = await translateEconomicEventNames(pendingItems);
+        const translationById = new Map(
+          translated.translations.map((item) => [normalizeEconomicEventNameKey(item.id), item])
+        );
+        const translatedAt = new Date().toISOString();
+        memory = readEconomicTranslationMemory();
+        for (const item of pendingItems) {
+          const entry = memory.entries[item.key] || item.entry;
+          const translation = translationById.get(item.key);
+          const textKo = String(translation?.textKo || "").trim();
+          memory.entries[item.key] = {
+            ...entry,
+            status: textKo ? "translated" : "pending",
+            textKo,
+            translatedAt: textKo ? translatedAt : entry.translatedAt || "",
+            model: translated.model || entry.model || "",
+            reasoning: translated.reasoning || entry.reasoning || "",
+            error: "",
+          };
+        }
+        writeEconomicTranslationMemory(memory);
+      } catch (error) {
+        runtime.lastError = error.message || "경제 캘린더 이벤트명 번역 실패";
+        memory = readEconomicTranslationMemory();
+        for (const item of pendingItems) {
+          const entry = memory.entries[item.key] || item.entry;
+          memory.entries[item.key] = {
+            ...entry,
+            status: "failed",
+            error: runtime.lastError,
+          };
+        }
+        writeEconomicTranslationMemory(memory);
+        break;
+      }
+    }
+  })().finally(() => {
+    runtime.lastFinishedAt = new Date().toISOString();
+    runtime.inFlight = null;
+  });
+
+  return runtime.inFlight;
+}
+
+function requeueFailedEconomicTranslations() {
+  const memory = readEconomicTranslationMemory();
+  let changed = false;
+  for (const [key, entry] of Object.entries(memory.entries)) {
+    if (entry.status !== "failed") continue;
+    memory.entries[key] = {
+      ...entry,
+      status: "pending",
+      error: "",
+    };
+    changed = true;
+  }
+  return changed ? writeEconomicTranslationMemory(memory) : memory;
+}
+
+function decorateEconomicCalendarResponse(response, eventSources = []) {
+  const sourceEvents = [
+    ...(Array.isArray(response?.events) ? response.events : []),
+    ...eventSources.flatMap((events) => (Array.isArray(events) ? events : [])),
+  ];
+  const memory = ensureEconomicEventNameTranslationMemory(sourceEvents);
+  if (pendingEconomicTranslationItems(memory).length) {
+    void startPendingEconomicEventNameTranslation();
+  }
+
+  return {
+    ...response,
+    events: applyEconomicEventNameTranslations(response.events || [], memory),
+    translationMemory: economicTranslationMemoryStats(memory),
   };
 }
 
@@ -884,6 +1453,38 @@ function runYfinanceEconomicCalendar({ startDate, endDate, limit, force }) {
 }
 
 export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
+  if (endpoint === "translations") {
+    try {
+      if (req.method === "GET") {
+        const url = new URL(req.url, "http://127.0.0.1");
+        sendJson(res, publicEconomicTranslationMemorySnapshot({ limit: url.searchParams.get("limit") }));
+        return;
+      }
+
+      if (req.method === "POST" || req.method === "PATCH") {
+        const body = await readJsonBody(req, 64 * 1024);
+        const action = String(body.action || "refresh").trim();
+        if (action === "retry-failed") {
+          requeueFailedEconomicTranslations();
+        }
+        if (action === "refresh" || action === "retry-failed") {
+          ensureEconomicEventNameTranslationMemory(readEconomicStore().events);
+          void startPendingEconomicEventNameTranslation();
+          sendJson(res, publicEconomicTranslationMemorySnapshot({ limit: body.limit }));
+          return;
+        }
+        sendJson(res, { ok: false, error: "unknown economic calendar translation action" }, 400);
+        return;
+      }
+
+      sendJson(res, { ok: false, error: "method not allowed" }, 405);
+      return;
+    } catch (error) {
+      sendJson(res, { ok: false, error: error.message || "economic calendar translations failed" }, 400);
+      return;
+    }
+  }
+
   if (endpoint === "settings") {
     try {
       if (req.method === "GET") {
@@ -929,14 +1530,14 @@ export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
   const nowMs = Date.now();
 
   if (!force && cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
-    sendJson(res, {
+    sendJson(res, decorateEconomicCalendarResponse({
       ...cached.payload,
       cache: {
         hit: true,
         cachedAt: new Date(cached.cachedAt).toISOString(),
         ttlSeconds: Math.round((CACHE_TTL_MS - (Date.now() - cached.cachedAt)) / 1000),
       },
-    });
+    }, [readEconomicStore().events]));
     return;
   }
 
@@ -963,11 +1564,12 @@ export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
         finalizedAfterHours: FINALIZED_CACHE_AFTER_HOURS,
       },
     };
+    const decoratedResponse = decorateEconomicCalendarResponse(response, [storedBeforeFetch.events]);
     cache.set(cacheKey, {
       cachedAt: Date.now(),
-      payload: response,
+      payload: decoratedResponse,
     });
-    sendJson(res, response);
+    sendJson(res, decoratedResponse);
     return;
   }
 
@@ -1041,18 +1643,19 @@ export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
       },
     };
 
+    const decoratedResponse = decorateEconomicCalendarResponse(response, [responseStore.events]);
     cache.set(cacheKey, {
       cachedAt: Date.now(),
-      payload: response,
+      payload: decoratedResponse,
     });
 
-    sendJson(res, response);
+    sendJson(res, decoratedResponse);
     return;
   }
 
   const fallbackEvents = filterEconomicEvents(storedBeforeFetch.events, startDate, endDate);
   if (fallbackEvents.length) {
-    sendJson(res, {
+    sendJson(res, decorateEconomicCalendarResponse({
       ...economicStoreResponse({
         store: storedBeforeFetch,
         startDate,
@@ -1071,13 +1674,13 @@ export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
         finalizedAfterHours: FINALIZED_CACHE_AFTER_HOURS,
         ttlSeconds: Math.round(CACHE_TTL_MS / 1000),
       },
-    });
+    }, [storedBeforeFetch.events]));
     return;
   }
 
   sendJson(
     res,
-    {
+    decorateEconomicCalendarResponse({
       ...payload,
       source: "yfinance",
       timezone: "Asia/Seoul",
@@ -1095,7 +1698,7 @@ export async function handleEconomicCalendarEndpoint(endpoint, req, res) {
         hit: false,
         ttlSeconds: Math.round(CACHE_TTL_MS / 1000),
       },
-    },
+    }),
     502
   );
 }
