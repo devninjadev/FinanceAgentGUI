@@ -90,6 +90,13 @@ function handleBoardRowKeyDown(row, event) {
   window.open(row.href, "_blank", "noopener,noreferrer");
 }
 
+function isTextEntryTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const entryControl = target.closest("input, textarea, select, [contenteditable='true']");
+  return Boolean(entryControl);
+}
+
 function BoardRow({ row, onAttachArticle, attachingArticleHref, agentIcon }) {
   const rowClass =
     row.type === "notice" ? "board-row board-row-notice" : row.type === "ad" ? "board-row board-row-ad" : "board-row";
@@ -259,6 +266,30 @@ export default function StockChannelView({
   writeUrl,
   notificationUrl,
 }) {
+  React.useEffect(() => {
+    function handleShortcut(event) {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || isTextEntryTarget(event.target)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "w" || key === "ㅈ") {
+        event.preventDefault();
+        if (writeUrl) {
+          window.open(writeUrl, "_blank", "noopener,noreferrer");
+        }
+        return;
+      }
+      if (key === "r" || key === "ㄱ") {
+        if (boardBusy) return;
+        event.preventDefault();
+        onRefreshBoard();
+      }
+    }
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [boardBusy, onRefreshBoard, writeUrl]);
+
   return (
     <section className="workspace-canvas board-index-canvas" aria-label="아카라이브 주식채널 인덱스">
       <div className="board-index-shell">
