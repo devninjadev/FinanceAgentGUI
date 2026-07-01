@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import AlertTriangle from "lucide-react/dist/esm/icons/alert-triangle.js";
+import Copy from "lucide-react/dist/esm/icons/copy.js";
 import Languages from "lucide-react/dist/esm/icons/languages.js";
 import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
 import Newspaper from "lucide-react/dist/esm/icons/newspaper.js";
@@ -17,8 +18,220 @@ function formatNewsFeedCount(value) {
 
 function translationStatusLabel(status) {
   if (status === "translated") return "번역 완료";
-  if (status === "failed") return "번역 실패";
   return "번역 대기";
+}
+
+function newsFeedBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("image read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadNewsFeedClipboardImage(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("image decode failed"));
+    image.src = source;
+  });
+}
+
+async function newsFeedImageSrcToDataUrl(source) {
+  const response = await fetch(new URL(source, window.location.href).href);
+  if (!response.ok) throw new Error(`image fetch failed: ${response.status}`);
+  return newsFeedBlobToDataUrl(await response.blob());
+}
+
+function newsFeedImageClipboardMetrics(sourceImage) {
+  const isFeedIcon = sourceImage?.classList?.contains("feed-source-icon");
+  const rect = sourceImage?.getBoundingClientRect?.();
+  const renderedWidth = isFeedIcon ? 25 : Math.max(1, Math.round(rect?.width || sourceImage?.width || 0));
+  const renderedHeight = isFeedIcon ? 25 : Math.max(1, Math.round(rect?.height || sourceImage?.height || 0));
+  const style = sourceImage ? window.getComputedStyle(sourceImage) : null;
+  const radius = style?.borderRadius || "";
+  const isCircle =
+    isFeedIcon ||
+    radius === "50%" ||
+    radius.endsWith("px") && Number.parseFloat(radius) >= Math.min(renderedWidth, renderedHeight) / 2 - 1;
+  return {
+    renderedWidth,
+    renderedHeight,
+    isCircle,
+  };
+}
+
+async function shapeNewsFeedClipboardImage(dataUrl, metrics) {
+  if (!metrics.isCircle) return dataUrl;
+  const sourceImage = await loadNewsFeedClipboardImage(dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = metrics.renderedWidth;
+  canvas.height = metrics.renderedHeight;
+  const context = canvas.getContext("2d");
+  if (!context) return dataUrl;
+
+  const sourceWidth = sourceImage.naturalWidth || sourceImage.width;
+  const sourceHeight = sourceImage.naturalHeight || sourceImage.height;
+  const targetRatio = canvas.width / canvas.height;
+  const sourceRatio = sourceWidth / sourceHeight;
+  let sx = 0;
+  let sy = 0;
+  let sw = sourceWidth;
+  let sh = sourceHeight;
+
+  if (sourceRatio > targetRatio) {
+    sw = sourceHeight * targetRatio;
+    sx = (sourceWidth - sw) / 2;
+  } else if (sourceRatio < targetRatio) {
+    sh = sourceWidth / targetRatio;
+    sy = (sourceHeight - sh) / 2;
+  }
+
+  context.save();
+  context.beginPath();
+  context.ellipse(canvas.width / 2, canvas.height / 2, canvas.width / 2, canvas.height / 2, 0, 0, Math.PI * 2);
+  context.clip();
+  context.drawImage(sourceImage, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  context.restore();
+  return canvas.toDataURL("image/png");
+}
+
+function applyNewsFeedClipboardImageMetrics(image, metrics) {
+  image.style.verticalAlign = "middle";
+}
+
+async function inlineNewsFeedClipboardImages(sourceNode, cloneNode) {
+  const sourceImages = Array.from(sourceNode.querySelectorAll("img"));
+  const cloneImages = Array.from(cloneNode.querySelectorAll("img"));
+  await Promise.all(
+    cloneImages.map(async (image, index) => {
+      const sourceImage = sourceImages[index];
+      const source = sourceImage?.currentSrc || sourceImage?.src || image.currentSrc || image.src || image.getAttribute("src");
+      if (!source) return;
+      const metrics = newsFeedImageClipboardMetrics(sourceImage);
+      try {
+        const dataUrl = await newsFeedImageSrcToDataUrl(source);
+        image.setAttribute("src", await shapeNewsFeedClipboardImage(dataUrl, metrics));
+      } catch (error) {
+        image.setAttribute("src", new URL(source, window.location.href).href);
+        image.setAttribute("data-copy-image-warning", error.message || "image inline failed");
+      }
+      applyNewsFeedClipboardImageMetrics(image, metrics);
+    })
+  );
+}
+
+function addNewsFeedClipboardUrl(cloneNode, sourceUrl) {
+  const url = String(sourceUrl || "").trim();
+  if (!url) return;
+  const body = cloneNode.querySelector(".news-feed-translation");
+  if (!body) return;
+  const target = cloneNode.querySelector(".news-feed-original") || body;
+
+  const spacer = document.createElement("p");
+  spacer.innerHTML = "&nbsp;";
+  const urlParagraph = document.createElement("p");
+  const link = document.createElement("a");
+  link.href = url;
+  link.textContent = url;
+  urlParagraph.appendChild(document.createTextNode("Source URL: "));
+  urlParagraph.appendChild(link);
+  target.insertAdjacentElement("afterend", urlParagraph);
+  target.insertAdjacentElement("afterend", spacer);
+}
+
+function normalizeNewsFeedClipboardMetaRow(cloneNode) {
+  const meta = cloneNode.querySelector(".news-feed-item-meta");
+  if (!meta) return;
+  const sourceName = meta.querySelector(".feed-source-name")?.textContent.trim() || "";
+  const itemTime = meta.querySelector(".news-feed-item-time")?.textContent.trim() || "";
+  const image = meta.querySelector("img")?.cloneNode(true);
+  const row = document.createElement("p");
+  row.className = "news-feed-copy-meta-row";
+  row.style.margin = "0";
+  row.style.lineHeight = "1.35";
+  row.style.whiteSpace = "normal";
+
+  if (image) {
+    row.appendChild(image);
+    row.appendChild(document.createTextNode(" "));
+  }
+
+  const label = document.createElement("strong");
+  label.textContent = [sourceName, itemTime].filter(Boolean).join(" ");
+  label.style.fontWeight = "700";
+  label.style.verticalAlign = "middle";
+  row.appendChild(label);
+  meta.replaceWith(row);
+
+  const body = cloneNode.querySelector(".news-feed-translation");
+  if (body) {
+    const spacer = document.createElement("p");
+    spacer.innerHTML = "&nbsp;";
+    body.insertAdjacentElement("beforebegin", spacer);
+  }
+}
+
+function newsFeedPlainTextFromNode(node) {
+  const holder = document.createElement("div");
+  holder.style.position = "fixed";
+  holder.style.left = "-10000px";
+  holder.style.top = "0";
+  holder.appendChild(node.cloneNode(true));
+  document.body.appendChild(holder);
+  const text = holder.innerText.trim();
+  holder.remove();
+  return text;
+}
+
+async function buildNewsFeedClipboardPayload(sourceNode, item) {
+  if (!sourceNode) throw new Error("복사할 뉴스 항목을 찾지 못했습니다.");
+  const cloneNode = sourceNode.cloneNode(true);
+  cloneNode.querySelectorAll(".news-feed-copy-button, .news-feed-copy-status").forEach((element) => {
+    element.remove();
+  });
+  normalizeNewsFeedClipboardMetaRow(cloneNode);
+  addNewsFeedClipboardUrl(cloneNode, item?.sourceUrl);
+  await inlineNewsFeedClipboardImages(sourceNode, cloneNode);
+  const plainText = newsFeedPlainTextFromNode(cloneNode);
+  const html = [
+    "<!doctype html>",
+    "<html>",
+    "<head><meta charset=\"utf-8\"></head>",
+    "<body>",
+    cloneNode.outerHTML,
+    "</body>",
+    "</html>",
+  ].join("");
+  return { html, plainText };
+}
+
+async function writeNewsFeedItemToClipboard(sourceNode, item) {
+  const payloadPromise = buildNewsFeedClipboardPayload(sourceNode, item);
+  if (navigator.clipboard?.write && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": payloadPromise.then(
+            ({ html }) => new Blob([html], { type: "text/html" })
+          ),
+          "text/plain": payloadPromise.then(
+            ({ plainText }) => new Blob([plainText], { type: "text/plain" })
+          ),
+        }),
+      ]);
+      return { mode: "html" };
+    } catch (error) {
+      const { plainText } = await payloadPromise;
+      await navigator.clipboard.writeText(plainText);
+      return { mode: "text", warning: error.message || "HTML 복사 실패" };
+    }
+  }
+  const { plainText } = await payloadPromise;
+  await navigator.clipboard.writeText(plainText);
+  return { mode: "text" };
 }
 
 export default function NewsFeedView({
@@ -31,6 +244,8 @@ export default function NewsFeedView({
   translationModelLabel,
   onRefresh,
 }) {
+  const [copyState, setCopyState] = useState({ itemId: "", status: "idle", error: "" });
+  const copyResetTimerRef = useRef(null);
   const collector = status?.collector || {};
   const feeds = newsFeedFeeds(status);
   const healthState = newsFeedHealthState(status);
@@ -42,6 +257,33 @@ export default function NewsFeedView({
   ]
     .filter(Boolean)
     .join(" ");
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  async function copyNewsFeedItem(event, item) {
+    if (copyState.status === "copying") return;
+    const sourceNode = event.currentTarget.closest(".news-feed-item");
+    if (copyResetTimerRef.current) {
+      window.clearTimeout(copyResetTimerRef.current);
+    }
+    setCopyState({ itemId: item.id, status: "copying", error: "" });
+    try {
+      const result = await writeNewsFeedItemToClipboard(sourceNode, item);
+      setCopyState({ itemId: item.id, status: result.mode === "text" ? "text" : "copied", error: result.warning || "" });
+    } catch (error) {
+      setCopyState({ itemId: item.id, status: "error", error: error.message || "복사 실패" });
+    } finally {
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopyState({ itemId: "", status: "idle", error: "" });
+      }, 1600);
+    }
+  }
 
   return (
     <div className="news-feed-shell">
@@ -115,14 +357,48 @@ export default function NewsFeedView({
             const originalTitle = String(item.title || "").trim();
             const originalBody = String(item.originalText || "").trim();
             const showOriginalTitle = originalTitle && originalTitle !== originalBody;
+            const translationStatusClass =
+              item.translationStatus === "translated" ? "translated" : "pending";
+            const itemCopyActive = copyState.itemId === item.id;
+            const itemCopyStatus = itemCopyActive ? copyState.status : "idle";
+            const itemCopyLabel =
+              itemCopyStatus === "copying"
+                ? "복사 중"
+                : itemCopyStatus === "copied"
+                  ? "복사됨"
+                  : itemCopyStatus === "text"
+                    ? "텍스트 복사됨"
+                    : itemCopyStatus === "error"
+                      ? "복사 실패"
+                      : "복사";
 
             return (
               <article className="news-feed-item" key={item.id}>
                 <div className="news-feed-item-meta">
                   <FeedSourceLabel feedId={item.feedId} title={item.feedTitle} />
                   <span className="news-feed-item-time">{formatDateTime(item.publishedAt || item.fetchedAt)}</span>
+                  <button
+                    className={[
+                      "news-feed-copy-button",
+                      itemCopyStatus !== "idle" ? `is-${itemCopyStatus}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    onClick={(event) => copyNewsFeedItem(event, item)}
+                    disabled={itemCopyStatus === "copying"}
+                    aria-label={`${item.feedTitle || "뉴스"} 항목 복사`}
+                    title={copyState.error && itemCopyActive ? copyState.error : itemCopyLabel}
+                  >
+                    {itemCopyStatus === "copying" ? (
+                      <LoaderCircle size={14} strokeWidth={2.2} aria-hidden="true" />
+                    ) : (
+                      <Copy size={14} strokeWidth={2.2} aria-hidden="true" />
+                    )}
+                    <span className="sr-only news-feed-copy-status">{itemCopyLabel}</span>
+                  </button>
                   {item.translationStatus && item.translationStatus !== "translated" ? (
-                    <span className={`translation-status translation-status-${item.translationStatus}`}>
+                    <span className={`translation-status translation-status-${translationStatusClass}`}>
                       <Languages size={14} strokeWidth={2.1} />
                       {translationStatusLabel(item.translationStatus)}
                     </span>

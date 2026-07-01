@@ -9,6 +9,8 @@ import {
   readWorldMemorySettings,
   writeWorldMemorySettingsPatch,
 } from "./worldMemorySettings.mjs";
+import { disableMagazineSettings } from "./magazineSettings.mjs";
+import { stopMagazineScheduler } from "./magazineApi.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
@@ -45,6 +47,7 @@ const actionCatalog = [
   { id: "taxonomy", label: "Taxonomy 조회", riskLevel: "low" },
   { id: "taxonomyRefresh", label: "Taxonomy 재색인", riskLevel: "medium" },
   { id: "cleanupDryRun", label: "Cleanup dry-run", riskLevel: "low" },
+  { id: "briefStoryBackfill", label: "Brief story backfill", riskLevel: "medium" },
   { id: "storyLink", label: "스토리 관계 기록", riskLevel: "medium" },
   { id: "storyMap", label: "스토리 맵 조회", riskLevel: "low" },
   { id: "storyFamilyReview", label: "스토리 패밀리 리뷰", riskLevel: "low" },
@@ -167,13 +170,17 @@ function readCollectorState() {
   }
 
   const base = defaultCollectorState();
+  const report = { ...base.report, ...(raw.report || {}) };
+  if (report.view && typeof report.view === "object" && !Array.isArray(report.view)) {
+    report.suggestions = reportChangeSuggestions(report.view);
+  }
   return {
     ...base,
     ...raw,
     collector: { ...base.collector, ...(raw.collector || {}) },
     schedule: { ...base.schedule, ...(raw.schedule || {}) },
     modelPolicy: { ...base.modelPolicy, ...(raw.modelPolicy || {}) },
-    report: { ...base.report, ...(raw.report || {}) },
+    report,
     history: Array.isArray(raw.history) ? raw.history.slice(0, WORLD_MEMORY_HISTORY_LIMIT) : [],
   };
 }
@@ -294,6 +301,8 @@ function commandFloat(value, fallback, min, max) {
 
 function defaultModelPolicy() {
   return {
+    preferredProvider: "codex-cli",
+    configuredProvider: "default",
     codex: {
       provider: "codex-cli",
       providerLabel: "Codex CLI",
@@ -315,10 +324,23 @@ function defaultModelPolicy() {
   };
 }
 
+function normalizeWorldMemoryProviderSetting(value) {
+  return value === "codex-cli" || value === "antigravity-sdk" ? value : "default";
+}
+
+function resolvePreferredWorldMemoryProvider(setting, options = {}) {
+  const configuredProvider = normalizeWorldMemoryProviderSetting(setting);
+  if (configuredProvider !== "default") return configuredProvider;
+  return options?.selected?.provider === "antigravity-sdk" ? "antigravity-sdk" : "codex-cli";
+}
+
 function resolveWorldMemoryModelPolicy() {
   const fallback = defaultModelPolicy();
   try {
     const options = getCodexOptions();
+    const settings = readWorldMemorySettings();
+    const configuredProvider = normalizeWorldMemoryProviderSetting(settings.managementProvider);
+    const preferredProvider = resolvePreferredWorldMemoryProvider(settings.managementProvider, options);
     const codexGroup = Array.isArray(options.modelGroups) ? options.modelGroups[0] : null;
     const codexReasoningLevels = Array.isArray(codexGroup?.reasoningLevels)
       ? codexGroup.reasoningLevels.map((level) => level.id)
@@ -333,6 +355,8 @@ function resolveWorldMemoryModelPolicy() {
       fallback.antigravity.model;
 
     return {
+      preferredProvider,
+      configuredProvider,
       codex: {
         ...fallback.codex,
         available: Boolean(options.codex?.available),
@@ -358,6 +382,8 @@ function resolveWorldMemoryModelPolicy() {
   } catch (error) {
     return {
       ...fallback,
+      preferredProvider: fallback.preferredProvider,
+      configuredProvider: fallback.configuredProvider,
       resolvedAt: nowIso(),
       source: "fallback",
       error: error.message,
@@ -658,6 +684,41 @@ function commandForAction(body = {}) {
   }
   if (action === "cleanupDryRun") {
     return { scriptPath: WORLD_MEMORY_CLI, args: [...base, "cleanup", "--dry-run"], output: "text" };
+  }
+  if (action === "briefStoryBackfill") {
+    const rawEventIds = Array.isArray(body.eventIds)
+      ? body.eventIds
+      : Array.isArray(body.event_ids)
+        ? body.event_ids
+        : body.eventId || body.event_id
+          ? [body.eventId || body.event_id]
+          : [];
+    const eventIds = rawEventIds
+      .map((item) => optionalCommandTextArg(item, 120))
+      .filter(Boolean)
+      .slice(0, 20);
+    if (!eventIds.length) throw new Error("briefStoryBackfill requires eventIds");
+    const story = commandTextArg(body.story || body.storyLabel, "story", 180);
+    const storyFamily = optionalCommandTextArg(body.storyFamily || body.story_family || story, 180) || story;
+    const note = optionalCommandTextArg(body.note || body.rationale || body.reason, 700);
+    const confidence = commandFloat(body.confidence, 0.7, 0, 1);
+    const args = [
+      ...base,
+      "brief-story-backfill",
+      "--story",
+      story,
+      "--story-family",
+      storyFamily,
+      "--confidence",
+      String(confidence),
+      "--format",
+      "json",
+    ];
+    for (const eventId of eventIds) args.push("--event-id", eventId);
+    if (note) args.push("--note", note);
+    if (body.replaceExisting === true || body.replace_existing === true) args.push("--replace-existing");
+    if (body.dryRun === true || body.dry_run === true) args.push("--dry-run");
+    return { scriptPath: WORLD_MEMORY_CLI, args, output: "json" };
   }
   if (action === "storyLink") {
     const story = commandTextArg(body.story || body.storyLabel, "story");
@@ -1023,6 +1084,10 @@ function normalizeReportView(payload, fallbackText = "") {
   return view;
 }
 
+function reportChangeSuggestions(reportView) {
+  return normalizeTextList(reportView?.memoryChangeSuggestions, 5);
+}
+
 function reportPlainText(view) {
   return [
     `# ${view.title}`,
@@ -1131,31 +1196,13 @@ function renderReportHtmlDocument(view) {
 }
 
 async function runWorldMemoryModelText({ prompt, modelPolicy, taskType }) {
-  let codexError = null;
-  if (modelPolicy?.codex?.available !== false) {
-    try {
-      const result = await runCodexChat({
-        provider: "codex-cli",
-        prompt,
-        model: modelPolicy.codex.model,
-        reasoning: "high",
-        approval: "never",
-        taskType,
-        timeoutMs: WORLD_MEMORY_MODEL_TIMEOUT_MS,
-      });
-      return {
-        answer: String(result.answer || "").trim(),
-        provider: "codex-cli",
-        model: result.model,
-        reasoning: result.reasoning || "high",
-        elapsedMs: result.elapsedMs,
-      };
-    } catch (error) {
-      codexError = error;
-    }
-  }
+  const preferredProvider =
+    modelPolicy?.preferredProvider === "antigravity-sdk" ? "antigravity-sdk" : "codex-cli";
 
-  if (modelPolicy?.antigravity?.available && modelPolicy.antigravity.project) {
+  if (preferredProvider === "antigravity-sdk") {
+    if (!modelPolicy?.antigravity?.available || !modelPolicy.antigravity.project) {
+      throw new Error("월드 메모리 관리 모델로 선택된 Antigravity SDK를 사용할 수 없습니다.");
+    }
     const result = await runAntigravityGenerate({
       prompt,
       model: modelPolicy.antigravity.model,
@@ -1173,11 +1220,30 @@ async function runWorldMemoryModelText({ prompt, modelPolicy, taskType }) {
     };
   }
 
-  throw new Error(
-    codexError
-      ? `Codex 모델 호출 실패: ${codexError.message}`
-      : "월드 메모리 보고서/수집에 사용할 Codex 또는 Antigravity 모델을 찾지 못했습니다."
-  );
+  if (modelPolicy?.codex?.available === false) {
+    throw new Error("월드 메모리 관리 모델로 선택된 Codex CLI를 사용할 수 없습니다.");
+  }
+
+  try {
+    const result = await runCodexChat({
+      provider: "codex-cli",
+      prompt,
+      model: modelPolicy.codex.model,
+      reasoning: "high",
+      approval: "never",
+      taskType,
+      timeoutMs: WORLD_MEMORY_MODEL_TIMEOUT_MS,
+    });
+    return {
+      answer: String(result.answer || "").trim(),
+      provider: "codex-cli",
+      model: result.model,
+      reasoning: result.reasoning || "high",
+      elapsedMs: result.elapsedMs,
+    };
+  } catch (error) {
+    throw new Error(`Codex 모델 호출 실패: ${error.message}`);
+  }
 }
 
 async function runBriefGeneration({ preflight, feedScan, modelPolicy }) {
@@ -1339,10 +1405,7 @@ async function refreshWorldMemoryReportSnapshot({ sourceAction = "", reason = ""
         jsonPath: safeRelative(reportJsonPath),
         textPath: safeRelative(reportTextPath),
         summary: reportView.summary,
-        suggestions: [
-          ...normalizeTextList(reportView.memoryChangeSuggestions, 3),
-          ...normalizeTextList(reportView.portfolioSuggestions, 3),
-        ].slice(0, 5),
+        suggestions: reportChangeSuggestions(reportView),
         text: reportText,
         view: reportView,
         provider: generatedReport.provider,
@@ -1591,10 +1654,7 @@ async function executeWorldMemoryCycle({ trigger = "manual", scheduledAt = nowIs
           jsonPath: safeRelative(reportJsonPath),
           textPath: safeRelative(reportTextPath),
           summary: reportView.summary,
-          suggestions: [
-            ...normalizeTextList(reportView.memoryChangeSuggestions, 3),
-            ...normalizeTextList(reportView.portfolioSuggestions, 3),
-          ].slice(0, 5),
+          suggestions: reportChangeSuggestions(reportView),
           text: reportText,
           view: reportView,
           provider: generatedReport.provider,
@@ -2066,6 +2126,8 @@ export async function handleWorldMemoryEndpoint(kind, req, res) {
           startWorldMemoryCollector();
         } else {
           stopWorldMemoryCollector();
+          disableMagazineSettings("world-memory-disabled");
+          stopMagazineScheduler();
         }
         sendJson(res, publicWorldMemorySettingsSnapshot());
         return;

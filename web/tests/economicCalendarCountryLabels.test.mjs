@@ -7,6 +7,7 @@ import {
   mergeEconomicEventNamesIntoTranslationMemory,
   normalizeEconomicCalendarEventCountry,
   normalizeEconomicTranslationMemory,
+  normalizeEconomicTranslationCandidate,
 } from "../server/economicCalendarApi.mjs";
 
 test("economic calendar maps yfinance region codes to Korean country labels and flags", () => {
@@ -97,6 +98,46 @@ test("economic calendar registers unseen event names in translation memory witho
   assert.equal(memory.entries["CPI MM*"].status, "pending");
   assert.equal(memory.entries["CPI MM*"].textKo, "");
   assert.equal(memory.entries["Retail Sales YY*"].status, "pending");
+});
+
+test("economic calendar translation harness accepts Korean event names", () => {
+  const candidate = normalizeEconomicTranslationCandidate(
+    { sourceText: "Retail Sales YY*" },
+    { textKo: "소매판매 전년비*" }
+  );
+
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.textKo, "소매판매 전년비*");
+});
+
+test("economic calendar translation harness keeps blank model output pending", () => {
+  const candidate = normalizeEconomicTranslationCandidate(
+    { sourceText: "Retail Sales YY*" },
+    { textKo: "" }
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /textKo가 비어 있습니다/);
+});
+
+test("economic calendar translation harness rejects untranslated English copies", () => {
+  const candidate = normalizeEconomicTranslationCandidate(
+    { sourceText: "Retail Sales YY*" },
+    { textKo: "Retail Sales YY*" }
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /원문과 같습니다/);
+});
+
+test("economic calendar translation harness rejects English-only paraphrases", () => {
+  const candidate = normalizeEconomicTranslationCandidate(
+    { sourceText: "Initial Jobless Claims" },
+    { textKo: "Initial unemployment claims" }
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /한국어가 없습니다/);
 });
 
 test("economic calendar applies translated event names from translation memory", () => {

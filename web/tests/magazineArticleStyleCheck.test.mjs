@@ -1,0 +1,494 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const GUIBUILD_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const CHECK_SCRIPT = join(GUIBUILD_ROOT, "scripts", "magazine_article_style_check.mjs");
+
+function makeArticleBody({ internalPhrase = "" } = {}) {
+  const lead = internalPhrase
+    ? `${internalPhrase} 최근 시장 기록도 같은 방향을 가리킵니다.`
+    : "최근 시장 기록도 같은 방향을 가리킵니다.";
+  const paragraphs = [
+    `${lead} 전력망 병목은 기술주 서사와 유틸리티 투자 사이를 연결하며, 데이터센터 수요가 어느 지역에서 먼저 가격 신호로 바뀌는지 보여 줍니다.`,
+    "International Energy Agency(IEA·국제에너지기구)에 따르면 데이터센터 전력 수요는 2030년까지 빠르게 늘 수 있고, 선진국 전력 수요 증가분에서도 큰 비중을 차지할 수 있습니다.",
+    "Financial Times(FT·파이낸셜타임스)는 미국 전력·유틸리티 거래가 데이터센터 투자와 함께 커지고 있다고 전했습니다.",
+    "시장에서는 반도체 주문서와 전력 구매계약이 같은 투자 논리 안으로 들어오고 있습니다.",
+    "전력회사는 조용한 방어주에 머물지 않고, 송전망과 변전소 투자를 통해 AI 인프라의 병목을 풀어야 하는 당사자가 됐습니다.",
+    "Guidi et al.(기디 등)은 미국 하이퍼스케일 데이터센터의 지역 집중과 전력 탄소집약도를 분석했다고 설명했습니다.",
+    "이 숫자는 전국 총량보다 지역별 접속 대기열과 전력 믹스가 더 중요하다는 점을 보여 줍니다.",
+    "Watten, Bistline and Blanford(와튼·비스트라인·블랜퍼드)는 데이터센터가 과거 평균 요금에는 다른 영향을 줬을 수 있다고 분석했습니다.",
+    "그 반론은 단순히 요금이 오른다거나 내린다는 결론보다, 지역별 한계 비용과 규제 설계가 중요하다는 쪽으로 논쟁을 좁힙니다.",
+    "Axios(악시오스)는 대형 기술기업들이 데이터센터의 물 사용과 에너지 사용을 함께 설명하려 한다고 전했습니다.",
+    "물 냉각과 공기 냉각의 선택은 비용을 없애는 문제가 아니라, 전력과 물 사이에서 비용의 모양을 바꾸는 문제입니다.",
+    "따라서 다음 데이터는 발표된 메가와트보다 실제 연결 시점, 변압기 납기, 송전 접속 대기열, 요금 배분 방식에 가까워집니다.",
+  ];
+  const expanded = paragraphs.map((paragraph) => `${paragraph} 한 전력시장 연구자는 "지역 병목이 비용 배분을 바꾼다"라고 설명했습니다. 이 문단은 같은 결론을 반복하지 않고 전력망, 금융, 규제, 공급망이 서로 다른 속도로 움직인다는 점을 덧붙입니다. 지역별 연결 시점, 장비 납기, 자본조달 비용, 소비자 요금 설계가 서로 맞물릴 때 같은 AI 투자라도 수혜와 부담은 다른 주소로 배분됩니다. 그래서 기사형 점검에서는 전국 총량보다 실제 접속 지점과 시간표, 그리고 누가 먼저 비용을 부담하는지가 더 중요한 장면으로 남습니다.`);
+  return `<article class="magazine-article">
+  <h2>전력망으로 내려온 성장주 이야기</h2>
+  ${expanded.map((paragraph) => `<p>${paragraph}</p>`).join("\n  ")}
+</article>`;
+}
+
+function fakePng() {
+  const buffer = Buffer.alloc(12 * 1024);
+  buffer[0] = 0x89;
+  buffer.write("PNG", 1, "ascii");
+  buffer.writeUInt32BE(640, 16);
+  buffer.writeUInt32BE(360, 20);
+  return buffer;
+}
+
+function writeArticle(root, { articleId = "ai-power-bill-test", body, heroImage, topics = ["AI", "테크"], metadataPatch = {} } = {}) {
+  const articleDir = join(root, "articles", articleId);
+  mkdirSync(join(articleDir, "assets"), { recursive: true });
+  const image = heroImage || {
+    src: "assets/hero.png",
+    alt: "전력망 설비 사진",
+    credit: "U.S. Department of Energy",
+    sourceUrl: "https://www.energy.gov/",
+    license: "official-source",
+  };
+  writeFileSync(
+    join(articleDir, "assets", image.src.endsWith(".svg") ? "hero.svg" : image.src.split("/").pop()),
+    image.src.endsWith(".svg") ? "image-placeholder" : fakePng(),
+  );
+  writeFileSync(join(articleDir, "article.html"), body, "utf8");
+  writeFileSync(
+    join(articleDir, "metadata.json"),
+    JSON.stringify(
+      {
+        title: "AI 전력 수요 확대가 유틸리티 비용을 흔듭니다",
+        deck: "데이터센터 수요가 전력망 병목과 요금 배분 논쟁으로 번지고 있습니다.",
+        summary: "전력 수요, 송전 장비, 유틸리티 자본조달이 AI 인프라의 새 가격표로 떠올랐습니다.",
+        topics,
+        articleType: "fact-brief",
+        heroImage: image,
+        sourceBasis: [
+          "World Memory, local continuity evidence",
+          "IEA, Energy and AI, 2025",
+          "Financial Times, 2026",
+          "Guidi et al., arXiv, 2026",
+          "Axios, 2026",
+        ],
+        worldMemory: {
+          retrievalPolicy: "mandatory-vector-search",
+          query: "AI 데이터센터 전력 수요",
+          vectorSearch: {
+            engine: "sentence-transformers",
+            model: "ibm-granite/granite-embedding-97m-multilingual-r2",
+            hits: [{ eventId: "event-1", title: "AI 전력망 병목" }],
+          },
+        },
+        researchMode: "mixed-research",
+        editorialAngle: "policy-mechanics",
+        storyFamily: "AI 물리 인프라 비즈니스",
+        ...metadataPatch,
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+function runCheck(articleRoot) {
+  return execFileSync(process.execPath, [CHECK_SCRIPT, "--strict", "--json"], {
+    cwd: GUIBUILD_ROOT,
+    env: { ...process.env, MAGAZINE_ARTICLES_DIR: join(articleRoot, "articles") },
+    encoding: "utf8",
+  });
+}
+
+function runCheckWithEnv(articleRoot, env = {}) {
+  return execFileSync(process.execPath, [CHECK_SCRIPT, "--strict", "--json"], {
+    cwd: GUIBUILD_ROOT,
+    env: { ...process.env, ...env, MAGAZINE_ARTICLES_DIR: join(articleRoot, "articles") },
+    encoding: "utf8",
+  });
+}
+
+test("magazine style check allows World Memory evidence in metadata only", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-ok-"));
+  writeArticle(articleRoot, { body: makeArticleBody() });
+
+  const output = JSON.parse(runCheck(articleRoot));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.errors.length, 0);
+  assert.equal(output.warnings.length, 0);
+});
+
+test("magazine style check rejects World Memory in reader-facing article copy", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-bad-"));
+  writeArticle(articleRoot, { body: makeArticleBody({ internalPhrase: "World Memory에 쌓인" }) });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "internal-process-language"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check rejects SVG mock hero images", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-svg-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    heroImage: {
+      src: "assets/hero.svg",
+      alt: "전력망 벡터 목업",
+      credit: "FinanceAgentGUI",
+    },
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "hero-image-vector-mock"));
+      assert.ok(output.errors.some((issue) => issue.code === "hero-image-source-url-missing"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check rejects topics outside the configured catalog", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-topic-bad-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    topics: ["AI", "전력망"],
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "topics-outside-catalog"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check follows a custom topic catalog", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-topic-custom-"));
+  const topicConfigPath = join(articleRoot, "magazine-topics.json");
+  writeFileSync(
+    topicConfigPath,
+    JSON.stringify({ topics: [{ label: "반도체", emoji: "칩", tone: "tech" }] }),
+    "utf8",
+  );
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    topics: ["반도체"],
+  });
+
+  const output = JSON.parse(runCheckWithEnv(articleRoot, { MAGAZINE_TOPICS_PATH: topicConfigPath }));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.errors.length, 0);
+});
+
+test("magazine style check rejects cover stories without cover decision metadata", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-cover-bad-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    metadataPatch: {
+      isCoverStory: true,
+      coverRegisteredAt: "2026-06-30T00:00:00+09:00",
+    },
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "cover-decision-missing"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check accepts a cover story with world-memory comparison decision", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-cover-ok-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    metadataPatch: {
+      isCoverStory: true,
+      coverRegisteredAt: "2026-06-30T00:00:00+09:00",
+      coverDecision: {
+        policy: "world-memory-cover-v1",
+        result: "promote",
+        evaluatedAt: "2026-06-30T00:00:00+09:00",
+        comparisonWindow: {
+          basis: "upload-time",
+          articleLimit: 5,
+          articleIds: ["older-article-1", "older-article-2"],
+        },
+        worldMemorySignals: {
+          mostImportantIssue: "AI 전력망 병목",
+          mostRecentIssue: "전력장비 수급 압력",
+          query: "AI 데이터센터 전력망 병목",
+          hitIds: ["event-1"],
+        },
+        candidateScore: 91,
+        bestPreviousScore: 82,
+        rationale: "새 기사가 최근 비교창의 기사보다 현재 월드메모리 핵심 이슈에 더 직접 연결됩니다.",
+      },
+    },
+  });
+
+  const output = JSON.parse(runCheck(articleRoot));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.errors.length, 0);
+});
+
+test("magazine style check rejects News Feed items before the World Memory cutoff", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-news-feed-cutoff-bad-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    metadataPatch: {
+      sourceBasis: [
+        "News Feed, First Squawk, nf-before-cutoff",
+        "IEA, Energy and AI, 2025",
+        "Financial Times, 2026",
+        "Guidi et al., arXiv, 2026",
+        "Axios, 2026",
+      ],
+      newsFeed: {
+        selectionPolicy: "post-world-memory-update-only",
+        worldMemoryLastSuccessfulAt: "2026-06-30T00:00:00+09:00",
+        items: [
+          {
+            id: "nf-before-cutoff",
+            feedId: "first-squawk",
+            feedTitle: "First Squawk",
+            title: "컷오프 이전 피드",
+            publishedAt: "2026-06-29T23:59:00+09:00",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "news-feed-before-world-memory-cutoff"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check accepts News Feed evidence after the World Memory cutoff", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-news-feed-cutoff-ok-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    metadataPatch: {
+      sourceBasis: [
+        "News Feed, First Squawk, nf-after-cutoff",
+        "IEA, Energy and AI, 2025",
+        "Financial Times, 2026",
+        "Guidi et al., arXiv, 2026",
+        "Axios, 2026",
+      ],
+      researchMode: "news-feed-with-world-memory-backup",
+      newsFeed: {
+        selectionPolicy: "post-world-memory-update-only",
+        worldMemoryLastSuccessfulAt: "2026-06-30T00:00:00+09:00",
+        items: [
+          {
+            id: "nf-after-cutoff",
+            feedId: "first-squawk",
+            feedTitle: "First Squawk",
+            title: "컷오프 이후 피드",
+            publishedAt: "2026-06-30T00:01:00+09:00",
+          },
+        ],
+      },
+    },
+  });
+
+  const output = JSON.parse(runCheck(articleRoot));
+
+  assert.equal(output.ok, true);
+  assert.equal(output.errors.length, 0);
+});
+
+test("magazine style check rejects duplicate News Feed anchors inside a candidate set", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-duplicate-feed-"));
+  const duplicateNewsFeed = {
+    selectionPolicy: "post-world-memory-update-only",
+    worldMemoryLastSuccessfulAt: "2026-06-30T00:00:00+09:00",
+    items: [
+      {
+        id: "nf-duplicate",
+        feedId: "first-squawk",
+        feedTitle: "First Squawk",
+        title: "같은 피드 항목",
+        publishedAt: "2026-06-30T00:01:00+09:00",
+      },
+    ],
+  };
+  writeArticle(articleRoot, {
+    articleId: "first-duplicate-article",
+    body: makeArticleBody(),
+    metadataPatch: {
+      researchMode: "news-feed-with-world-memory-backup",
+      newsFeed: duplicateNewsFeed,
+    },
+  });
+  writeArticle(articleRoot, {
+    articleId: "second-duplicate-article",
+    body: makeArticleBody(),
+    metadataPatch: {
+      title: "같은 뉴스의 다른 옷",
+      researchMode: "news-feed-with-world-memory-backup",
+      newsFeed: duplicateNewsFeed,
+      storyFamily: "다른 표면 라벨",
+    },
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "duplicate-news-feed-anchor"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check rejects staged articles that reuse recent production anchors", () => {
+  const baselineRoot = mkdtempSync(join(tmpdir(), "magazine-style-baseline-"));
+  const stagedRoot = mkdtempSync(join(tmpdir(), "magazine-style-staged-"));
+  writeArticle(baselineRoot, {
+    articleId: "baseline-steel-article",
+    body: makeArticleBody(),
+    metadataPatch: {
+      title: "EU 철강 쿼터 첫 기사",
+      storyFamily: "글로벌 보호무역과 공급망 재편",
+      editorialAngle: "policy-mechanics",
+      worldMemory: {
+        retrievalPolicy: "mandatory-vector-search",
+        query: "EU 철강 쿼터",
+        vectorSearch: {
+          engine: "sentence-transformers",
+          model: "ibm-granite/granite-embedding-97m-multilingual-r2",
+          hits: [{ eventId: "steel-event", title: "EU 철강 쿼터 축소" }],
+        },
+      },
+    },
+  });
+  writeArticle(stagedRoot, {
+    articleId: "staged-steel-article",
+    body: makeArticleBody(),
+    metadataPatch: {
+      title: "EU 철강 쿼터 후속처럼 보이는 중복 기사",
+      storyFamily: "글로벌 보호무역과 공급망 재편",
+      editorialAngle: "external-research",
+      worldMemory: {
+        retrievalPolicy: "mandatory-vector-search",
+        query: "EU 철강 쿼터 한국 수출",
+        vectorSearch: {
+          engine: "sentence-transformers",
+          model: "ibm-granite/granite-embedding-97m-multilingual-r2",
+          hits: [{ eventId: "steel-event", title: "EU 철강 쿼터 축소" }],
+        },
+      },
+    },
+  });
+
+  assert.throws(
+    () => runCheckWithEnv(stagedRoot, {
+      MAGAZINE_BASELINE_ARTICLES_DIR: join(baselineRoot, "articles"),
+    }),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "duplicate-world-memory-anchor"));
+      assert.equal(output.baselineCount, 1);
+      return true;
+    },
+  );
+});
+
+test("magazine style check allows reused continuity anchors when a fresh News Feed anchor changes the story", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-continuity-anchor-"));
+  const heroImage = {
+    src: "assets/hero.png",
+    alt: "국방 장비 사진",
+    credit: "UK Ministry of Defence",
+    sourceUrl: "https://commons.wikimedia.org/wiki/Special:FilePath/RAF_Leeming_Photo_Task_2016_MOD_45162426.jpg",
+    license: "Open Government Licence",
+  };
+  writeArticle(articleRoot, {
+    articleId: "first-defence-article",
+    body: makeArticleBody(),
+    heroImage,
+    metadataPatch: {
+      title: "영국 국방 투자 패키지의 공급망 가격표",
+      storyFamily: "영국 방위투자 패키지와 유럽 방산 공급망 재가격화",
+      editorialAngle: "policy-mechanics",
+      worldMemory: {
+        retrievalPolicy: "mandatory-vector-search",
+        query: "영국 방위투자 패키지",
+        vectorSearch: {
+          engine: "sentence-transformers",
+          model: "ibm-granite/granite-embedding-97m-multilingual-r2",
+          hits: [{ eventId: "uk-defence-event", title: "영국 방위투자 패키지" }],
+        },
+      },
+    },
+  });
+  writeArticle(articleRoot, {
+    articleId: "second-defence-article",
+    body: makeArticleBody(),
+    heroImage,
+    metadataPatch: {
+      title: "NATO 국방비 목표와 영국 재정 신뢰도",
+      storyFamily: "NATO 국방비 목표와 영국 재정 신뢰도",
+      editorialAngle: "data-anomaly",
+      researchMode: "news-feed-with-world-memory-backup",
+      newsFeed: {
+        selectionPolicy: "post-world-memory-update-only",
+        worldMemoryLastSuccessfulAt: "2026-06-30T00:00:00+09:00",
+        items: [
+          {
+            id: "nf-nato-rutte-fresh",
+            feedId: "financialjuice",
+            feedTitle: "FinancialJuice",
+            title: "NATO 사무총장이 영국 방위투자 계획을 3.5% 목표 진전으로 평가했다",
+            publishedAt: "2026-06-30T10:27:02+09:00",
+          },
+        ],
+      },
+      worldMemory: {
+        retrievalPolicy: "mandatory-vector-search",
+        query: "영국 국방비 NATO",
+        vectorSearch: {
+          engine: "sentence-transformers",
+          model: "ibm-granite/granite-embedding-97m-multilingual-r2",
+          hits: [{ eventId: "uk-defence-event", title: "영국 방위투자 패키지" }],
+        },
+      },
+    },
+  });
+
+  const output = JSON.parse(runCheck(articleRoot));
+  assert.equal(output.ok, true);
+});

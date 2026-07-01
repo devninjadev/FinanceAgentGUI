@@ -7,6 +7,7 @@ import { handleArcaAuthEndpoint } from "./arcaAuthApi.mjs";
 import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
 import { handleMemoryEndpoint } from "./memoryApi.mjs";
+import { handleMagazineEndpoint, startMagazineScheduler } from "./magazineApi.mjs";
 import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
 import { handleReportsEndpoint } from "./reportsApi.mjs";
 import { handleWorldMemoryEndpoint, startWorldMemoryCollector } from "./worldMemoryApi.mjs";
@@ -162,6 +163,46 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/magazine/assets/")) {
+    await handleMagazineEndpoint("assets", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/comments")) {
+    await handleMagazineEndpoint("comments", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/preferences")) {
+    await handleMagazineEndpoint("preferences", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/bias")) {
+    await handleMagazineEndpoint("bias", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/settings")) {
+    await handleMagazineEndpoint("settings", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/status")) {
+    await handleMagazineEndpoint("status", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/read-state")) {
+    await handleMagazineEndpoint("read-state", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/magazine/articles")) {
+    await handleMagazineEndpoint("articles", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/world-memory/settings")) {
     await handleWorldMemoryEndpoint("settings", req, res);
     return;
@@ -242,5 +283,6 @@ server.listen(port, host, () => {
   setTimeout(() => {
     startNewsFeedCollector();
     startWorldMemoryCollector();
+    startMagazineScheduler();
   }, 0);
 });

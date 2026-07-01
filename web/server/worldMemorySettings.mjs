@@ -11,7 +11,10 @@ const USER_SETTINGS_PATH = join(CONFIG_DIR, "world-memory.user.json");
 const fallbackSettings = {
   version: 1,
   enabled: false,
+  managementProvider: "default",
 };
+
+const MODEL_PROVIDER_IDS = new Set(["default", "codex-cli", "antigravity-sdk"]);
 
 function ensureConfigDir() {
   mkdirSync(CONFIG_DIR, { recursive: true });
@@ -31,6 +34,9 @@ function normalizeWorldMemorySettings(raw = {}) {
   return {
     version: 1,
     enabled: source.enabled === true,
+    managementProvider: MODEL_PROVIDER_IDS.has(source.managementProvider)
+      ? source.managementProvider
+      : fallbackSettings.managementProvider,
     updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : "",
   };
 }
@@ -51,13 +57,16 @@ export function isWorldMemoryEnabled() {
 export function writeWorldMemorySettingsPatch(patch = {}) {
   ensureConfigDir();
   const source = patch && typeof patch === "object" ? patch : {};
-  if (source.enabled === undefined) {
-    throw new Error("enabled is required");
+  const hasEnabled = Object.prototype.hasOwnProperty.call(source, "enabled");
+  const hasManagementProvider = Object.prototype.hasOwnProperty.call(source, "managementProvider");
+  if (!hasEnabled && !hasManagementProvider) {
+    throw new Error("enabled or managementProvider is required");
   }
 
   const nextSettings = normalizeWorldMemorySettings({
     ...readWorldMemorySettings(),
-    enabled: source.enabled === true,
+    ...(hasEnabled ? { enabled: source.enabled === true } : {}),
+    ...(hasManagementProvider ? { managementProvider: source.managementProvider } : {}),
     updatedAt: new Date().toISOString(),
   });
   writeFileSync(USER_SETTINGS_PATH, `${JSON.stringify(nextSettings, null, 2)}\n`);
@@ -71,6 +80,7 @@ export function publicWorldMemorySettingsSnapshot() {
     configPath: "config/world-memory.user.json",
     defaultConfigPath: "config/world-memory.defaults.json",
     enabled: settings.enabled,
+    managementProvider: settings.managementProvider,
     settings,
   };
 }

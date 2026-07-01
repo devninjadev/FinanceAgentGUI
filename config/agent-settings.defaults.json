@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "selectedProvider": "codex-cli",
+  "personaMode": "none",
+  "providers": {
+    "codex-cli": {
+      "enabled": true,
+      "approval": "on-request",
+      "model": "gpt-5.5",
+      "reasoning": "high",
+      "speed": "standard"
+    },
+    "antigravity-sdk": {
+      "enabled": false,
+      "approval": "turbo",
+      "model": "gemini-3.5-flash",
+      "reasoning": "medium",
+      "speed": "standard"
+    }
+  }
+}

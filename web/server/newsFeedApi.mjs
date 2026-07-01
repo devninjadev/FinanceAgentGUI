@@ -35,12 +35,12 @@ const DEFAULT_MAX_ITEMS_PER_FEED = 500;
 const TRANSLATION_TIMEOUT_MS = 60000;
 const FETCH_TIMEOUT_MS = 20000;
 const FEED_FETCH_STAGGER_WINDOW_MS = 60000;
-const TRANSLATION_TITLE_MAX_CHARS = 500;
 const TRANSLATION_BODY_MAX_CHARS = 1200;
 const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
 const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
 const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
 const ANTIGRAVITY_FALLBACK_MODEL = "gemini-3.5-flash";
+const UNTRANSLATED_COPY_LATIN_WORDS = 2;
 const runtimeKey = Symbol.for("financeAgentGui.newsFeedCollector");
 const defaultFeedHeaders = {
   accept: "application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.5",
@@ -208,10 +208,17 @@ function atomLinkValue(link) {
 
 function itemFingerprint(feed, item) {
   const guid = textValue(item.guid || item.id).trim();
-  const link = (atomLinkValue(item.link) || textValue(item.link)).trim();
+  const link = newsFeedItemSourceUrl(item);
   const title = cleanText(item.title);
   const published = textValue(item.pubDate || item.published || item.updated || item["dc:date"]).trim();
   return hashText([feed.id, guid || link || title, published].join("\n"));
+}
+
+function newsFeedItemSourceUrl(item) {
+  const link = (atomLinkValue(item.link) || textValue(item.link)).trim();
+  if (link) return link;
+  const guid = textValue(item.guid || item.id).trim();
+  return /^https?:\/\//i.test(guid) ? guid : "";
 }
 
 function normalizeRssItem(feed, item, channelTitle) {
@@ -225,6 +232,7 @@ function normalizeRssItem(feed, item, channelTitle) {
     sourceFingerprint: fingerprint,
     feedId: feed.id,
     feedTitle: feed.title || channelTitle || feed.id,
+    sourceUrl: newsFeedItemSourceUrl(item),
     title,
     originalText: body,
     translatedTitle: "",
@@ -239,7 +247,7 @@ function normalizeRssItem(feed, item, channelTitle) {
   };
 }
 
-function parseFeedXml(xml, feed) {
+export function parseFeedXml(xml, feed) {
   if (!String(xml || "").trim()) {
     throw new Error("RSS 응답 본문이 비어 있습니다.");
   }
@@ -737,18 +745,21 @@ function translationPrompt(items) {
   };
   const input = items.map((item) => ({
     id: item.id,
-    title: truncateForTranslation(item.title, TRANSLATION_TITLE_MAX_CHARS),
     body: truncateForTranslation(item.originalText, TRANSLATION_BODY_MAX_CHARS),
   }));
 
   return [
-    "금융 뉴스 RSS 항목을 한국어로 번역한다.",
+    "금융 뉴스 RSS 항목의 본문을 한국어로 번역한다.",
+    "RSS title은 번역 대상이 아니다. title을 입력에 포함하지 않고, title 번역을 만들거나 반환하지 않는다.",
     "출력은 JSON 객체 하나만 반환한다. 링크, URL, 출처 링크 문구는 절대 넣지 않는다.",
     "원문 의미를 보존하고, 시장/기업/중앙은행 용어는 한국 투자자가 읽기 자연스럽게 옮긴다.",
     "요약하지 말고 번역한다. 본문이 비어 있으면 bodyKo는 빈 문자열로 둔다.",
+    "모든 입력 id에 대해 translations 항목을 정확히 하나씩 반환한다.",
+    "입력 body가 있으면 bodyKo를 비우지 않는다.",
+    "영문 원문 문장을 그대로 복사하지 말고 반드시 한국어 문장으로 번역한다.",
     "",
     "반환 형식:",
-    '{"translations":[{"id":"입력 id","titleKo":"한국어 제목","bodyKo":"한국어 본문"}]}',
+    '{"translations":[{"id":"입력 id","bodyKo":"한국어 본문"}]}',
     "",
     "입력 JSON:",
     JSON.stringify({ items: input }, null, 2),
@@ -769,6 +780,47 @@ function parseJsonPayload(text) {
   }
 }
 
+function compactTranslationText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function sameTranslationText(left, right) {
+  const normalizedLeft = compactTranslationText(left).toLocaleLowerCase("en-US");
+  const normalizedRight = compactTranslationText(right).toLocaleLowerCase("en-US");
+  return normalizedLeft && normalizedLeft === normalizedRight;
+}
+
+function likelyNeedsKoreanTranslation(value) {
+  const text = compactTranslationText(value);
+  if (!text || /[가-힣]/.test(text)) return false;
+  const latinWords = text.match(/[A-Za-z][A-Za-z'.-]{2,}/g) || [];
+  return latinWords.length >= UNTRANSLATED_COPY_LATIN_WORDS;
+}
+
+function hasKoreanText(value) {
+  return /[가-힣]/.test(String(value || ""));
+}
+
+export function normalizeNewsFeedTranslationCandidate(item = {}, translation = {}) {
+  const sourceBody = compactTranslationText(item.originalText);
+  let bodyKo = compactTranslationText(translation?.bodyKo);
+
+  const issues = [];
+  if (sourceBody && !bodyKo) issues.push("bodyKo가 비어 있습니다");
+  if (sourceBody && bodyKo && likelyNeedsKoreanTranslation(sourceBody) && !hasKoreanText(bodyKo)) {
+    issues.push("bodyKo에 한국어가 없습니다");
+  }
+  if (sourceBody && bodyKo && likelyNeedsKoreanTranslation(sourceBody) && sameTranslationText(sourceBody, bodyKo)) {
+    issues.push("bodyKo가 영문 원문과 같습니다");
+  }
+
+  return {
+    ok: issues.length === 0,
+    bodyKo,
+    error: issues.length ? `번역 검증 보류: ${issues.join(", ")}` : "",
+  };
+}
+
 function runCodexTranslationBatch(items, modelInfo) {
   return new Promise((resolveBatch, reject) => {
     const tempDir = mkdtempSync(join(tmpdir(), "finance-agent-news-feed-"));
@@ -785,10 +837,9 @@ function runCodexTranslationBatch(items, modelInfo) {
             additionalProperties: false,
             properties: {
               id: { type: "string" },
-              titleKo: { type: "string" },
               bodyKo: { type: "string" },
             },
-            required: ["id", "titleKo", "bodyKo"],
+            required: ["id", "bodyKo"],
           },
         },
       },
@@ -983,16 +1034,36 @@ function startPendingNewsFeedTranslation(batchSize) {
         const translationById = new Map(translated.translations.map((item) => [String(item.id), item]));
         const pendingIds = new Set(pendingItems.map((item) => item.id));
         let translatedCount = 0;
+        let retryCount = 0;
 
         store = readStore();
         store.items = store.items.map((item) => {
           if (!pendingIds.has(item.id)) return item;
           const translation = translationById.get(item.id);
           if (!translation) {
+            retryCount += 1;
             return {
               ...item,
+              translatedTitle: "",
+              translatedText: "",
+              translatedAt: "",
               translationStatus: "pending",
-              translationError: "",
+              translationError: "번역 응답에 이 항목이 없어 재시도 대기열에 유지합니다.",
+              translationModel: translated.model,
+              translationReasoning: translated.reasoning,
+            };
+          }
+
+          const candidate = normalizeNewsFeedTranslationCandidate(item, translation);
+          if (!candidate.ok) {
+            retryCount += 1;
+            return {
+              ...item,
+              translatedTitle: "",
+              translatedText: "",
+              translatedAt: "",
+              translationStatus: "pending",
+              translationError: candidate.error,
               translationModel: translated.model,
               translationReasoning: translated.reasoning,
             };
@@ -1001,8 +1072,8 @@ function startPendingNewsFeedTranslation(batchSize) {
           translatedCount += 1;
           return {
             ...item,
-            translatedTitle: String(translation.titleKo || "").trim(),
-            translatedText: String(translation.bodyKo || "").trim(),
+            translatedTitle: "",
+            translatedText: candidate.bodyKo,
             translatedAt: nowIso(),
             translationStatus: "translated",
             translationError: "",
@@ -1013,13 +1084,17 @@ function startPendingNewsFeedTranslation(batchSize) {
         store.collector = {
           ...store.collector,
           status: store.collector.status === "error" ? "error" : "ok",
-          lastAction: `${translatedCount}개 항목 번역 완료`,
+          lastAction: retryCount
+            ? `${translatedCount}개 항목 번역 완료, ${retryCount}개 항목 재시도 대기`
+            : `${translatedCount}개 항목 번역 완료`,
           lastTranslatedCount: translatedCount,
           translationModel: translated.model,
           translationReasoning: translated.reasoning,
+          translationLastError: retryCount ? `${retryCount}개 항목 번역 검증 보류` : "",
           lastPollFinishedAt: nowIso(),
         };
         store = writeStore(store);
+        if (retryCount) break;
       } catch (error) {
         store = readStore();
         store.collector = {

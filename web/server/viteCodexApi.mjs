@@ -1,5 +1,6 @@
 import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
+import { handleMagazineEndpoint, startMagazineScheduler } from "./magazineApi.mjs";
 import { handleMemoryEndpoint } from "./memoryApi.mjs";
 import { handlePortfolioEndpoint } from "./portfolioApi.mjs";
 import { handleReportsEndpoint } from "./reportsApi.mjs";
@@ -30,6 +31,7 @@ export function codexApiPlugin() {
     configureServer(server) {
       startNewsFeedCollector();
       startWorldMemoryCollector();
+      startMagazineScheduler();
 
       server.middlewares.use("/api/news-feed/settings", async (req, res) => {
         await handleNewsFeedEndpoint("settings", req, res);
@@ -113,6 +115,38 @@ export function codexApiPlugin() {
 
       server.middlewares.use("/api/reports", async (req, res) => {
         await handleReportsEndpoint("list", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/assets", async (req, res) => {
+        await handleMagazineEndpoint("assets", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/comments", async (req, res) => {
+        await handleMagazineEndpoint("comments", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/preferences", async (req, res) => {
+        await handleMagazineEndpoint("preferences", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/bias", async (req, res) => {
+        await handleMagazineEndpoint("bias", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/settings", async (req, res) => {
+        await handleMagazineEndpoint("settings", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/status", async (req, res) => {
+        await handleMagazineEndpoint("status", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/read-state", async (req, res) => {
+        await handleMagazineEndpoint("read-state", req, res);
+      });
+
+      server.middlewares.use("/api/magazine/articles", async (req, res) => {
+        await handleMagazineEndpoint("articles", req, res);
       });
 
       server.middlewares.use("/api/world-memory/status", async (req, res) => {

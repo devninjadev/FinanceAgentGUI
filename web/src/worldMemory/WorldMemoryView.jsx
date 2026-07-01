@@ -266,7 +266,7 @@ export default function WorldMemoryView({
   const report = status?.report || {};
   const reportText = report.text || "";
   const hasRichReport = Boolean(report.view);
-  const suggestions = Array.isArray(report.suggestions) ? report.suggestions : [];
+  const legacySuggestions = !hasRichReport && Array.isArray(report.suggestions) ? report.suggestions : [];
   const nextCollection = schedule.nextRetryAt || schedule.pausedUntil || schedule.nextRunAt;
   const paused = schedule.pausedUntil && new Date(schedule.pausedUntil).getTime() > Date.now();
   const active = Boolean(collector.inFlight || collector.running || actionBusy);
@@ -360,26 +360,28 @@ export default function WorldMemoryView({
           )}
         </section>
 
-        <section className="world-memory-section" aria-labelledby="world-memory-suggestions-title">
-          <div className="world-memory-section-header">
-            <div>
-              <h2 id="world-memory-suggestions-title">변경 제안</h2>
-              <span>수집 이후 memory/taxonomy/관찰 포인트 조정 후보</span>
+        {!hasRichReport ? (
+          <section className="world-memory-section" aria-labelledby="world-memory-suggestions-title">
+            <div className="world-memory-section-header">
+              <div>
+                <h2 id="world-memory-suggestions-title">변경 제안</h2>
+                <span>수집 이후 memory/taxonomy 조정 후보</span>
+              </div>
             </div>
-          </div>
-          {suggestions.length ? (
-            <div className="world-memory-suggestion-list">
-              {suggestions.map((item, index) => (
-                <div className="world-memory-suggestion" key={`${item}-${index}`}>
-                  <CheckCircle2 size={15} strokeWidth={2.2} />
-                  <span>{item}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="settings-empty">아직 표시할 변경 제안이 없습니다.</div>
-          )}
-        </section>
+            {legacySuggestions.length ? (
+              <div className="world-memory-suggestion-list">
+                {legacySuggestions.map((item, index) => (
+                  <div className="world-memory-suggestion" key={`${item}-${index}`}>
+                    <CheckCircle2 size={15} strokeWidth={2.2} />
+                    <span>{item}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="settings-empty">아직 표시할 변경 제안이 없습니다.</div>
+            )}
+          </section>
+        ) : null}
 
         <section className="world-memory-section" aria-labelledby="world-memory-last-run-title">
           <div className="world-memory-section-header">

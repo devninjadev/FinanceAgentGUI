@@ -3325,6 +3325,41 @@ def _upsert_sqlite_payload(conn: sqlite3.Connection, payload: dict[str, Any]) ->
     )
 
 
+def _read_world_issue_entry(conn: sqlite3.Connection, event_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT event_id, entry_mode, payload_json
+        FROM world_issue_entries
+        WHERE event_id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except json.JSONDecodeError:
+        return {
+            "event_id": str(row["event_id"]),
+            "entry_mode": str(row["entry_mode"]),
+            "payload": None,
+            "error": "invalid payload_json",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "event_id": str(row["event_id"]),
+            "entry_mode": str(row["entry_mode"]),
+            "payload": None,
+            "error": "payload_json is not an object",
+        }
+    return {
+        "event_id": str(row["event_id"]),
+        "entry_mode": str(row["entry_mode"]),
+        "payload": payload,
+        "error": "",
+    }
+
+
 def _taxonomy_observed_at(payload: dict[str, Any]) -> str:
     observed_at = _parse_datetime_safe(payload.get("as_of")) or _parse_datetime_safe(payload.get("logged_at"))
     if observed_at is None:
@@ -6359,6 +6394,119 @@ def _handle_brief_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_brief_story_backfill(args: argparse.Namespace) -> int:
+    db_path = _ensure_db(args.base_dir, args.db_file)
+    event_ids = _unique_preserve_order([str(item).strip() for item in args.event_id if str(item).strip()])
+    if not event_ids:
+        raise SystemExit("brief-story-backfill requires at least one --event-id")
+
+    story = _normalize_story_label(args.story or "")
+    if not story:
+        raise SystemExit("brief-story-backfill requires --story")
+    story_family = _canonical_story_family_label(args.story_family or story)
+    story_note = _normalize_whitespace(args.note or "")
+
+    updated_payloads: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    embedding_stats: dict[str, Any] | None = None
+    with _connect_db(db_path) as conn:
+        _init_db(conn)
+        story_catalog = _build_story_router_catalog(conn)
+        for event_id in event_ids:
+            record = _read_world_issue_entry(conn, event_id)
+            if record is None:
+                results.append({"event_id": event_id, "status": "missing", "reason": "event_id not found"})
+                continue
+            if record.get("error"):
+                results.append({"event_id": event_id, "status": "skipped", "reason": record["error"]})
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                results.append({"event_id": event_id, "status": "skipped", "reason": "payload_json is not an object"})
+                continue
+            if str(record.get("entry_mode") or payload.get("entry_mode") or "").strip() != "brief":
+                results.append({"event_id": event_id, "status": "skipped", "reason": "entry is not a brief"})
+                continue
+            existing_story = str(payload.get("story", "")).strip()
+            if existing_story and not args.replace_existing:
+                results.append({
+                    "event_id": event_id,
+                    "status": "skipped",
+                    "reason": "brief already has story",
+                    "story": existing_story,
+                })
+                continue
+
+            patched = dict(payload)
+            patched["story"] = story
+            patched["story_key"] = _normalize_story_key(story)
+            patched["story_family"] = story_family
+            patched["story_family_key"] = _normalize_story_family_key(story_family)
+            patched["manual_story_override"] = True
+            if story_note:
+                patched["story_note"] = story_note
+            if args.confidence is not None:
+                patched["manual_story_confidence"] = min(1.0, max(0.0, float(args.confidence)))
+
+            try:
+                normalized = _prepare_payload_for_storage(conn, patched, story_catalog=story_catalog)
+            except ValueError as error:
+                results.append({"event_id": event_id, "status": "skipped", "reason": str(error)})
+                continue
+            normalized["event_id"] = str(payload.get("event_id") or event_id)
+
+            results.append({
+                "event_id": event_id,
+                "status": "would_update" if args.dry_run else "updated",
+                "title": str(normalized.get("title", "")),
+                "story": str(normalized.get("story", "")),
+                "story_family": str(normalized.get("story_family", "")),
+            })
+            if args.dry_run:
+                continue
+
+            _upsert_sqlite_payload(conn, normalized)
+            _upsert_taxonomy_for_payload(conn, normalized)
+            updated_payloads.append(normalized)
+
+        taxonomy_rows = 0
+        if args.dry_run:
+            conn.rollback()
+        else:
+            taxonomy_rows = _rebuild_taxonomy_index(conn)
+            embedding_stats = _maybe_write_embeddings_for_payloads(
+                conn,
+                updated_payloads,
+                args,
+                default_mode="off",
+            )
+            conn.commit()
+
+    payload = {
+        "db_path": str(db_path),
+        "dry_run": bool(args.dry_run),
+        "story": story,
+        "story_family": story_family,
+        "requested": len(event_ids),
+        "updated": sum(1 for item in results if item["status"] in {"updated", "would_update"}),
+        "results": results,
+        "taxonomy_rows": taxonomy_rows,
+        "embedding": embedding_stats,
+    }
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        mode = "Dry run" if args.dry_run else "Backfill completed"
+        print(f"{mode}: updated={payload['updated']} requested={payload['requested']}")
+        print(f"story={story}")
+        print(f"story_family={story_family}")
+        for item in results:
+            print(f"- {item['event_id']} {item['status']}: {item.get('title') or item.get('reason') or ''}")
+        _print_embedding_write_stats(embedding_stats)
+        print(f"SQLite store: {db_path}")
+    return 0
+
+
 def _handle_list(args: argparse.Namespace) -> int:
     filtered, backend, db_path, _, _ = _load_filtered_rows(args)
 
@@ -7447,6 +7595,29 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_write_embedding_args(p_brief_import)
     p_brief_import.add_argument("--dry-run", action="store_true", help="저장 없이 정규화 payload 확인")
 
+    p_brief_story_backfill = sub.add_parser(
+        "brief-story-backfill",
+        help="기존 orphan brief에 사용자 승인 story를 수동 backfill",
+    )
+    p_brief_story_backfill.add_argument(
+        "--event-id",
+        action="append",
+        default=[],
+        help="story를 부여할 brief event_id. 여러 번 지정 가능",
+    )
+    p_brief_story_backfill.add_argument("--story", required=True, help="부여할 story 라벨")
+    p_brief_story_backfill.add_argument("--story-family", default="", help="story family 라벨(기본: story)")
+    p_brief_story_backfill.add_argument("--note", default="", help="수동 backfill 판단 메모")
+    p_brief_story_backfill.add_argument("--confidence", type=float, default=None, help="판단 신뢰도(0~1)")
+    p_brief_story_backfill.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="이미 story가 있는 brief도 덮어씀",
+    )
+    p_brief_story_backfill.add_argument("--format", choices=["text", "json"], default="text", help="출력 포맷")
+    _add_write_embedding_args(p_brief_story_backfill)
+    p_brief_story_backfill.add_argument("--dry-run", action="store_true", help="저장 없이 변경 대상만 확인")
+
     p_list = sub.add_parser("list", help="이슈 로그 조회")
     p_list.add_argument("--start", type=_parse_date, default=None, help="시작일 (YYYY-MM-DD)")
     p_list.add_argument("--end", type=_parse_date, default=None, help="종료일 (YYYY-MM-DD, 기본: 오늘 KST)")
@@ -7645,6 +7816,8 @@ def main(argv: list[str] | None = None) -> int:
         return _handle_brief_add(args)
     if args.cmd == "brief-import":
         return _handle_brief_import(args)
+    if args.cmd == "brief-story-backfill":
+        return _handle_brief_story_backfill(args)
     if args.cmd == "list":
         return _handle_list(args)
     if args.cmd == "report":

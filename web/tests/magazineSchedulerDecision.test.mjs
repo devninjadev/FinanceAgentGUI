@@ -1,0 +1,86 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  fallbackMagazineArticleCountDecision,
+  normalizeMagazineSchedulerNextRunAt,
+  normalizeMagazineArticleCountDecision,
+} from "../server/magazineApi.mjs";
+
+test("magazine scheduler preserves a model decision to skip with reason", () => {
+  const decision = normalizeMagazineArticleCountDecision(
+    {
+      targetCount: 0,
+      confidence: 0.88,
+      reason: "최근 기사와 다른 독립 각도가 부족합니다.",
+      candidateAngles: [],
+    },
+    {
+      maxCount: 3,
+      provider: "antigravity-sdk",
+      model: "gemini-3.5-flash",
+      reasoning: "medium",
+    },
+  );
+
+  assert.equal(decision.schemaOk, true);
+  assert.equal(decision.targetCount, 0);
+  assert.equal(decision.basis, "llm-editorial-judgment");
+  assert.equal(decision.provider, "antigravity-sdk");
+  assert.match(decision.reason, /독립 각도/);
+});
+
+test("magazine scheduler clamps model count decisions to the configured maximum", () => {
+  const decision = normalizeMagazineArticleCountDecision(
+    {
+      targetCount: 9,
+      confidence: 0.73,
+      reason: "후보가 많지만 설정 상한을 따른다.",
+      candidateAngles: [
+        { title: "A", reason: "첫 번째 후보", urgency: "high" },
+        { title: "B", reason: "두 번째 후보", urgency: "medium" },
+        { title: "C", reason: "세 번째 후보", urgency: "low" },
+        { title: "D", reason: "초과 후보", urgency: "high" },
+      ],
+    },
+    { maxCount: 3 },
+  );
+
+  assert.equal(decision.targetCount, 3);
+  assert.equal(decision.candidateAngles.length, 3);
+  assert.equal(decision.candidateAngles[0].urgency, "high");
+});
+
+test("magazine scheduler fallback is explicit and never random", () => {
+  const decision = fallbackMagazineArticleCountDecision({
+    maxCount: 3,
+    provider: "codex-cli",
+    model: "gpt-5.5",
+    reasoning: "high",
+    error: "model unavailable",
+  });
+
+  assert.equal(decision.targetCount, 1);
+  assert.equal(decision.fallback, true);
+  assert.equal(decision.basis, "fallback-after-model-decision-failure");
+  assert.match(decision.reason, /1건/);
+  assert.match(decision.error, /model unavailable/);
+});
+
+test("magazine scheduler normalizes manual next-run timestamps", () => {
+  const nextRunAt = normalizeMagazineSchedulerNextRunAt("2026-06-30T17:30:00+09:00", {
+    nowMs: Date.parse("2026-06-30T17:00:00+09:00"),
+  });
+
+  assert.equal(nextRunAt, "2026-06-30T08:30:00.000Z");
+});
+
+test("magazine scheduler rejects manual next-run timestamps in the past", () => {
+  assert.throws(
+    () =>
+      normalizeMagazineSchedulerNextRunAt("2026-06-30T17:30:00+09:00", {
+        nowMs: Date.parse("2026-06-30T17:31:00+09:00"),
+      }),
+    /future/,
+  );
+});

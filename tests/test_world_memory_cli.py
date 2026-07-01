@@ -507,6 +507,70 @@ class WorldMemoryCliTests(unittest.TestCase):
                 self.assertEqual(stored["story"], "글로벌 방산 붐")
                 self.assertEqual(stored["story_family"], "글로벌 방산 붐")
 
+    def test_brief_story_backfill_sets_manual_override_for_orphan_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "world_issue_log.sqlite3"
+            as_of = dt.datetime(2026, 4, 20, 9, 0, tzinfo=ZoneInfo(wm.DEFAULT_TZ))
+            with wm._connect_db(db_path) as conn:
+                wm._init_db(conn)
+                orphan_brief = wm._prepare_payload_for_storage(
+                    conn,
+                    self._make_brief_payload(
+                        as_of=as_of,
+                        title="BOJ 발언과 엔화 변동성 확대",
+                        summary="일본 금리와 엔화 경계가 커졌다.",
+                        story="",
+                        tags=["boj", "jpy", "rates"],
+                        subjects=[{"name": "Bank of Japan", "type": "institution"}],
+                        industries=["fx", "rates", "public_finance"],
+                    ),
+                    story_catalog=[],
+                )
+                orphan_brief.pop("story", None)
+                orphan_brief.pop("story_key", None)
+                orphan_brief.pop("story_family", None)
+                orphan_brief.pop("story_family_key", None)
+                wm._upsert_sqlite_payload(conn, orphan_brief)
+                conn.commit()
+
+            run_args = argparse.Namespace(
+                base_dir=tmpdir,
+                db_file="world_issue_log.sqlite3",
+                event_id=[orphan_brief["event_id"]],
+                story="일본 금리·엔화 변동성",
+                story_family="글로벌 금리·FX 방어",
+                note="사용자 승인 backfill",
+                confidence=0.8,
+                replace_existing=False,
+                format="json",
+                embedding_mode="off",
+                engine=wm.DEFAULT_EMBEDDING_ENGINE,
+                model=wm.DEFAULT_EMBEDDING_MODEL,
+                batch_size=wm.DEFAULT_EMBEDDING_BATCH_SIZE,
+                device="",
+                max_seq_length=wm.DEFAULT_EMBEDDING_MAX_SEQ_LENGTH,
+                verbose_model_load=False,
+                dry_run=False,
+            )
+            wm._handle_brief_story_backfill(run_args)
+
+            with wm._connect_db(db_path) as conn:
+                row = conn.execute(
+                    "SELECT payload_json FROM world_issue_entries WHERE event_id = ?",
+                    (orphan_brief["event_id"],),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                stored = json.loads(str(row["payload_json"]))
+                self.assertEqual(stored["story"], "일본 금리·엔화 변동성")
+                self.assertEqual(stored["story_family"], "글로벌 금리·FX 방어")
+                self.assertTrue(stored["manual_story_override"])
+                self.assertEqual(stored["manual_story_confidence"], 0.8)
+
+                scanned, updated, skipped = wm._cleanup_world_issue_entries(conn)
+                self.assertEqual(scanned, 1)
+                self.assertEqual(skipped, 0)
+                self.assertEqual(updated, 0)
+
     def test_world_issue_embeddings_are_sidecar_and_skip_stale_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "world_issue_log.sqlite3"

@@ -1,19 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <rect width="32" height="32" rx="8" fill="#2f2f2f" />
-  <path
-    d="M8 7v17a2 2 0 0 0 2 2h15"
+  <g
+    transform="translate(4 4)"
     fill="none"
     stroke="#ffffff"
     stroke-linecap="round"
     stroke-linejoin="round"
     stroke-width="2.8"
-  />
-  <path
-    d="M22 22v-9M16 22V9M10 22v-4"
-    fill="none"
-    stroke="#ffffff"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-    stroke-width="2.8"
-  />
+  >
+    <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+    <polyline points="16 7 22 7 22 13" />
+  </g>
 </svg>

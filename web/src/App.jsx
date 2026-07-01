@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import Check from "lucide-react/dist/esm/icons/check.js";
+import Copy from "lucide-react/dist/esm/icons/copy.js";
 import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import SendHorizontal from "lucide-react/dist/esm/icons/send-horizontal.js";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
 import codexLogo from "./assets/codex-logo-transparent.png";
 import antigravityLogo from "./assets/antigravity-logo.png";
+import stockChannelMagazineLogo from "./assets/stock-channel-magazine-logo.png";
 import { AgentSidebar } from "./agent/AgentSidebar.jsx";
 import { ChatCanvas } from "./agent/ChatCanvas.jsx";
 import {
@@ -72,7 +78,8 @@ import {
   buildPortfolioCanvasSelectState,
   buildPortfolioCanvasWorkspaceUpdateState,
 } from "./portfolio/canvasStoreActions.js";
-import { formatCount, formatFileSize } from "./utils/formatters.js";
+import { formatCount, formatDateTime, formatFileSize } from "./utils/formatters.js";
+import { MarkdownText } from "./utils/MarkdownText.jsx";
 import { parseReportArtifactAction, stripReportArtifactBlocks } from "./reports/reportArtifactAction.js";
 import { AppNavigation } from "./shell/AppNavigation.jsx";
 import { compactVisibleScreenText, collectVisibleScreenSnapshot } from "./shell/screenSnapshot.js";
@@ -84,6 +91,9 @@ const SettingsView = React.lazy(() => import("./settings/SettingsView.jsx"));
 const ReportsView = React.lazy(() => import("./reports/ReportsView.jsx"));
 const NewsFeedView = React.lazy(() => import("./news/NewsFeedView.jsx"));
 const WorldMemoryView = React.lazy(() => import("./worldMemory/WorldMemoryView.jsx"));
+const MagazinePortfolioEChart = React.lazy(() =>
+  import("./portfolio/PortfolioEChart.jsx").then((module) => ({ default: module.PortfolioEChart }))
+);
 const EarningCalendarView = React.lazy(() =>
   import("./calendars/CalendarViews.jsx").then((module) => ({ default: module.EarningCalendarView }))
 );
@@ -98,10 +108,1035 @@ const PortfolioWorkspace = React.lazy(() =>
 );
 
 const initialChatMessages = [];
+const CODEX_PROVIDER_ID = "codex-cli";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const agentProviderIds = [CODEX_PROVIDER_ID, ANTIGRAVITY_PROVIDER_ID];
+function normalizeAgentModelProvider(value) {
+  return value === CODEX_PROVIDER_ID || value === ANTIGRAVITY_PROVIDER_ID ? value : "default";
+}
+const magazineFallbackTopics = [
+  { label: "시장", emoji: "📈", tone: "market" },
+  { label: "금융", emoji: "🏦", tone: "finance" },
+  { label: "경제", emoji: "🌐", tone: "economy" },
+  { label: "산업", emoji: "🏭", tone: "industry" },
+  { label: "테크", emoji: "💻", tone: "tech" },
+  { label: "정치", emoji: "🏛️", tone: "policy" },
+  { label: "AI", emoji: "🤖", tone: "ai" },
+  { label: "기후", emoji: "🌱", tone: "climate" },
+  { label: "크립토", emoji: "🪙", tone: "crypto" },
+];
+const magazineToneSequence = ["market", "finance", "economy", "industry", "tech", "policy", "ai", "climate", "crypto"];
+const MAGAZINE_ARTICLE_PAGE_SIZE = 5;
+const magazineDefaultFollowupOptions = [
+  {
+    id: "deeper-data",
+    label: "데이터를 더 자세히",
+    prompt: "이 주제의 핵심 데이터를 더 비교하는 후속 기사",
+    tone: "market",
+  },
+  {
+    id: "market-impact",
+    label: "시장 영향 더 보기",
+    prompt: "이 이슈가 자산 가격과 업종에 미치는 영향",
+    tone: "finance",
+  },
+  {
+    id: "company-map",
+    label: "관련 기업으로 확장",
+    prompt: "연결되는 기업, ETF, 산업 밸류체인을 정리하는 기사",
+    tone: "industry",
+  },
+  {
+    id: "next-signal",
+    label: "다음 신호 추적",
+    prompt: "이 이슈를 확인하거나 반박할 다음 지표와 일정",
+    tone: "economy",
+  },
+];
+const magazineHeadlineStory = {
+  topic: "커버 스토리",
+  title: "금리 이후의 시장, 성장주의 판이 다시 열리나",
+  deck:
+    "달러 약세, 금리 인하 기대, 실적 시즌의 방향성이 한 화면에 걸린 이번 주 시장의 중심축을 짚습니다. 성장주 반등이 단순한 유동성 랠리인지, 아니면 이익 전망과 투자 심리가 함께 되살아나는 초기 신호인지 구분하는 것이 핵심입니다. 이번 커버스토리는 반도체, AI 인프라, 금융 여건, 경기민감 업종의 움직임을 연결해 다음 시장 국면의 주도권이 어디로 이동하는지 살펴봅니다.",
+  image:
+    "https://images.unsplash.com/photo-1740199929970-1c884baae7d8?auto=format&fit=crop&w=1200&q=80",
+  imageAlt: "도시 금융 지구의 고층 빌딩 전경",
+  imageCredit: "사진: Unsplash",
+};
+const magazineFeatureStories = [
+  {
+    topic: "시장",
+    title: "리스크 온의 재개, 지수보다 강한 섹터는 어디인가",
+    image:
+      "https://images.unsplash.com/photo-1742076553114-cfd4f27de46f?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "노트북 화면에 표시된 주식 시장 차트",
+    imageCredit: "사진: Unsplash",
+  },
+  {
+    topic: "AI",
+    title: "데이터센터 전력 수요가 다시 CAPEX를 흔든다",
+    image:
+      "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "데이터센터 서버 랙",
+    imageCredit: "사진: Unsplash",
+  },
+  {
+    topic: "산업",
+    title: "항만과 운임이 말하는 공급망의 온도",
+    image:
+      "https://images.unsplash.com/photo-1769144256207-bc4bb75b29db?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "컨테이너를 실은 화물선과 항만",
+    imageCredit: "사진: Unsplash",
+  },
+  {
+    topic: "기후",
+    title: "재생에너지 투자, 금리 하락 국면의 수혜가 될까",
+    image:
+      "https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "넓게 펼쳐진 태양광 패널",
+    imageCredit: "사진: Unsplash",
+  },
+];
+const magazineFallbackCoverStories = [magazineHeadlineStory, ...magazineFeatureStories];
+const magazineArticleList = [
+  {
+    topics: ["시장", "경제"],
+    title: "달러 약세와 실적 기대가 만든 위험자산의 새 균형",
+    image:
+      "https://images.unsplash.com/photo-1742076553114-cfd4f27de46f?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "노트북 화면에 표시된 주식 시장 차트",
+    imageCredit: "사진: Unsplash",
+    summary:
+      "금리 인하 기대가 선반영된 구간에서 환율, 이익 전망, 밸류에이션이 동시에 움직이는 흐름을 정리합니다. 최근 위험자산 반등은 단순한 유동성 기대만으로 설명하기 어렵고, 달러 약세와 기업 실적의 하향 안정이 함께 작동하고 있습니다. 이번 글은 시장이 어떤 조건에서 성장주와 경기민감주를 다시 가격에 반영하는지, 그리고 투자자가 확인해야 할 조기 신호가 무엇인지 분해합니다.",
+  },
+  {
+    topics: ["AI", "테크"],
+    title: "AI 인프라 병목은 GPU가 아니라 전력에서 시작된다",
+    image:
+      "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "데이터센터 서버 랙",
+    imageCredit: "사진: Unsplash",
+    summary:
+      "데이터센터 증설 경쟁이 전력망, 냉각, 부동산, 클라우드 CAPEX로 번지는 경로를 기사 후보로 분해합니다. AI 수요는 여전히 GPU와 모델 경쟁으로 소비되지만, 실제 투자 병목은 전력 인입과 운영 효율에서 먼저 드러나는 중입니다. 이 글은 전력 계약, 서버 밀도, 클라우드 기업의 자본지출 계획을 연결해 AI 인프라 사이클의 다음 수혜 영역을 살펴봅니다.",
+  },
+  {
+    topics: ["산업", "금융"],
+    title: "운임 반등이 제조업 마진에 보내는 조기 신호",
+    image:
+      "https://images.unsplash.com/photo-1769144256207-bc4bb75b29db?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "컨테이너를 실은 화물선과 항만",
+    imageCredit: "사진: Unsplash",
+    summary:
+      "항만 체류, 컨테이너 운임, 재고 사이클을 함께 보며 산업재와 소비재의 비용 압력을 추적합니다. 운임 반등이 일시적인 병목인지, 아니면 제조업 주문 회복의 신호인지에 따라 시장 해석은 크게 달라집니다. 이번 글은 물류 비용 변화가 기업 마진, 납기, 재고 보충 전략에 미치는 영향을 정리하고 관련 업종의 민감도를 비교합니다.",
+  },
+  {
+    topics: ["기후", "정치"],
+    title: "재생에너지 보조금 논쟁이 다시 투자 사이클을 흔든다",
+    image:
+      "https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "넓게 펼쳐진 태양광 패널",
+    imageCredit: "사진: Unsplash",
+    summary:
+      "정책 불확실성과 금리 변화가 태양광, 배터리, 전력 인프라 기업의 투자 판단에 미치는 영향을 요약합니다. 재생에너지 섹터는 장기 수요가 분명해도 보조금, 인허가, 자금조달 비용에 따라 단기 주가가 크게 흔들립니다. 이 글은 정책 논쟁이 프로젝트 파이프라인과 밸류에이션에 어떤 경로로 반영되는지, 그리고 금리 하락이 실제 주문 회복으로 이어지는 조건을 살핍니다.",
+  },
+  {
+    topics: ["크립토", "금융"],
+    title: "ETF 자금 유입 이후 크립토 시장의 두 번째 관문",
+    image:
+      "https://images.unsplash.com/photo-1518546305927-5a555bb7020d?auto=format&fit=crop&w=900&q=80",
+    imageAlt: "암호화폐 동전과 전자 회로 이미지",
+    imageCredit: "사진: Unsplash",
+    summary:
+      "기관 자금 유입 이후 유동성, 규제, 스테이블코인 결제망이 다음 가격 발견 구간을 어떻게 만들지 살핍니다. ETF 출시 이후 시장은 단기 수급보다 제도권 금융과 온체인 생태계가 만나는 구조적 변화를 더 크게 반영하고 있습니다. 이 글은 거래소 유동성, 커스터디, 결제 인프라, 규제 리스크를 함께 놓고 크립토 시장의 두 번째 성장 관문을 점검합니다.",
+  },
+];
+const magazineMockArticleSections = [
+  {
+    heading: "이슈의 핵심",
+    body:
+      "이번 목업 기사는 월드 메모리에서 감지한 주요 이슈를 하나의 매거진형 기사로 확장했을 때의 읽기 경험을 확인하기 위한 샘플입니다. 실제 구현에서는 이 위치에 핵심 배경, 시장 맥락, 관련 기업, 확인해야 할 데이터 포인트가 들어가게 됩니다.",
+  },
+  {
+    heading: "시장이 보는 신호",
+    body:
+      "금리, 환율, 수급, 실적 전망은 서로 따로 움직이는 것처럼 보이지만 기사 작성 단계에서는 하나의 내러티브로 묶여야 합니다. 독자는 이 문단에서 단순한 뉴스 요약이 아니라 왜 지금 이 주제가 중요한지, 어떤 변수가 다음 국면을 바꿀 수 있는지를 빠르게 파악하게 됩니다.",
+  },
+  {
+    heading: "다음 확인 포인트",
+    body:
+      "후속 기사에서는 관련 기업의 실적 발표, 정책 일정, 원자재 가격, ETF 자금 흐름, 산업별 주문 지표를 함께 비교할 수 있습니다. 이 목업은 그런 리서치 큐가 기사 본문으로 변환됐을 때 화면 안에서 충분히 읽을 만한지 확인하는 용도입니다.",
+  },
+];
+
+function normalizeMagazineTopicCatalog(topics) {
+  const sourceTopics = Array.isArray(topics) && topics.length ? topics : magazineFallbackTopics;
+  const seen = new Set();
+  const normalized = sourceTopics
+    .map((topic, index) => {
+      const label = String(topic?.label || topic || "").trim();
+      if (!label || seen.has(label)) return null;
+      seen.add(label);
+      return {
+        label,
+        emoji: String(topic?.emoji || "").trim(),
+        tone: String(topic?.tone || magazineToneSequence[index % magazineToneSequence.length] || "market").trim(),
+      };
+    })
+    .filter(Boolean);
+  return normalized.length ? normalized : magazineFallbackTopics;
+}
+
+function MagazineTopicRow({ topics, activeTopic = "", onSelectTopic, ariaLabel = "매거진 토픽" }) {
+  return (
+    <div className="magazine-topic-row" aria-label={ariaLabel}>
+      {topics.map((topic) => (
+        <button
+          className={[
+            "magazine-topic-badge",
+            `is-${topic.tone}`,
+            activeTopic === topic.label ? "is-active" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          type="button"
+          key={topic.label}
+          aria-pressed={activeTopic === topic.label}
+          onClick={(event) => onSelectTopic(event, topic.label)}
+        >
+          {topic.emoji ? (
+            <span className="magazine-topic-emoji" aria-hidden="true">
+              {topic.emoji}
+            </span>
+          ) : null}
+          <span>{topic.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function magazineArticleTopics(article) {
+  const topics = Array.isArray(article?.topics)
+    ? article.topics
+    : [article?.topic].filter(Boolean);
+  return topics.map((topic) => String(topic || "").trim()).filter(Boolean);
+}
+
+const magazineArticlePublishedFormatter = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const magazineUpdateScheduleFormatter = new Intl.DateTimeFormat("ko-KR", {
+  timeZone: "Asia/Seoul",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+function magazineArticlePublishedTime(article) {
+  const rawValue = article?.publishedAt || article?.createdAt || article?.updatedAt || "";
+  if (!rawValue) return null;
+  const date = new Date(rawValue);
+  if (Number.isNaN(date.getTime())) return null;
+  return {
+    dateTime: date.toISOString(),
+    label: `송고 ${magazineArticlePublishedFormatter.format(date)}`,
+  };
+}
+
+function MagazinePublishedTime({ article, className = "" }) {
+  const publishedTime = magazineArticlePublishedTime(article);
+  if (!publishedTime) return null;
+  const classes = ["magazine-published-time", className].filter(Boolean).join(" ");
+  return (
+    <time className={classes} dateTime={publishedTime.dateTime}>
+      {publishedTime.label}
+    </time>
+  );
+}
+
+function formatMagazineUpdateScheduleTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = Object.fromEntries(
+    magazineUpdateScheduleFormatter.formatToParts(date).map((part) => [part.type, part.value])
+  );
+  return `${parts.year}년 ${parts.month}월 ${parts.day}일 ${parts.hour}시 ${parts.minute}분`;
+}
+
+function magazineLatestUpdateTimestamp(status, articles = []) {
+  return (
+    status?.latestArticle?.publishedAt ||
+    status?.readState?.latestArticleAt ||
+    articles?.[0]?.publishedAt ||
+    articles?.[0]?.createdAt ||
+    articles?.[0]?.updatedAt ||
+    ""
+  );
+}
+
+function magazineNextUpdateLabel(status) {
+  if (status?.scheduler?.running || status?.scheduler?.currentCycle || status?.scheduler?.manualStartPending) {
+    return "모델 판단 중";
+  }
+  if (status?.scheduler?.generationInFlight || status?.scheduler?.generationLock) return "작성 중";
+  const nextUpdate = formatMagazineUpdateScheduleTime(
+    status?.scheduler?.nextRetryAt || status?.scheduler?.nextRunAt
+  );
+  if (nextUpdate) return nextUpdate;
+  if (status?.scheduler?.enabled === false) return "예정 없음";
+  return "대기 중";
+}
+
+function magazineSchedulerIsActive(status) {
+  const scheduler = status?.scheduler || {};
+  return Boolean(
+    scheduler.running ||
+      scheduler.currentCycle ||
+      scheduler.activeCycle ||
+      scheduler.generationInFlight ||
+      scheduler.generationLock ||
+      scheduler.manualStartPending ||
+      scheduler.manualStartRequestedAt
+  );
+}
+
+function magazineArticleCountDecisionLabel(status) {
+  const scheduler = status?.scheduler || {};
+  if (scheduler.manualStartPending || scheduler.manualStartRequestedAt) {
+    return "모델 판단 중: 지금 새 기사로 만들 만한 각도가 있는지 확인하고 있습니다.";
+  }
+  if (scheduler.generationInFlight || scheduler.generationLock) {
+    return "작성 작업 실행 중: 기존 작업이 끝난 뒤 다음 모델 판단을 진행합니다.";
+  }
+  const cycle = scheduler.currentCycle || scheduler.activeCycle || scheduler.lastCycle;
+  const decision = cycle?.articleCountDecision;
+  if (!decision && cycle?.reason === "generation-lock-active") {
+    return "작성 작업 실행 중: 모델 판단은 기존 작업 완료 후 다시 진행됩니다.";
+  }
+  if (!decision) return "";
+  const targetCount = Number.isFinite(Number(decision.targetCount)) ? Number(decision.targetCount) : 0;
+  const maxCount = Number.isFinite(Number(decision.maxCount)) ? Number(decision.maxCount) : 3;
+  const provider = decision.provider === "antigravity-sdk" ? "Antigravity" : decision.provider === "codex-cli" ? "Codex" : "";
+  const suffix = decision.fallback ? "fallback" : provider;
+  const reason = String(decision.reason || "").trim();
+  return [
+    `모델 산정: ${targetCount}/${maxCount}`,
+    suffix ? ` · ${suffix}` : "",
+    reason ? ` · ${reason}` : "",
+  ].join("");
+}
+
+function MagazineUpdateSchedule({ status, articles, isStartingNow = false, onStartNow }) {
+  const lastUpdate =
+    formatMagazineUpdateScheduleTime(magazineLatestUpdateTimestamp(status, articles)) || "기록 없음";
+  const nextUpdate = magazineNextUpdateLabel(status);
+  const decisionLabel = magazineArticleCountDecisionLabel(status);
+  const showStartButton =
+    Boolean(onStartNow) &&
+    !isStartingNow &&
+    !magazineSchedulerIsActive(status) &&
+    status?.scheduler?.enabled !== false;
+  return (
+    <div className="magazine-update-schedule">
+      <div className="magazine-update-primary">
+        <p>마지막 업데이트: {lastUpdate} / 다음 업데이트 예정: {nextUpdate}</p>
+        {showStartButton ? (
+          <button
+            className="magazine-update-refresh tooltip-button"
+            type="button"
+            aria-label="지금 매거진 작성 시작"
+            title="지금 매거진 작성 시작"
+            data-tooltip="지금 작성 시작"
+            onClick={onStartNow}
+          >
+            <RefreshCw size={14} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+      {decisionLabel ? <p>{decisionLabel}</p> : null}
+    </div>
+  );
+}
+
+const MAGAZINE_AGENT_CONTEXT_BODY_LIMIT = 12000;
+
+function compactMagazineAgentText(value, maxLength = 1200) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function stripMagazineArticleHtml(html = "") {
+  const source = String(html || "");
+  if (!source) return "";
+  if (typeof window !== "undefined" && typeof window.DOMParser === "function") {
+    const parsed = new window.DOMParser().parseFromString(source, "text/html");
+    return compactMagazineAgentText(parsed.body?.textContent || "", MAGAZINE_AGENT_CONTEXT_BODY_LIMIT);
+  }
+  return compactMagazineAgentText(
+    source
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|section|article|h1|h2|h3|li)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'"),
+    MAGAZINE_AGENT_CONTEXT_BODY_LIMIT
+  );
+}
+
+function magazineArticleWorldMemoryContext(worldMemory) {
+  const source = worldMemory && typeof worldMemory === "object" ? worldMemory : null;
+  if (!source) return null;
+  const vectorSearch = source.vectorSearch && typeof source.vectorSearch === "object" ? source.vectorSearch : {};
+  return {
+    retrievalPolicy: compactMagazineAgentText(source.retrievalPolicy || "", 120),
+    query: compactMagazineAgentText(source.query || "", 260),
+    vectorSearch: {
+      engine: compactMagazineAgentText(vectorSearch.engine || "", 80),
+      model: compactMagazineAgentText(vectorSearch.model || "", 80),
+      matchedCount: Number(vectorSearch.matchedCount || 0),
+      hits: Array.isArray(vectorSearch.hits)
+        ? vectorSearch.hits.slice(0, 8).map((hit) => ({
+            eventId: compactMagazineAgentText(hit?.eventId || "", 80),
+            title: compactMagazineAgentText(hit?.title || "", 220),
+            storyFamily: compactMagazineAgentText(hit?.storyFamily || "", 120),
+            createdAt: compactMagazineAgentText(hit?.createdAt || "", 80),
+          }))
+        : [],
+    },
+  };
+}
+
+function buildMagazineArticleAgentContext(article) {
+  if (!article) return null;
+  const publishedTime = magazineArticlePublishedTime(article);
+  const bodyText =
+    stripMagazineArticleHtml(article.bodyHtml) ||
+    magazineMockArticleSections.map((section) => `${section.heading}\n${section.body}`).join("\n\n");
+  return {
+    source: "magazine-reader",
+    id: compactMagazineAgentText(article.id || "", 120),
+    articleType: compactMagazineAgentText(article.articleType || "", 80),
+    title: compactMagazineAgentText(article.title || "", 240),
+    topics: magazineArticleTopics(article).map((topic) => compactMagazineAgentText(topic, 60)).slice(0, 12),
+    summary: compactMagazineAgentText(article.summary || "", 1400),
+    publishedAt: compactMagazineAgentText(article.publishedAt || article.createdAt || article.updatedAt || "", 120),
+    publishedTimeLabel: publishedTime?.label || "",
+    image: {
+      alt: compactMagazineAgentText(article.imageAlt || "", 180),
+      credit: compactMagazineAgentText(article.imageCredit || "", 180),
+    },
+    sourceBasis: Array.isArray(article.sourceBasis)
+      ? article.sourceBasis.map((item) => compactMagazineAgentText(item, 160)).filter(Boolean).slice(0, 8)
+      : [],
+    bodyText,
+    bodyTruncated: bodyText.length >= MAGAZINE_AGENT_CONTEXT_BODY_LIMIT,
+    chartBlocks: Array.isArray(article.chartBlocks)
+      ? article.chartBlocks.slice(0, 8).map((chart) => ({
+          id: compactMagazineAgentText(chart?.id || "", 80),
+          title: compactMagazineAgentText(chart?.title || "", 180),
+          note: compactMagazineAgentText(chart?.note || "", 360),
+          ariaLabel: compactMagazineAgentText(chart?.ariaLabel || "", 180),
+        }))
+      : [],
+    followupOptions: Array.isArray(article.followupOptions)
+      ? article.followupOptions.slice(0, 6).map((option) => ({
+          id: compactMagazineAgentText(option?.id || "", 80),
+          label: compactMagazineAgentText(option?.label || "", 120),
+          prompt: compactMagazineAgentText(option?.prompt || "", 260),
+          topics: Array.isArray(option?.topics)
+            ? option.topics.map((topic) => compactMagazineAgentText(topic, 60)).filter(Boolean).slice(0, 8)
+            : [],
+        }))
+      : [],
+    worldMemory: magazineArticleWorldMemoryContext(article.worldMemory),
+  };
+}
+
+function MagazineArticleList({
+  articles,
+  onOpenArticle,
+  emptyText = "아직 이 조건에 맞는 기사가 없습니다.",
+  listKey = "articles",
+}) {
+  const safeArticles = Array.isArray(articles) ? articles : [];
+  const sentinelRef = useRef(null);
+  const [visibleCount, setVisibleCount] = useState(MAGAZINE_ARTICLE_PAGE_SIZE);
+  const visibleArticles = safeArticles.slice(0, Math.min(visibleCount, safeArticles.length));
+  const hasMore = visibleArticles.length < safeArticles.length;
+
+  useEffect(() => {
+    setVisibleCount(MAGAZINE_ARTICLE_PAGE_SIZE);
+  }, [listKey]);
+
+  useEffect(() => {
+    setVisibleCount((current) => {
+      const maxVisible = Math.max(MAGAZINE_ARTICLE_PAGE_SIZE, safeArticles.length);
+      return Math.max(MAGAZINE_ARTICLE_PAGE_SIZE, Math.min(current, maxVisible));
+    });
+  }, [safeArticles.length]);
+
+  useEffect(() => {
+    if (!hasMore || typeof IntersectionObserver === "undefined") return undefined;
+    const node = sentinelRef.current;
+    if (!node) return undefined;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setVisibleCount((current) => Math.min(current + MAGAZINE_ARTICLE_PAGE_SIZE, safeArticles.length));
+      },
+      { root: null, rootMargin: "320px 0px 420px", threshold: 0 }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, safeArticles.length, visibleCount]);
+
+  if (!safeArticles.length) {
+    return <p className="magazine-topic-empty">{emptyText}</p>;
+  }
+
+  return (
+    <div className="magazine-article-list">
+      {visibleArticles.map((article) => (
+        <article className="magazine-list-item" key={article.id || article.title}>
+          <div className="magazine-list-copy">
+            <div className="magazine-list-topic-row" aria-label="기사 토픽">
+              {magazineArticleTopics(article).map((topic) => (
+                <span className="magazine-list-topic" key={topic}>
+                  {topic}
+                </span>
+              ))}
+            </div>
+            <h3>
+              <a
+                className="magazine-article-link"
+                href="#magazine-reader"
+                onClick={(event) => onOpenArticle(event, article)}
+              >
+                {article.title}
+              </a>
+            </h3>
+            <MagazinePublishedTime article={article} />
+            <a
+              className="magazine-image-link"
+              href="#magazine-reader"
+              onClick={(event) => onOpenArticle(event, article)}
+              aria-label={`${article.title} 기사 열기`}
+            >
+              <div className="magazine-featured-image magazine-list-image">
+                <img src={article.image} alt={article.imageAlt} />
+              </div>
+            </a>
+            <p>{article.summary}</p>
+          </div>
+        </article>
+      ))}
+      {hasMore ? <div className="magazine-list-sentinel" ref={sentinelRef} aria-hidden="true" /> : null}
+    </div>
+  );
+}
+
+function normalizeMagazineReaderArticle(article) {
+  const topics = Array.isArray(article?.topics)
+    ? article.topics
+    : [article?.topic].filter(Boolean);
+  const followupOptions = Array.isArray(article?.followupOptions) && article.followupOptions.length
+    ? article.followupOptions
+    : magazineDefaultFollowupOptions;
+  return {
+    id: article?.id || "",
+    topics: topics.length ? topics : ["매거진"],
+    title: article?.title || "주식채널 매거진 기사",
+    summary:
+      article?.summary ||
+      article?.deck ||
+      "월드 메모리의 주요 이슈를 바탕으로 만든 매거진 기사 목업입니다.",
+    image: article?.image || magazineHeadlineStory.image,
+    imageAlt: article?.imageAlt || magazineHeadlineStory.imageAlt,
+    imageCredit: article?.imageCredit || magazineHeadlineStory.imageCredit,
+    bodyHtml: article?.bodyHtml || "",
+    chartBlocks: Array.isArray(article?.chartBlocks) ? article.chartBlocks : [],
+    followupOptions: followupOptions
+      .map((option, index) => ({
+        id: option?.id || `followup-${index + 1}`,
+        label: option?.label || option?.title || `후속 기사 ${index + 1}`,
+        prompt: option?.prompt || option?.label || "",
+        topics: Array.isArray(option?.topics) && option.topics.length ? option.topics : topics,
+        tone: option?.tone || magazineToneSequence[index % magazineToneSequence.length],
+      }))
+      .slice(0, 6),
+    worldMemory: article?.worldMemory || null,
+    generationAgent: article?.generationAgent || null,
+    articleType: article?.articleType || "",
+    publishedAt: article?.publishedAt || "",
+    createdAt: article?.createdAt || "",
+    updatedAt: article?.updatedAt || "",
+    sourceBasis: Array.isArray(article?.sourceBasis) ? article.sourceBasis : [],
+  };
+}
+
+const magazineClipboardExcludeSelector = [
+  ".magazine-reader-topic-row",
+  ".magazine-reader-followup",
+  ".magazine-reader-comments",
+  ".magazine-reader-return",
+].join(", ");
+
+const MAGAZINE_CLIPBOARD_IMAGE_ASPECT_RATIO = 16 / 9;
+
+function magazineBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("이미지를 읽지 못했습니다."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function loadMagazineClipboardImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("이미지를 불러오지 못했습니다."));
+    image.src = src;
+  });
+}
+
+async function magazineImageSrcToDataUrl(src, options = {}) {
+  const shouldCrop = Boolean(options.cropToReaderFrame);
+  if (!src) return src;
+  if (src.startsWith("data:") && !shouldCrop) return src;
+  const response = await fetch(src, { credentials: "same-origin" });
+  if (!response.ok) throw new Error(`이미지를 가져오지 못했습니다. (${response.status})`);
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) throw new Error("이미지 형식이 아닙니다.");
+  const dataUrl = await magazineBlobToDataUrl(blob);
+  if (!shouldCrop) return dataUrl;
+  const sourceImage = await loadMagazineClipboardImage(dataUrl);
+  const naturalWidth = sourceImage.naturalWidth || sourceImage.width;
+  const naturalHeight = sourceImage.naturalHeight || sourceImage.height;
+  if (!naturalWidth || !naturalHeight) return dataUrl;
+
+  const targetAspectRatio = Number(options.aspectRatio) || MAGAZINE_CLIPBOARD_IMAGE_ASPECT_RATIO;
+  const imageAspectRatio = naturalWidth / naturalHeight;
+  let sourceX = 0;
+  let sourceY = 0;
+  let sourceWidth = naturalWidth;
+  let sourceHeight = naturalHeight;
+
+  if (imageAspectRatio > targetAspectRatio) {
+    sourceWidth = naturalHeight * targetAspectRatio;
+    sourceX = (naturalWidth - sourceWidth) / 2;
+  } else if (imageAspectRatio < targetAspectRatio) {
+    sourceHeight = naturalWidth / targetAspectRatio;
+    sourceY = (naturalHeight - sourceHeight) / 2;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(sourceWidth);
+  canvas.height = Math.round(sourceHeight);
+  const context = canvas.getContext("2d");
+  if (!context) return dataUrl;
+  context.drawImage(sourceImage, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.92);
+}
+
+async function inlineMagazineClipboardImages(sourceNode, cloneNode) {
+  const sourceImages = Array.from(sourceNode.querySelectorAll("img"));
+  const cloneImages = Array.from(cloneNode.querySelectorAll("img"));
+  await Promise.all(
+    cloneImages.map(async (image, index) => {
+      const sourceImage = sourceImages[index];
+      const source = sourceImage?.currentSrc || sourceImage?.src || image.currentSrc || image.src || image.getAttribute("src");
+      if (!source) return;
+      try {
+        const shouldCropToReaderFrame = Boolean(sourceImage?.closest(".magazine-featured-image"));
+        image.setAttribute("src", await magazineImageSrcToDataUrl(source, {
+          cropToReaderFrame: shouldCropToReaderFrame,
+          aspectRatio: MAGAZINE_CLIPBOARD_IMAGE_ASPECT_RATIO,
+        }));
+      } catch (error) {
+        image.setAttribute("src", new URL(source, window.location.href).href);
+        image.setAttribute("data-copy-image-warning", error.message || "image inline failed");
+      }
+    })
+  );
+}
+
+function inlineMagazineClipboardCanvases(sourceNode, cloneNode) {
+  const sourceCanvases = Array.from(sourceNode.querySelectorAll("canvas"));
+  const cloneCanvases = Array.from(cloneNode.querySelectorAll("canvas"));
+  cloneCanvases.forEach((canvas, index) => {
+    const sourceCanvas = sourceCanvases[index];
+    if (!sourceCanvas) return;
+    try {
+      const image = document.createElement("img");
+      image.src = sourceCanvas.toDataURL("image/png");
+      image.alt = canvas.getAttribute("aria-label") || "기사 차트";
+      image.width = sourceCanvas.width;
+      image.height = sourceCanvas.height;
+      canvas.replaceWith(image);
+    } catch {
+      canvas.remove();
+    }
+  });
+}
+
+function cleanMagazineClipboardNode(node) {
+  node.querySelectorAll(magazineClipboardExcludeSelector).forEach((element) => element.remove());
+  node.querySelectorAll("script, style, button, textarea, input").forEach((element) => element.remove());
+  node.querySelectorAll("a[href]").forEach((anchor) => {
+    anchor.setAttribute("href", new URL(anchor.getAttribute("href"), window.location.href).href);
+  });
+  node.querySelectorAll("[contenteditable]").forEach((element) => element.removeAttribute("contenteditable"));
+}
+
+function trimMagazineClipboardTrailingWhitespace(element) {
+  if (element.classList?.contains("magazine-copy-heading-spacer")) return;
+  let current = element.lastChild;
+  while (current && current.nodeType === Node.TEXT_NODE && !current.nodeValue.trim()) {
+    const previous = current.previousSibling;
+    current.remove();
+    current = previous;
+  }
+  if (current?.nodeType === Node.TEXT_NODE) {
+    current.nodeValue = current.nodeValue.replace(/[ \t\u00a0]+$/g, "");
+  }
+}
+
+const magazineClipboardBlockLikeSelector = [
+  "article",
+  "section",
+  "div",
+  "p",
+  "blockquote",
+  "figure",
+  "figcaption",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "time",
+  "ul",
+  "ol",
+  "li",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+].join(", ");
+
+const magazineClipboardWhitespaceContainerSelector = [
+  "article",
+  "section",
+  "div",
+  "blockquote",
+  "figure",
+  "figcaption",
+  "ul",
+  "ol",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+].join(", ");
+
+function isMagazineClipboardBlockLikeNode(node) {
+  return node?.nodeType === Node.ELEMENT_NODE && node.matches(magazineClipboardBlockLikeSelector);
+}
+
+function shouldRemoveMagazineClipboardWhitespaceTextNode(textNode) {
+  if (textNode.nodeValue.trim()) return false;
+  const parent = textNode.parentElement;
+  if (!parent || parent.closest("pre, code, textarea")) return false;
+  if (isMagazineClipboardBlockLikeNode(textNode.previousSibling)) return true;
+  if (isMagazineClipboardBlockLikeNode(textNode.nextSibling)) return true;
+  return parent.matches(magazineClipboardWhitespaceContainerSelector);
+}
+
+function normalizeMagazineClipboardTextWhitespace(node) {
+  const textNodes = [];
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+  textNodes.forEach((textNode) => {
+    if (textNode.parentElement?.closest(".magazine-copy-heading-spacer")) return;
+    textNode.nodeValue = textNode.nodeValue.replace(/\u00a0/g, " ");
+    if (shouldRemoveMagazineClipboardWhitespaceTextNode(textNode)) {
+      textNode.remove();
+    }
+  });
+  node
+    .querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, time")
+    .forEach(trimMagazineClipboardTrailingWhitespace);
+}
+
+function stripMagazineClipboardInternalMarkers(node) {
+  node.querySelectorAll(".magazine-copy-heading-spacer").forEach((element) => {
+    element.classList.remove("magazine-copy-heading-spacer");
+    if (!element.getAttribute("class")) {
+      element.removeAttribute("class");
+    }
+  });
+}
+
+function createMagazineClipboardSpacer() {
+  const spacer = document.createElement("p");
+  spacer.className = "magazine-copy-spacer";
+  spacer.appendChild(document.createElement("br"));
+  return spacer;
+}
+
+function createMagazineClipboardHeadingSpacer({ trailingNbsp = false, withLineBreak = false } = {}) {
+  const spacer = document.createElement("p");
+  spacer.className = "magazine-copy-heading-spacer";
+  spacer.appendChild(document.createTextNode("\u00a0"));
+  if (withLineBreak) {
+    spacer.appendChild(document.createElement("br"));
+    if (trailingNbsp) {
+      spacer.appendChild(document.createTextNode("\u00a0"));
+    }
+  }
+  return spacer;
+}
+
+function nextMagazineClipboardElement(element) {
+  let next = element.nextSibling;
+  while (next && next.nodeType === Node.TEXT_NODE && !next.textContent.trim()) {
+    next = next.nextSibling;
+  }
+  return next?.nodeType === Node.ELEMENT_NODE ? next : null;
+}
+
+function addMagazineClipboardBlockquoteLeadBreak(container) {
+  const lead = container.firstElementChild;
+  if (!lead?.matches("strong, b")) return false;
+  const firstBreak = nextMagazineClipboardElement(lead);
+  if (!firstBreak?.matches("br")) return false;
+  const secondBreak = nextMagazineClipboardElement(firstBreak);
+  if (secondBreak?.matches("br")) return true;
+  firstBreak.insertAdjacentElement("afterend", document.createElement("br"));
+  return true;
+}
+
+function insertMagazineClipboardBlockquoteBreaks(node) {
+  node
+    .querySelectorAll(".magazine-reader-html blockquote, .magazine-reader-section blockquote, .magazine-reader-chart-section blockquote")
+    .forEach((quote) => {
+      if (addMagazineClipboardBlockquoteLeadBreak(quote)) return;
+      const firstParagraph = quote.firstElementChild;
+      if (firstParagraph?.matches("p")) {
+        addMagazineClipboardBlockquoteLeadBreak(firstParagraph);
+      }
+    });
+}
+
+function insertMagazineClipboardBreaks(node) {
+  [
+    ".magazine-reader-published-time",
+    ".magazine-reader-summary",
+  ].forEach((selector) => {
+    const element = node.querySelector(selector);
+    if (!element) return;
+    element.insertAdjacentElement("afterend", createMagazineClipboardSpacer());
+  });
+  node.querySelectorAll("h2").forEach((heading) => {
+    heading.insertAdjacentElement("beforebegin", createMagazineClipboardHeadingSpacer({ trailingNbsp: true, withLineBreak: true }));
+    heading.insertAdjacentElement("afterend", createMagazineClipboardHeadingSpacer());
+  });
+  insertMagazineClipboardBlockquoteBreaks(node);
+  node
+    .querySelectorAll(".magazine-reader-html p, .magazine-reader-section p, .magazine-reader-chart-section p")
+    .forEach((paragraph) => {
+      if (
+        paragraph.classList.contains("magazine-copy-spacer") ||
+        paragraph.classList.contains("magazine-copy-heading-spacer") ||
+        paragraph.closest("blockquote, figure, figcaption")
+      ) {
+        return;
+      }
+      const nextElement = nextMagazineClipboardElement(paragraph);
+      if (!nextElement || !nextElement.matches("p, blockquote, ul, ol")) return;
+      paragraph.insertAdjacentElement("afterend", createMagazineClipboardSpacer());
+    });
+  node
+    .querySelectorAll(".magazine-reader-html blockquote, .magazine-reader-section blockquote, .magazine-reader-chart-section blockquote")
+    .forEach((quote) => {
+      const nextElement = nextMagazineClipboardElement(quote);
+      if (nextElement?.classList?.contains("magazine-copy-spacer")) return;
+      quote.insertAdjacentElement("afterend", createMagazineClipboardSpacer());
+    });
+}
+
+function normalizeMagazineClipboardBodyHtml(node) {
+  node.querySelectorAll(".magazine-reader-html").forEach((body) => {
+    if (body.children.length !== 1) return;
+    const onlyChild = body.firstElementChild;
+    if (!onlyChild?.matches("article.magazine-article")) return;
+    onlyChild.replaceWith(...Array.from(onlyChild.childNodes));
+  });
+}
+
+function magazineClipboardProviderName(provider) {
+  return provider === "antigravity-sdk" ? "Antigravity" : "Codex";
+}
+
+function magazineClipboardAttributionText(provider) {
+  return `주식채널+ 에이전트의 Stock Channel Magazine+에서 ${magazineClipboardProviderName(provider)}로 생성됨`;
+}
+
+function appendMagazineClipboardAttribution(node, provider) {
+  for (let index = 0; index < 3; index += 1) {
+    const spacer = document.createElement("p");
+    spacer.appendChild(document.createElement("br"));
+    node.appendChild(spacer);
+  }
+  const attribution = document.createElement("p");
+  attribution.className = "magazine-copy-attribution";
+  attribution.textContent = magazineClipboardAttributionText(provider);
+  node.appendChild(attribution);
+}
+
+function magazinePlainTextFromNode(node) {
+  const holder = document.createElement("div");
+  holder.style.position = "fixed";
+  holder.style.left = "-10000px";
+  holder.style.top = "0";
+  holder.style.whiteSpace = "pre-wrap";
+  holder.appendChild(node.cloneNode(true));
+  document.body.appendChild(holder);
+  const text = holder.innerText
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  holder.remove();
+  return text;
+}
+
+async function buildMagazineClipboardPayload(sourceNode, options = {}) {
+  if (!sourceNode) throw new Error("복사할 기사 본문을 찾지 못했습니다.");
+  const cloneNode = sourceNode.cloneNode(true);
+  cleanMagazineClipboardNode(cloneNode);
+  normalizeMagazineClipboardBodyHtml(cloneNode);
+  insertMagazineClipboardBreaks(cloneNode);
+  inlineMagazineClipboardCanvases(sourceNode, cloneNode);
+  await inlineMagazineClipboardImages(sourceNode, cloneNode);
+  normalizeMagazineClipboardTextWhitespace(cloneNode);
+  stripMagazineClipboardInternalMarkers(cloneNode);
+  const basePlainText = magazinePlainTextFromNode(cloneNode);
+  appendMagazineClipboardAttribution(cloneNode, options.provider);
+  const plainText = `${basePlainText}\n\n\n${magazineClipboardAttributionText(options.provider)}`.trim();
+  const html = [
+    "<!doctype html>",
+    "<html>",
+    "<head><meta charset=\"utf-8\"></head>",
+    "<body>",
+    cloneNode.outerHTML,
+    "</body>",
+    "</html>",
+  ].join("");
+  return { html, plainText };
+}
+
+async function writeMagazineArticleToClipboard(sourceNode, options = {}) {
+  const payloadPromise = buildMagazineClipboardPayload(sourceNode, options);
+  if (navigator.clipboard?.write && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": payloadPromise.then(
+            ({ html }) => new Blob([html], { type: "text/html" })
+          ),
+          "text/plain": payloadPromise.then(
+            ({ plainText }) => new Blob([plainText], { type: "text/plain" })
+          ),
+        }),
+      ]);
+      return { mode: "html" };
+    } catch (error) {
+      const { plainText } = await payloadPromise;
+      await navigator.clipboard.writeText(plainText);
+      return { mode: "text", warning: error.message || "HTML 복사 실패" };
+    }
+  }
+  const { plainText } = await payloadPromise;
+  await navigator.clipboard.writeText(plainText);
+  return { mode: "text" };
+}
+
+function normalizeMagazineCommentReply(reply) {
+  if (!reply || typeof reply !== "object") return null;
+  const text = String(reply.text || "").trim();
+  const status = String(reply.status || (text ? "complete" : "waiting")).trim();
+  return {
+    id: reply.id || `reply-${Date.now()}`,
+    author: reply.author || "매거진 편집자 AI",
+    text,
+    status,
+    createdAt: reply.createdAt || "",
+    biasEventIds: Array.isArray(reply.biasEventIds)
+      ? reply.biasEventIds.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+  };
+}
+
+function normalizeMagazineComment(comment) {
+  if (!comment || typeof comment !== "object") return null;
+  const text = String(comment.text || "").trim();
+  if (!text) return null;
+  return {
+    id: comment.id || `comment-${Date.now()}`,
+    author: comment.author || "사용자",
+    text,
+    createdAt: comment.createdAt || "",
+    reply: normalizeMagazineCommentReply(comment.reply),
+  };
+}
+
+function normalizeMagazineCommentStore(payload, articleId = "") {
+  const comments = Array.isArray(payload?.comments) ? payload.comments : [];
+  return {
+    articleId: payload?.articleId || articleId,
+    updatedAt: payload?.updatedAt || "",
+    commentCount: Number(payload?.commentCount || comments.length || 0),
+    comments: comments.map(normalizeMagazineComment).filter(Boolean),
+  };
+}
+
+function magazineCommentStatusText(status) {
+  if (status === "waiting") return "답변 대기 중";
+  if (status === "generating") return "답변 중";
+  if (status === "error") return "답변 실패";
+  return "";
+}
 const personaEligibleScreens = new Set([
   "chat",
   "stock",
   "news-feed",
+  "magazine",
   "world-memory",
   "reports",
   "earning-calendar",
@@ -112,6 +1147,7 @@ const personaEligibleScreens = new Set([
 const ARCA_WRITE_URL = "https://arca.live/b/stock/write";
 const ARCA_NOTIFICATION_URL = "https://arca.live/u/notification";
 const ARCA_NOTIFICATION_POLL_INTERVAL_MS = 30000;
+const MAGAZINE_STATUS_POLL_INTERVAL_MS = 30000;
 const MEMORY_RECENT_LIMIT = 5;
 const MEMORY_DIALOG_PAGE_SIZE = 20;
 const PORTFOLIO_CANVAS_FILE_SAVE_DEBOUNCE_MS = 450;
@@ -129,11 +1165,28 @@ const initialBoardFilters = {
 const defaultWorldMemorySettings = {
   ok: true,
   enabled: false,
+  managementProvider: "default",
   configPath: "config/world-memory.user.json",
   defaultConfigPath: "config/world-memory.defaults.json",
   settings: {
     version: 1,
     enabled: false,
+    managementProvider: "default",
+  },
+};
+
+const defaultMagazineSettings = {
+  ok: true,
+  enabled: false,
+  worldMemoryEnabled: false,
+  writingProvider: "default",
+  disabledReason: "",
+  configPath: "config/magazine.user.json",
+  defaultConfigPath: "config/magazine.defaults.json",
+  settings: {
+    version: 1,
+    enabled: false,
+    writingProvider: "default",
   },
 };
 
@@ -205,6 +1258,7 @@ const searchTargetOptions = [
 
 const worldMemoryActionsNeedingReportRefresh = new Set([
   "stateAdd",
+  "briefStoryBackfill",
   "storyLink",
   "taxonomyRefresh",
   "stateSync",
@@ -218,7 +1272,7 @@ function stripWorldMemoryActionBlocks(answer = "") {
     .replace(/```world_memory_action[\s\S]*?```/gi, "")
     .replace(/```world_memory_action[\s\S]*$/gi, "")
     .replace(/```json\s*([\s\S]*?)```/gi, (match, body) =>
-      /world_memory|storyLink|storyFamilyReview|taxonomyRefresh|stateAdd|stateSync|semanticSearch|cleanupDryRun/i.test(body) ? "" : match
+      /world_memory|briefStoryBackfill|storyLink|storyFamilyReview|taxonomyRefresh|stateAdd|stateSync|semanticSearch|cleanupDryRun/i.test(body) ? "" : match
     )
     .replace(/\n?\s*world_memory_action\s*{[\s\S]*$/i, "")
     .trim();
@@ -542,6 +1596,11 @@ function buildWorldMemoryPageContextSnapshot(status, actionResult, focusedChange
   const collector = status?.collector || {};
   const schedule = status?.schedule || {};
   const report = status?.report || {};
+  const reportChangeSuggestions = Array.isArray(report?.view?.memoryChangeSuggestions)
+    ? report.view.memoryChangeSuggestions
+    : Array.isArray(report.suggestions)
+      ? report.suggestions
+      : [];
   const pendingChangeSuggestion =
     focusedChangeSuggestion && typeof focusedChangeSuggestion === "object"
       ? {
@@ -572,9 +1631,7 @@ function buildWorldMemoryPageContextSnapshot(status, actionResult, focusedChange
       activeCycle: schedule.activeCycle || null,
     },
     report: compactWorldMemoryReportForContext(report),
-    changeSuggestions: Array.isArray(report.suggestions)
-      ? report.suggestions.slice(0, 10).map((item) => compactVisibleScreenText(item, 260))
-      : [],
+    changeSuggestions: reportChangeSuggestions.slice(0, 10).map((item) => compactVisibleScreenText(item, 260)),
     pendingChangeSuggestion,
     recentRun: compactVisibleScreenText(worldMemoryActionText(actionResult) || collector.lastAction || "", 600),
     availableActions: Object.entries(worldMemoryActionCatalog).map(([id, meta]) => ({
@@ -597,6 +1654,24 @@ function App() {
   const [agentOptionsReady, setAgentOptionsReady] = useState(false);
   const [personaMode, setPersonaMode] = useState("none");
   const [chatMessages, setChatMessages] = useState(initialChatMessages);
+  const [magazineActiveArticle, setMagazineActiveArticle] = useState(null);
+  const [magazineActiveTopic, setMagazineActiveTopic] = useState("");
+  const [magazineCatalog, setMagazineCatalog] = useState(null);
+  const [magazineStatus, setMagazineStatus] = useState(null);
+  const [magazinePreferenceStore, setMagazinePreferenceStore] = useState(null);
+  const [magazinePreferenceSavingId, setMagazinePreferenceSavingId] = useState("");
+  const [magazinePreferenceNotice, setMagazinePreferenceNotice] = useState("");
+  const [magazinePreferenceNoticeFading, setMagazinePreferenceNoticeFading] = useState(false);
+  const [magazineCommentStore, setMagazineCommentStore] = useState(null);
+  const [magazineCommentDraft, setMagazineCommentDraft] = useState("");
+  const [magazineCommentSubmitting, setMagazineCommentSubmitting] = useState(false);
+  const [magazineCommentError, setMagazineCommentError] = useState("");
+  const [magazineDeleteDialogOpen, setMagazineDeleteDialogOpen] = useState(false);
+  const [magazineDeleting, setMagazineDeleting] = useState(false);
+  const [magazineDeleteError, setMagazineDeleteError] = useState("");
+  const [magazineCopyStatus, setMagazineCopyStatus] = useState("idle");
+  const [magazineCopyError, setMagazineCopyError] = useState("");
+  const [magazineStartNowBusy, setMagazineStartNowBusy] = useState(false);
   const [portfolioCanvasStore, setPortfolioCanvasStore] = useState(() => readStoredPortfolioCanvasStore());
   const [portfolioSidebarOpen, setPortfolioSidebarOpen] = useState(false);
   const [portfolioCanvasMenuId, setPortfolioCanvasMenuId] = useState("");
@@ -605,6 +1680,10 @@ function App() {
   const [pendingDeletePortfolioCanvas, setPendingDeletePortfolioCanvas] = useState(null);
   const [assetApiDialogOpen, setAssetApiDialogOpen] = useState(false);
   const portfolioCanvasNameInputRef = useRef(null);
+  const magazineCanvasRef = useRef(null);
+  const magazineTopicModalRef = useRef(null);
+  const magazineReaderArticleRef = useRef(null);
+  const magazineReturnScrollRef = useRef({ canvasTop: 0, topicTop: 0, hadTopic: false });
   const [codexStatus, setCodexStatus] = useState({
     available: false,
     label: "Codex CLI 확인 중",
@@ -662,6 +1741,10 @@ function App() {
   const [worldMemorySettingsBusy, setWorldMemorySettingsBusy] = useState(false);
   const [worldMemorySettingsSaving, setWorldMemorySettingsSaving] = useState(false);
   const [worldMemorySettingsError, setWorldMemorySettingsError] = useState("");
+  const [magazineSettings, setMagazineSettings] = useState(defaultMagazineSettings);
+  const [magazineSettingsBusy, setMagazineSettingsBusy] = useState(false);
+  const [magazineSettingsSaving, setMagazineSettingsSaving] = useState(false);
+  const [magazineSettingsError, setMagazineSettingsError] = useState("");
   const [worldMemoryStatus, setWorldMemoryStatus] = useState(null);
   const [worldMemoryBusy, setWorldMemoryBusy] = useState(false);
   const [worldMemoryError, setWorldMemoryError] = useState("");
@@ -689,9 +1772,277 @@ function App() {
   const portfolioCanvasFileReadyRef = useRef(false);
   const newsFeedItemsCountRef = useRef(0);
   const newsFeedLatestTranslatedAtRef = useRef("");
-  const activeModelGroups = agentProvider === "antigravity-sdk" ? antigravityCatalogGroups : modelGroups;
-  const activeApprovalOptions = agentProvider === "antigravity-sdk" ? antigravityPolicyOptions : approvalOptions;
+  const magazineArticleCountRef = useRef(0);
+  const magazineLatestArticleAtRef = useRef("");
+  const openMagazineTopic = useCallback((event, topicLabel) => {
+    event.preventDefault();
+    magazineCanvasRef.current?.scrollTo({ top: 0, behavior: "auto" });
+    setMagazineActiveArticle(null);
+    setMagazineDeleteDialogOpen(false);
+    setMagazineDeleting(false);
+    setMagazineDeleteError("");
+    setMagazineActiveTopic(topicLabel);
+  }, []);
+  const closeMagazineTopic = useCallback((event) => {
+    event?.preventDefault();
+    setMagazineActiveTopic("");
+  }, []);
+  const openMagazineArticle = useCallback((event, article) => {
+    event?.preventDefault();
+    magazineReturnScrollRef.current = {
+      canvasTop: magazineCanvasRef.current?.scrollTop ?? 0,
+      topicTop: magazineTopicModalRef.current?.scrollTop ?? 0,
+      hadTopic: Boolean(magazineActiveTopic),
+    };
+    setMagazinePreferenceNotice("");
+    setMagazinePreferenceNoticeFading(false);
+    setMagazineCommentDraft("");
+    setMagazineCommentError("");
+    setMagazineCommentStore(null);
+    setMagazineCopyStatus("idle");
+    setMagazineCopyError("");
+    setMagazineActiveArticle(normalizeMagazineReaderArticle(article));
+  }, [magazineActiveTopic]);
+  const closeMagazineArticle = useCallback(() => {
+    const returnScroll = magazineReturnScrollRef.current;
+    setMagazinePreferenceNotice("");
+    setMagazinePreferenceNoticeFading(false);
+    setMagazineCommentDraft("");
+    setMagazineCommentError("");
+    setMagazineCommentStore(null);
+    setMagazineDeleteDialogOpen(false);
+    setMagazineDeleting(false);
+    setMagazineDeleteError("");
+    setMagazineCopyStatus("idle");
+    setMagazineCopyError("");
+    setMagazineActiveArticle(null);
+    window.requestAnimationFrame(() => {
+      if (magazineCanvasRef.current) {
+        magazineCanvasRef.current.scrollTop = returnScroll.canvasTop;
+      }
+      if (returnScroll.hadTopic && magazineTopicModalRef.current) {
+        magazineTopicModalRef.current.scrollTop = returnScroll.topicTop;
+      }
+    });
+  }, []);
+  const openMagazineDeleteDialog = useCallback(() => {
+    setMagazineDeleteError("");
+    setMagazineDeleteDialogOpen(true);
+  }, []);
+  const closeMagazineDeleteDialog = useCallback(() => {
+    if (magazineDeleting) return;
+    setMagazineDeleteDialogOpen(false);
+    setMagazineDeleteError("");
+  }, [magazineDeleting]);
+  const copyMagazineArticle = useCallback(async () => {
+    if (magazineCopyStatus === "copying") return;
+    setMagazineCopyStatus("copying");
+    setMagazineCopyError("");
+    try {
+      const magazineRuntime = providerRuntimeForProvider(magazineWritingProviderId());
+      const result = await writeMagazineArticleToClipboard(magazineReaderArticleRef.current, {
+        provider: magazineActiveArticle?.generationAgent?.provider || magazineRuntime.provider,
+      });
+      setMagazineCopyStatus(result.mode === "text" ? "text" : "copied");
+      setMagazineCopyError(result.warning || "");
+      window.setTimeout(() => {
+        setMagazineCopyStatus("idle");
+        setMagazineCopyError("");
+      }, 2200);
+    } catch (error) {
+      setMagazineCopyStatus("error");
+      setMagazineCopyError(error.message || "기사를 복사하지 못했습니다.");
+    }
+  }, [agentProvider, agentUserSettings, approvalOptions, antigravityCatalogGroups, magazineActiveArticle, magazineCopyStatus, magazineSettings, modelGroups, providerOptions]);
+  const confirmMagazineArticleDelete = useCallback(async () => {
+    if (!magazineActiveArticle?.id || magazineDeleting) return;
+    setMagazineDeleting(true);
+    setMagazineDeleteError("");
+    try {
+      const response = await fetch(
+        `/api/magazine/articles?id=${encodeURIComponent(magazineActiveArticle.id)}`,
+        { method: "DELETE" }
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || "기사를 삭제하지 못했습니다.");
+      }
+      setMagazineCatalog(payload);
+      closeMagazineArticle();
+    } catch (error) {
+      setMagazineDeleteError(error.message);
+      setMagazineDeleting(false);
+    }
+  }, [closeMagazineArticle, magazineActiveArticle?.id, magazineDeleting]);
+  const selectedMagazinePreferenceIds = magazineActiveArticle?.id
+    ? (magazinePreferenceStore?.activeByArticle?.[magazineActiveArticle.id] || [])
+        .map((item) => item?.optionId)
+        .filter(Boolean)
+    : [];
+  const magazineComments = Array.isArray(magazineCommentStore?.comments) ? magazineCommentStore.comments : [];
+  const saveMagazinePreference = useCallback(async (option) => {
+    if (!magazineActiveArticle?.id || !option?.id) return;
+    setMagazinePreferenceSavingId(option.id);
+    try {
+      const response = await fetch("/api/magazine/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articleId: magazineActiveArticle.id,
+          optionId: option.id,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || "매거진 편집 선호를 저장하지 못했습니다.");
+      }
+      setMagazinePreferenceStore(payload);
+      setMagazinePreferenceNoticeFading(false);
+      setMagazinePreferenceNotice(payload.message || "앞으로의 기사 편집에 반영하도록 하겠습니다");
+    } catch (error) {
+      console.warn("Magazine preference save failed", error);
+      setMagazinePreferenceNoticeFading(false);
+      setMagazinePreferenceNotice("저장하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    } finally {
+      setMagazinePreferenceSavingId("");
+    }
+  }, [magazineActiveArticle]);
+  const submitMagazineComment = useCallback(async (event) => {
+    event.preventDefault();
+    const text = magazineCommentDraft.trim();
+    if (!magazineActiveArticle?.id || !text || magazineCommentSubmitting) return;
+    const createdAt = new Date().toISOString();
+    const tempId = `temp-${Date.now()}`;
+    const pendingComment = normalizeMagazineComment({
+      id: tempId,
+      author: "사용자",
+      text,
+      createdAt,
+      reply: {
+        id: `reply-${tempId}`,
+        author: "매거진 편집자 AI",
+        text: "",
+        status: "waiting",
+        createdAt,
+      },
+    });
+    setMagazineCommentDraft("");
+    setMagazineCommentError("");
+    setMagazineCommentSubmitting(true);
+    setMagazineCommentStore((current) => {
+      const normalized = normalizeMagazineCommentStore(current, magazineActiveArticle.id);
+      return {
+        ...normalized,
+        updatedAt: createdAt,
+        commentCount: normalized.comments.length + 1,
+        comments: [...normalized.comments, pendingComment].filter(Boolean),
+      };
+    });
+    window.setTimeout(() => {
+      setMagazineCommentStore((current) => {
+        const normalized = normalizeMagazineCommentStore(current, magazineActiveArticle.id);
+        return {
+          ...normalized,
+          comments: normalized.comments.map((comment) =>
+            comment.id === tempId && comment.reply?.status === "waiting"
+              ? {
+                  ...comment,
+                  reply: {
+                    ...comment.reply,
+                    status: "generating",
+                  },
+                }
+              : comment
+          ),
+        };
+      });
+    }, 700);
+
+    try {
+      const magazineRuntime = providerRuntimeForProvider(magazineWritingProviderId());
+      const response = await fetch("/api/magazine/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articleId: magazineActiveArticle.id,
+          text,
+          provider: magazineRuntime.provider,
+          model: magazineRuntime.selectedModelGroup?.slug,
+          reasoning: magazineRuntime.selectedReasoning?.id,
+          approval: magazineRuntime.selectedApproval?.id,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || "댓글 답변을 저장하지 못했습니다.");
+      }
+      setMagazineCommentStore(normalizeMagazineCommentStore(payload, magazineActiveArticle.id));
+    } catch (error) {
+      setMagazineCommentError(error.message);
+      setMagazineCommentStore((current) => {
+        const normalized = normalizeMagazineCommentStore(current, magazineActiveArticle.id);
+        return {
+          ...normalized,
+          comments: normalized.comments.map((comment) =>
+            comment.id === tempId
+              ? {
+                  ...comment,
+                  reply: {
+                    id: `reply-${tempId}`,
+                    author: "매거진 편집자 AI",
+                    text: `답변 생성에 실패했습니다. (${error.message})`,
+                    status: "error",
+                    createdAt: new Date().toISOString(),
+                  },
+                }
+              : comment
+          ),
+        };
+      });
+    } finally {
+      setMagazineCommentSubmitting(false);
+    }
+  }, [
+    agentProvider,
+    agentUserSettings,
+    approval,
+    approvalOptions,
+    antigravityCatalogGroups,
+    magazineActiveArticle,
+    magazineCommentDraft,
+    magazineCommentSubmitting,
+    magazineSettings,
+    model,
+    modelGroups,
+    providerOptions,
+    reasoning,
+    speed,
+  ]);
+  const magazineArticles = useMemo(() => {
+    const catalogArticles = Array.isArray(magazineCatalog?.articles) ? magazineCatalog.articles : [];
+    return catalogArticles.length ? catalogArticles : magazineArticleList;
+  }, [magazineCatalog]);
+  const magazineTopicCatalog = useMemo(
+    () => normalizeMagazineTopicCatalog(magazineCatalog?.topicCatalog),
+    [magazineCatalog],
+  );
+  const magazineActiveTopicEntry = magazineTopicCatalog.find((topic) => topic.label === magazineActiveTopic) || null;
+  const magazineTopicArticles = useMemo(() => {
+    if (!magazineActiveTopic) return [];
+    return magazineArticles.filter((article) => magazineArticleTopics(article).includes(magazineActiveTopic));
+  }, [magazineActiveTopic, magazineArticles]);
+  const magazineCoverStories = useMemo(() => {
+    const catalogCoverStories = Array.isArray(magazineCatalog?.coverStories) ? magazineCatalog.coverStories : [];
+    if (catalogCoverStories.length) return catalogCoverStories;
+    const catalogArticles = Array.isArray(magazineCatalog?.articles) ? magazineCatalog.articles : [];
+    return catalogArticles.length ? catalogArticles.slice(0, 5) : magazineFallbackCoverStories;
+  }, [magazineCatalog]);
+  const magazineCoverHeadline = magazineCoverStories[0] ?? magazineArticles[0] ?? magazineHeadlineStory;
+  const magazineCoverCards = magazineCoverStories.slice(1, 5);
+  const activeModelGroups = agentProvider === ANTIGRAVITY_PROVIDER_ID ? antigravityCatalogGroups : modelGroups;
+  const activeApprovalOptions = agentProvider === ANTIGRAVITY_PROVIDER_ID ? antigravityPolicyOptions : approvalOptions;
   const worldMemoryEnabled = Boolean(worldMemorySettings?.enabled);
+  const magazineEnabled = worldMemoryEnabled && Boolean(magazineSettings?.enabled);
   const selectedModelGroup = useMemo(
     () => activeModelGroups.find((item) => item.slug === model) ?? activeModelGroups[0] ?? fallbackModelGroups[0],
     [model, activeModelGroups]
@@ -723,7 +2074,7 @@ function App() {
   );
   const agentProviderLabel = agentOptionsReady ? selectedProvider?.label || "Codex CLI" : "에이전트";
   const agentProviderAvailable = agentOptionsReady && Boolean(selectedProvider?.available);
-  const agentIcon = agentOptionsReady && agentProvider === "antigravity-sdk" ? antigravityLogo : codexLogo;
+  const agentIcon = agentOptionsReady && agentProvider === ANTIGRAVITY_PROVIDER_ID ? antigravityLogo : codexLogo;
   const portfolioCanvases = portfolioCanvasStore.canvases;
   const activePortfolioCanvas = useMemo(
     () => portfolioCanvases.find((canvas) => canvas.id === portfolioCanvasStore.activeCanvasId) || null,
@@ -750,7 +2101,7 @@ function App() {
   const toolbarSpeedValue = agentOptionsReady ? speed : "loading";
   const newsFeedTranslationModelLabel = useMemo(() => {
     if (!agentOptionsReady) return "";
-    if (agentProvider === "antigravity-sdk") {
+    if (agentProvider === ANTIGRAVITY_PROVIDER_ID) {
       const translationModel = antigravityCatalogGroups[0]?.slug || selectedModelGroup?.slug || model || "gemini-3.5-flash";
       return `Antigravity SDK · ${translationModel} · minimal`;
     }
@@ -774,7 +2125,7 @@ function App() {
     groups = modelGroups,
     nextAntigravityGroups = antigravityCatalogGroups
   ) {
-    return providerId === "antigravity-sdk"
+    return providerId === ANTIGRAVITY_PROVIDER_ID
       ? nextAntigravityGroups.length
         ? nextAntigravityGroups
         : antigravityModelGroups
@@ -791,7 +2142,7 @@ function App() {
     approvals = approvalOptions
   ) {
     const nextGroups = modelGroupsForProvider(providerId, groups, nextAntigravityGroups);
-    const nextApprovalOptions = providerId === "antigravity-sdk"
+    const nextApprovalOptions = providerId === ANTIGRAVITY_PROVIDER_ID
       ? antigravityPolicyOptions
       : approvals.length
         ? approvals
@@ -820,6 +2171,20 @@ function App() {
     };
   }
 
+  function agentProviderSettings(providerId, settings = agentUserSettings) {
+    return settings?.providers?.[providerId] || {};
+  }
+
+  function isAgentProviderEnabled(providerId, settings = agentUserSettings) {
+    const providerSettings = agentProviderSettings(providerId, settings);
+    if (typeof providerSettings.enabled === "boolean") return providerSettings.enabled;
+    return providerId === settings?.selectedProvider;
+  }
+
+  function enabledAgentProviders(settings = agentUserSettings) {
+    return agentProviderIds.filter((providerId) => isAgentProviderEnabled(providerId, settings));
+  }
+
   function applyAgentSelection(selection) {
     setApproval(selection.approval);
     setModel(selection.model);
@@ -827,24 +2192,14 @@ function App() {
     setSpeed(selection.speed);
   }
 
-  async function saveAgentSettings(selection) {
+  async function saveAgentSettingsPatch(patch) {
     setAgentSettingsError("");
     try {
       const response = await fetch("/api/codex/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({
-          selectedProvider: selection.provider,
-          providers: {
-            [selection.provider]: {
-              approval: selection.approval,
-              model: selection.model,
-              reasoning: selection.reasoning,
-              speed: selection.speed,
-            },
-          },
-        }),
+        body: JSON.stringify(patch),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.ok) {
@@ -856,6 +2211,21 @@ function App() {
       setAgentSettingsError(error.message);
       return null;
     }
+  }
+
+  async function saveAgentSettings(selection) {
+    return saveAgentSettingsPatch({
+      selectedProvider: selection.provider,
+      providers: {
+        [selection.provider]: {
+          enabled: true,
+          approval: selection.approval,
+          model: selection.model,
+          reasoning: selection.reasoning,
+          speed: selection.speed,
+        },
+      },
+    });
   }
 
   async function savePersonaMode(nextPersonaMode) {
@@ -889,11 +2259,11 @@ function App() {
 
   function handleAgentProviderChange(nextProvider) {
     setAgentProvider(nextProvider);
-    const savedProviderSettings = agentUserSettings.providers?.[nextProvider] || {};
+    const savedProviderSettings = agentProviderSettings(nextProvider);
     const nextSelection = selectionForProvider(nextProvider, savedProviderSettings);
     applyAgentSelection(nextSelection);
     void saveAgentSettings(nextSelection).then((settings) => {
-      if (settings && nextProvider === "antigravity-sdk") {
+      if (settings && nextProvider === ANTIGRAVITY_PROVIDER_ID) {
         void refreshAgentOptions();
       }
     });
@@ -909,6 +2279,185 @@ function App() {
     });
     applyAgentSelection(nextSelection);
     void saveAgentSettings(nextSelection);
+  }
+
+  function updateProviderSelection(providerId, patch) {
+    const currentProviderSettings = agentProviderSettings(providerId);
+    const nextSelection = selectionForProvider(providerId, {
+      ...currentProviderSettings,
+      ...patch,
+    });
+    const providerPatch = {
+      enabled: isAgentProviderEnabled(providerId),
+      approval: nextSelection.approval,
+      model: nextSelection.model,
+      reasoning: nextSelection.reasoning,
+      speed: nextSelection.speed,
+    };
+
+    setAgentUserSettings((current) => ({
+      ...current,
+      providers: {
+        ...(current.providers || {}),
+        [providerId]: {
+          ...(current.providers?.[providerId] || {}),
+          ...providerPatch,
+        },
+      },
+    }));
+
+    if (providerId === agentProvider) {
+      applyAgentSelection(nextSelection);
+    }
+
+    void saveAgentSettingsPatch({
+      providers: {
+        [providerId]: providerPatch,
+      },
+    });
+  }
+
+  function updateProviderEnabled(providerId, enabled) {
+    const currentEnabledProviders = enabledAgentProviders();
+    if (!enabled && currentEnabledProviders.length <= 1 && currentEnabledProviders.includes(providerId)) {
+      return;
+    }
+
+    const currentProviderSettings = agentProviderSettings(providerId);
+    const providerSelection = selectionForProvider(providerId, currentProviderSettings);
+    const nextSelectedProvider =
+      !enabled && agentProvider === providerId
+        ? currentEnabledProviders.find((id) => id !== providerId) || agentProvider
+        : agentProvider;
+    const nextSelectedSettings = agentProviderSettings(nextSelectedProvider);
+    const nextSelection = selectionForProvider(nextSelectedProvider, nextSelectedSettings);
+    const providerPatch = {
+      enabled,
+      approval: providerSelection.approval,
+      model: providerSelection.model,
+      reasoning: providerSelection.reasoning,
+      speed: providerSelection.speed,
+    };
+
+    setAgentUserSettings((current) => ({
+      ...current,
+      selectedProvider: nextSelectedProvider,
+      providers: {
+        ...(current.providers || {}),
+        [providerId]: {
+          ...(current.providers?.[providerId] || {}),
+          ...providerPatch,
+        },
+      },
+    }));
+    if (nextSelectedProvider !== agentProvider) {
+      setAgentProvider(nextSelectedProvider);
+      applyAgentSelection(nextSelection);
+    }
+
+    void saveAgentSettingsPatch({
+      selectedProvider: nextSelectedProvider,
+      providers: {
+        [providerId]: providerPatch,
+      },
+    }).then((settings) => {
+      if (settings && providerId === ANTIGRAVITY_PROVIDER_ID) {
+        void refreshAgentOptions();
+      }
+    });
+  }
+
+  function configuredProviderId(setting) {
+    const normalized = normalizeAgentModelProvider(setting);
+    return normalized === "default" ? agentProvider : normalized;
+  }
+
+  function worldMemoryManagementProviderId() {
+    return configuredProviderId(
+      worldMemorySettings?.settings?.managementProvider || worldMemorySettings?.managementProvider
+    );
+  }
+
+  function magazineWritingProviderId() {
+    return configuredProviderId(
+      magazineSettings?.settings?.writingProvider || magazineSettings?.writingProvider
+    );
+  }
+
+  function commandPreviewForRuntime(runtime) {
+    if (!agentOptionsReady) {
+      return "에이전트 설정 불러오는 중";
+    }
+    if (runtime.provider === ANTIGRAVITY_PROVIDER_ID) {
+      return runtime.selectedProvider?.available
+        ? `Antigravity SDK · ${runtime.selectedApproval?.label || "Default"} · us-central1/${runtime.selectedModelGroup?.slug || "gemini-2.5-flash"}`
+        : runtime.selectedProvider?.installCommand || "python3 -m pip install --upgrade google-antigravity";
+    }
+    const approvalFlag = runtime.selectedApproval?.cli || "";
+    const modelFlag = runtime.selectedModelGroup?.slug ? `-m ${runtime.selectedModelGroup.slug}` : "";
+    const reasoningFlag = runtime.selectedReasoning?.cli || "";
+    const speedHint =
+      runtime.selectedSpeed && runtime.selectedSpeed.id !== "standard"
+        ? `[speed: ${runtime.selectedSpeed.label}${runtime.selectedSpeed.pending ? " · CLI config 확인 필요" : ""}]`
+        : "";
+    return ["codex", approvalFlag, modelFlag, reasoningFlag, speedHint].filter(Boolean).join(" ");
+  }
+
+  function providerRuntimeForProvider(providerId) {
+    const runtimeProvider = providerId === ANTIGRAVITY_PROVIDER_ID ? ANTIGRAVITY_PROVIDER_ID : CODEX_PROVIDER_ID;
+    const providerStatus =
+      providerOptions.find((item) => item.id === runtimeProvider) ||
+      fallbackProviderOptions.find((item) => item.id === runtimeProvider) ||
+      { id: runtimeProvider, label: runtimeProvider };
+    const providerModelGroups = modelGroupsForProvider(runtimeProvider);
+    const providerApprovalOptions =
+      runtimeProvider === ANTIGRAVITY_PROVIDER_ID
+        ? antigravityPolicyOptions
+        : approvalOptions.length
+          ? approvalOptions
+          : fallbackApprovalOptions;
+    const providerSelection =
+      runtimeProvider === agentProvider
+        ? {
+            provider: runtimeProvider,
+            approval: selectedApproval?.id || approval,
+            model: selectedModelGroup?.slug || model,
+            reasoning: selectedReasoning?.id || reasoning,
+            speed: selectedSpeed?.id || speed,
+          }
+        : selectionForProvider(runtimeProvider, agentProviderSettings(runtimeProvider));
+    const providerModelGroup =
+      providerModelGroups.find((item) => item.slug === providerSelection.model) ||
+      providerModelGroups[0] ||
+      fallbackModelGroups[0];
+    const providerReasoningOptions = providerModelGroup?.reasoningLevels?.length
+      ? providerModelGroup.reasoningLevels
+      : fallbackModelGroups[0].reasoningLevels;
+    const providerSpeedOptions = getSpeedOptions(providerModelGroup);
+    const runtime = {
+      provider: runtimeProvider,
+      selectedProvider: providerStatus,
+      providerLabel: agentOptionsReady
+        ? providerStatus?.label || (runtimeProvider === ANTIGRAVITY_PROVIDER_ID ? "Antigravity SDK" : "Codex CLI")
+        : "에이전트",
+      providerAvailable: agentOptionsReady && Boolean(providerStatus?.available),
+      icon: agentOptionsReady && runtimeProvider === ANTIGRAVITY_PROVIDER_ID ? antigravityLogo : codexLogo,
+      approvalOptions: providerApprovalOptions,
+      selectedApproval:
+        providerApprovalOptions.find((item) => item.id === providerSelection.approval) || providerApprovalOptions[0],
+      modelGroups: providerModelGroups,
+      selectedModelGroup: providerModelGroup,
+      reasoningOptions: providerReasoningOptions,
+      selectedReasoning:
+        providerReasoningOptions.find((item) => item.id === providerSelection.reasoning) || providerReasoningOptions[0],
+      speedOptions: providerSpeedOptions,
+      selectedSpeed: providerSpeedOptions.find((item) => item.id === providerSelection.speed) || providerSpeedOptions[0],
+    };
+    return {
+      ...runtime,
+      modelSummaryLabel: `${runtime.selectedModelGroup?.label || "모델"} ${runtime.selectedReasoning?.label || ""}`.trim(),
+      commandPreview: commandPreviewForRuntime(runtime),
+    };
   }
 
   function updatePortfolioCanvasStore(updater) {
@@ -1097,6 +2646,11 @@ function App() {
 
   function handleSidebarItemClick(item) {
     if (!item.view) return;
+    if (item.view === "magazine" && activeView === "magazine" && (magazineActiveArticle || magazineActiveTopic)) {
+      if (magazineActiveArticle) closeMagazineArticle();
+      if (magazineActiveTopic) closeMagazineTopic();
+      return;
+    }
     if (item.view === "portfolio") {
       setActiveView("portfolio");
       setPortfolioContext(null);
@@ -1230,6 +2784,40 @@ function App() {
     }
   }
 
+  async function loadMagazineSettings({ quiet = false } = {}) {
+    if (!quiet) {
+      setMagazineSettingsBusy(true);
+      setMagazineSettingsError("");
+    }
+    try {
+      const response = await fetch("/api/magazine/settings", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const nextSettings = { ...defaultMagazineSettings, ...payload };
+      setMagazineSettings(nextSettings);
+      setMagazineStatus((current) => ({
+        ...(current || {}),
+        settings: nextSettings,
+        scheduler: current?.scheduler
+          ? {
+              ...current.scheduler,
+              enabled: Boolean(nextSettings.enabled),
+              settings: nextSettings,
+              nextRunAt: nextSettings.enabled ? current.scheduler.nextRunAt : "",
+            }
+          : current?.scheduler,
+      }));
+      return nextSettings;
+    } catch (error) {
+      setMagazineSettingsError(error.message);
+      return null;
+    } finally {
+      if (!quiet) setMagazineSettingsBusy(false);
+    }
+  }
+
   async function loadWorldMemoryStatus() {
     setWorldMemoryBusy(true);
     setWorldMemoryError("");
@@ -1273,7 +2861,37 @@ function App() {
       setWorldMemoryFocusedChangeSuggestion(null);
       if (nextSettings.enabled) {
         await loadWorldMemoryStatus();
+        void loadMagazineSettings({ quiet: true });
       } else {
+        setMagazineSettings((current) => ({
+          ...(current || defaultMagazineSettings),
+          ok: true,
+          enabled: false,
+          worldMemoryEnabled: false,
+          disabledReason: "world-memory-disabled",
+          settings: {
+            ...((current || defaultMagazineSettings).settings || {}),
+            enabled: false,
+            disabledReason: "world-memory-disabled",
+          },
+        }));
+        setMagazineStatus((current) => ({
+          ...(current || {}),
+          settings: {
+            ...(current?.settings || defaultMagazineSettings),
+            enabled: false,
+            worldMemoryEnabled: false,
+            disabledReason: "world-memory-disabled",
+          },
+          scheduler: current?.scheduler
+            ? {
+                ...current.scheduler,
+                enabled: false,
+                nextRunAt: "",
+              }
+            : current?.scheduler,
+        }));
+        setMagazineSettingsError("");
         setWorldMemoryError("");
         setWorldMemoryStatus((current) => ({
           ...(current || {}),
@@ -1297,6 +2915,98 @@ function App() {
       setWorldMemorySettingsError(error.message);
     } finally {
       setWorldMemorySettingsSaving(false);
+    }
+  }
+
+  async function updateWorldMemoryManagementProvider(managementProvider) {
+    if (worldMemorySettingsSaving) return;
+    const safeProvider = normalizeAgentModelProvider(managementProvider);
+    setWorldMemorySettingsSaving(true);
+    setWorldMemorySettingsError("");
+    try {
+      const response = await fetch("/api/world-memory/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ managementProvider: safeProvider }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      setWorldMemorySettings({ ...defaultWorldMemorySettings, ...payload });
+      setWorldMemoryStatus((current) =>
+        current
+          ? {
+              ...current,
+              settings: payload.settings || current.settings,
+            }
+          : current
+      );
+    } catch (error) {
+      setWorldMemorySettingsError(error.message);
+    } finally {
+      setWorldMemorySettingsSaving(false);
+    }
+  }
+
+  async function updateMagazineEnabled(enabled) {
+    if (magazineSettingsSaving) return;
+    setMagazineSettingsSaving(true);
+    setMagazineSettingsError("");
+    try {
+      const response = await fetch("/api/magazine/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const nextSettings = { ...defaultMagazineSettings, ...payload };
+      setMagazineSettings(nextSettings);
+      await refreshMagazineStatus();
+    } catch (error) {
+      setMagazineSettingsError(error.message);
+    } finally {
+      setMagazineSettingsSaving(false);
+    }
+  }
+
+  async function updateMagazineWritingProvider(writingProvider) {
+    if (magazineSettingsSaving) return;
+    const safeProvider = normalizeAgentModelProvider(writingProvider);
+    setMagazineSettingsSaving(true);
+    setMagazineSettingsError("");
+    try {
+      const response = await fetch("/api/magazine/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ writingProvider: safeProvider }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const nextSettings = { ...defaultMagazineSettings, ...payload };
+      setMagazineSettings(nextSettings);
+      setMagazineStatus((current) => ({
+        ...(current || {}),
+        settings: nextSettings,
+        scheduler: current?.scheduler
+          ? {
+              ...current.scheduler,
+              settings: nextSettings,
+            }
+          : current?.scheduler,
+      }));
+    } catch (error) {
+      setMagazineSettingsError(error.message);
+    } finally {
+      setMagazineSettingsSaving(false);
     }
   }
 
@@ -1545,6 +3255,7 @@ function App() {
     taskType = "chat",
     memoryScope = "system-main",
     canvas = null,
+    magazineArticleContext = null,
   }) {
     const summary = memorySummaryFromExchange(promptText, answerText);
     if (!summary) return;
@@ -1599,6 +3310,15 @@ function App() {
               ? {
                   title: article.title || "",
                   url: article.url || article.href || "",
+                }
+              : null,
+            magazineArticle: magazineArticleContext
+              ? {
+                  id: magazineArticleContext.id || "",
+                  title: magazineArticleContext.title || "",
+                  topics: Array.isArray(magazineArticleContext.topics) ? magazineArticleContext.topics.slice(0, 8) : [],
+                  publishedAt: magazineArticleContext.publishedAt || "",
+                  publishedTimeLabel: magazineArticleContext.publishedTimeLabel || "",
                 }
               : null,
             attachments: attachments.map((attachment) => ({
@@ -1664,6 +3384,105 @@ function App() {
       return payload;
     } catch {
       return null;
+    }
+  }
+
+  function applyMagazineCatalogPayload(payload) {
+    const articles = Array.isArray(payload?.articles) ? payload.articles : [];
+    setMagazineCatalog({
+      articles,
+      coverStories: Array.isArray(payload?.coverStories) ? payload.coverStories : [],
+      topicCatalog: Array.isArray(payload?.topicCatalog) ? payload.topicCatalog : [],
+    });
+    setMagazineStatus((current) => ({
+      ...(current || {}),
+      ok: payload?.ok !== false,
+      storage: payload?.storage || current?.storage || "files",
+      articleCount: articles.length,
+      readState: payload?.readState || current?.readState || null,
+      settings: payload?.settings || current?.settings || null,
+      scheduler: payload?.scheduler || current?.scheduler || null,
+    }));
+    if (payload?.settings) {
+      setMagazineSettings({ ...defaultMagazineSettings, ...payload.settings });
+    }
+  }
+
+  async function refreshMagazineCatalog({ signal } = {}) {
+    const response = await fetch("/api/magazine/articles", {
+      cache: "no-store",
+      signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    applyMagazineCatalogPayload(payload);
+    return payload;
+  }
+
+  async function refreshMagazineStatus({ signal } = {}) {
+    const response = await fetch("/api/magazine/status", {
+      cache: "no-store",
+      signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+    setMagazineStatus(payload);
+    if (payload?.settings) {
+      setMagazineSettings({ ...defaultMagazineSettings, ...payload.settings });
+    }
+    return payload;
+  }
+
+  async function markMagazineOpened() {
+    try {
+      const response = await fetch("/api/magazine/read-state", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
+      setMagazineStatus(payload);
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  async function startMagazineNow() {
+    if (magazineStartNowBusy || magazineSchedulerIsActive(magazineStatus)) return;
+    setMagazineStartNowBusy(true);
+    try {
+      const response = await fetch("/api/magazine/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ action: "runNow" }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
+      setMagazineStatus(payload);
+      if (payload?.settings) {
+        setMagazineSettings({ ...defaultMagazineSettings, ...payload.settings });
+      }
+    } catch (error) {
+      setMagazineStatus((current) => ({
+        ...(current || {}),
+        ok: false,
+        error: error.message,
+      }));
+      if (/cycle is active|already running/i.test(error.message || "")) {
+        void refreshMagazineStatus().catch(() => {});
+      }
+    } finally {
+      setMagazineStartNowBusy(false);
     }
   }
 
@@ -1945,11 +3764,126 @@ function App() {
 
   useEffect(() => {
     void loadWorldMemorySettings({ quiet: true });
+    void loadMagazineSettings({ quiet: true });
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void refreshMagazineCatalog({ signal: controller.signal }).catch((error) => {
+      if (error.name !== "AbortError") {
+        console.warn("Magazine catalog load failed", error);
+      }
+    });
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadMagazinePreferences() {
+      try {
+        const response = await fetch("/api/magazine/preferences", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (!payload?.ok) throw new Error(payload?.error || "매거진 편집 선호를 읽을 수 없습니다.");
+        setMagazinePreferenceStore(payload);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          console.warn("Magazine preferences load failed", error);
+        }
+      }
+    }
+    void loadMagazinePreferences();
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!magazineActiveArticle?.id) return undefined;
+    const controller = new AbortController();
+    async function loadMagazineComments() {
+      try {
+        const response = await fetch(`/api/magazine/comments?articleId=${encodeURIComponent(magazineActiveArticle.id)}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (!payload?.ok) throw new Error(payload?.error || "매거진 댓글을 읽을 수 없습니다.");
+        setMagazineCommentStore(normalizeMagazineCommentStore(payload, magazineActiveArticle.id));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          console.warn("Magazine comments load failed", error);
+          setMagazineCommentError(error.message);
+        }
+      }
+    }
+    void loadMagazineComments();
+    return () => {
+      controller.abort();
+    };
+  }, [magazineActiveArticle?.id]);
+
+  useEffect(() => {
+    if (!magazinePreferenceNotice) return undefined;
+    setMagazinePreferenceNoticeFading(false);
+    const fadeTimeoutId = window.setTimeout(() => {
+      setMagazinePreferenceNoticeFading(true);
+    }, 2000);
+    const clearTimeoutId = window.setTimeout(() => {
+      setMagazinePreferenceNotice("");
+      setMagazinePreferenceNoticeFading(false);
+    }, 2800);
+    return () => {
+      window.clearTimeout(fadeTimeoutId);
+      window.clearTimeout(clearTimeoutId);
+    };
+  }, [magazinePreferenceNotice]);
 
   useEffect(() => {
     activeViewRef.current = activeView;
   }, [activeView]);
+
+  useEffect(() => {
+    if (activeView !== "magazine") {
+      setMagazineActiveArticle(null);
+      setMagazineActiveTopic("");
+    }
+  }, [activeView]);
+
+  useEffect(() => {
+    if (magazineActiveTopic && !magazineActiveTopicEntry) {
+      setMagazineActiveTopic("");
+    }
+  }, [magazineActiveTopic, magazineActiveTopicEntry]);
+
+  useEffect(() => {
+    if (activeView !== "magazine" || (!magazineActiveArticle && !magazineActiveTopic)) return undefined;
+
+    function handleMagazineReaderKeyDown(event) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (magazineDeleteDialogOpen) {
+        closeMagazineDeleteDialog();
+        return;
+      }
+      if (magazineActiveArticle) {
+        closeMagazineArticle();
+        return;
+      }
+      closeMagazineTopic();
+    }
+
+    window.addEventListener("keydown", handleMagazineReaderKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleMagazineReaderKeyDown);
+    };
+  }, [activeView, closeMagazineArticle, closeMagazineDeleteDialog, closeMagazineTopic, magazineActiveArticle, magazineActiveTopic, magazineDeleteDialogOpen]);
 
   useEffect(() => {
     portfolioCanvasStoreRef.current = portfolioCanvasStore;
@@ -2018,6 +3952,16 @@ function App() {
   }, [newsFeedStatus?.readState?.latestTranslatedAt]);
 
   useEffect(() => {
+    magazineArticleCountRef.current = Number(
+      magazineStatus?.articleCount || magazineCatalog?.articles?.length || 0
+    );
+  }, [magazineCatalog?.articles?.length, magazineStatus?.articleCount]);
+
+  useEffect(() => {
+    magazineLatestArticleAtRef.current = magazineStatus?.readState?.latestArticleAt || "";
+  }, [magazineStatus?.readState?.latestArticleAt]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function pollNewsFeedStatus() {
@@ -2069,6 +4013,40 @@ function App() {
 
     pollNewsFeedStatus();
     const timer = window.setInterval(pollNewsFeedStatus, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollMagazineStatus() {
+      try {
+        const payload = await refreshMagazineStatus();
+        if (cancelled) return;
+        const nextArticleCount = Number(payload.articleCount || 0);
+        const nextLatestArticleAt = payload.readState?.latestArticleAt || "";
+        const catalogChanged =
+          nextArticleCount !== magazineArticleCountRef.current ||
+          nextLatestArticleAt !== magazineLatestArticleAtRef.current;
+        if (catalogChanged && activeViewRef.current === "magazine") {
+          await refreshMagazineCatalog();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMagazineStatus((current) => ({
+            ...(current || {}),
+            ok: false,
+            error: error.message,
+          }));
+        }
+      }
+    }
+
+    void pollMagazineStatus();
+    const timer = window.setInterval(pollMagazineStatus, MAGAZINE_STATUS_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -2134,10 +4112,36 @@ function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (activeView !== "magazine") return;
+    let cancelled = false;
+
+    async function openMagazine() {
+      await markMagazineOpened();
+      if (cancelled) return;
+      try {
+        await refreshMagazineCatalog();
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          console.warn("Magazine catalog refresh failed", error);
+        }
+      }
+      if (!cancelled) {
+        void refreshMagazineStatus().catch(() => {});
+      }
+    }
+
+    void openMagazine();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView]);
+
+  useEffect(() => {
     if (activeView !== "settings") return;
     void loadNewsFeedSettings();
     void loadSharedMemoryStatus();
     void loadWorldMemorySettings({ refreshStatus: true });
+    void loadMagazineSettings({ quiet: true });
     void loadArcaAuthStatus({ quiet: true });
   }, [activeView]);
 
@@ -2149,6 +4153,12 @@ function App() {
     }
     void loadWorldMemoryStatus();
   }, [activeView, worldMemoryEnabled]);
+
+  useEffect(() => {
+    if (activeView === "magazine" && !magazineEnabled) {
+      setActiveView("stock");
+    }
+  }, [activeView, magazineEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2220,7 +4230,7 @@ function App() {
     if (!agentOptionsReady) {
       return "에이전트 설정 불러오는 중";
     }
-    if (agentProvider === "antigravity-sdk") {
+    if (agentProvider === ANTIGRAVITY_PROVIDER_ID) {
       return selectedProvider?.available
         ? `Antigravity SDK · ${selectedApproval?.label || "Default"} · us-central1/${selectedModelGroup?.slug || "gemini-2.5-flash"}`
         : selectedProvider?.installCommand || "python3 -m pip install --upgrade google-antigravity";
@@ -2235,7 +4245,7 @@ function App() {
     return ["codex", approvalFlag, modelFlag, reasoningFlag, speedHint].filter(Boolean).join(" ");
   }, [agentOptionsReady, agentProvider, selectedProvider, selectedApproval, selectedModelGroup, selectedReasoning, selectedSpeed]);
 
-  function buildPendingAssistant(id) {
+  function buildPendingAssistant(id, runtime = providerRuntimeForProvider(agentProvider)) {
     return {
       id,
       role: "assistant",
@@ -2244,14 +4254,14 @@ function App() {
         {
           type: "status",
           tone: "working",
-          title: `${agentProviderLabel} 응답 준비 중`,
+          title: `${runtime.providerLabel} 응답 준비 중`,
           body:
-            agentProvider === "antigravity-sdk"
-              ? `${selectedModelGroup?.label || "Gemini"} 모델에 대화 컨텍스트를 전달하고 있습니다.`
-              : `${modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
+            runtime.provider === ANTIGRAVITY_PROVIDER_ID
+              ? `${runtime.selectedModelGroup?.label || "Gemini"} 모델에 대화 컨텍스트를 전달하고 있습니다.`
+              : `${runtime.modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
         },
       ],
-      providerLabel: agentProviderLabel,
+      providerLabel: runtime.providerLabel,
     };
   }
 
@@ -2341,6 +4351,14 @@ function App() {
     const createdAt = Date.now();
     const articleForMessage = options.article === undefined ? (hasOverridePrompt ? null : attachedArticle) : options.article;
     const screenForMessage = typeof options.screen === "string" ? options.screen : activeView;
+    const screenModelProviderId =
+      worldMemoryEnabled && screenForMessage === "world-memory"
+        ? worldMemoryManagementProviderId()
+        : magazineEnabled && screenForMessage === "magazine"
+          ? magazineWritingProviderId()
+          : agentProvider;
+    const messageProviderId = options.provider || screenModelProviderId;
+    const messageRuntime = providerRuntimeForProvider(messageProviderId);
     const visibleScreenSnapshot =
       options.visibleScreenSnapshot !== undefined
         ? options.visibleScreenSnapshot
@@ -2391,6 +4409,12 @@ function App() {
         : worldMemoryEnabled && screenForMessage === "world-memory"
           ? buildWorldMemoryPageContextSnapshot(worldMemoryStatus, worldMemoryActionResult, worldMemoryFocusedChangeSuggestion)
           : null;
+    const magazineArticleContextForMessage =
+      options.magazineArticleContext !== undefined
+        ? options.magazineArticleContext
+        : screenForMessage === "magazine" && magazineActiveArticle
+          ? buildMagazineArticleAgentContext(magazineActiveArticle)
+          : null;
     const userMessage = {
       id: `user-${createdAt}`,
       role: "user",
@@ -2405,7 +4429,7 @@ function App() {
       text: messageToHistoryText(message),
     }));
 
-    updateChatMessagesForScope(chatScope, (messages) => [...messages, userMessage, buildPendingAssistant(assistantId)]);
+    updateChatMessagesForScope(chatScope, (messages) => [...messages, userMessage, buildPendingAssistant(assistantId, messageRuntime)]);
     if (!hasOverridePrompt || options.clearComposerOnSend) {
       setPrompt("");
       setAttachedArticle(null);
@@ -2439,10 +4463,10 @@ function App() {
         body: JSON.stringify({
           prompt: promptWithContext,
           messages: history,
-          provider: agentProvider,
-          model: selectedModelGroup?.slug,
-          reasoning: selectedReasoning?.id,
-          approval: selectedApproval?.id,
+          provider: messageRuntime.provider,
+          model: messageRuntime.selectedModelGroup?.slug,
+          reasoning: messageRuntime.selectedReasoning?.id,
+          approval: messageRuntime.selectedApproval?.id,
           personaMode:
             options.disablePersonaMode || !personaEligibleScreens.has(screenForMessage)
               ? "none"
@@ -2471,6 +4495,7 @@ function App() {
           canvasTitle: scopeCanvas?.name || "",
           boardContext: boardIndexContext,
           calendarContext,
+          magazineArticleContext: magazineArticleContextForMessage,
           portfolioContext: portfolioContextForMessage,
           visibleScreenSnapshot,
           attachments: attachmentsForMessage.map((attachment) => ({
@@ -2532,11 +4557,11 @@ function App() {
       let latestStatus = {
         type: "status",
         tone: "working",
-        title: `${agentProviderLabel} 응답 준비 중`,
+        title: `${messageRuntime.providerLabel} 응답 준비 중`,
         body:
-          agentProvider === "antigravity-sdk"
-            ? `${selectedModelGroup?.label || "Gemini"} · ${selectedApproval?.label || "Default"} 권한으로 대화 컨텍스트를 전달하고 있습니다.`
-            : `${modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
+          messageRuntime.provider === ANTIGRAVITY_PROVIDER_ID
+            ? `${messageRuntime.selectedModelGroup?.label || "Gemini"} · ${messageRuntime.selectedApproval?.label || "Default"} 권한으로 대화 컨텍스트를 전달하고 있습니다.`
+            : `${messageRuntime.modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
       };
       let firstAssistantTokenSeen = false;
       const notifyFirstAssistantToken = () => {
@@ -2550,15 +4575,15 @@ function App() {
       function applyStreamEvent(event) {
         const data = event.data || {};
         if (event.type === "started") {
-          const providerName = data.providerLabel || agentProviderLabel;
+          const providerName = data.providerLabel || messageRuntime.providerLabel;
           latestStatus = {
             type: "status",
             tone: "working",
             title: `${providerName} 세션 시작`,
             body: [
-              data.model || selectedModelGroup?.slug,
-              data.reasoning || selectedReasoning?.id,
-              data.approval || selectedApproval?.label,
+              data.model || messageRuntime.selectedModelGroup?.slug,
+              data.reasoning || messageRuntime.selectedReasoning?.id,
+              data.approval || messageRuntime.selectedApproval?.label,
             ].filter(Boolean).join(" · "),
           };
           renderAssistantStreamText({ immediate: true });
@@ -2567,8 +4592,8 @@ function App() {
           latestStatus = {
             type: "status",
             tone: "working",
-            title: data.title || `${agentProviderLabel} 응답 생성 중`,
-            body: data.body || `${agentProviderLabel}가 요청을 처리하고 있습니다.`,
+            title: data.title || `${messageRuntime.providerLabel} 응답 생성 중`,
+            body: data.body || `${messageRuntime.providerLabel}가 요청을 처리하고 있습니다.`,
           };
           renderAssistantStreamText({ immediate: true });
         }
@@ -2585,7 +4610,7 @@ function App() {
             type: "status",
             tone: "working",
             title: "응답 수신 중",
-            body: `${data.providerLabel || agentProviderLabel}에서 최종 메시지를 받았습니다.`,
+            body: `${data.providerLabel || messageRuntime.providerLabel}에서 최종 메시지를 받았습니다.`,
           };
           renderAssistantStreamText({ immediate: true });
         }
@@ -2595,13 +4620,13 @@ function App() {
           latestStatus = {
             type: "status",
             tone: "done",
-            title: `${data.providerLabel || agentProviderLabel} 응답`,
-            body: `${data.model || selectedModelGroup?.slug} · ${data.reasoning || selectedReasoning?.id} · ${Math.max(1, Math.round((data.elapsedMs || 0) / 1000))}초`,
+            title: `${data.providerLabel || messageRuntime.providerLabel} 응답`,
+            body: `${data.model || messageRuntime.selectedModelGroup?.slug} · ${data.reasoning || messageRuntime.selectedReasoning?.id} · ${Math.max(1, Math.round((data.elapsedMs || 0) / 1000))}초`,
           };
           renderAssistantStreamText({ immediate: true });
         }
         if (event.type === "error") {
-          throw new Error(data.error || `${agentProviderLabel} stream failed`);
+          throw new Error(data.error || `${messageRuntime.providerLabel} stream failed`);
         }
       }
 
@@ -2688,6 +4713,7 @@ function App() {
           attachments: attachmentsForMessage,
           screen: screenForMessage,
           memoryScope: chatScope.type,
+          magazineArticleContext: magazineArticleContextForMessage,
           canvas: scopeCanvas
             ? {
                 id: scopeCanvas.id,
@@ -2769,7 +4795,7 @@ function App() {
                   {
                     type: "status",
                     tone: "error",
-                    title: `${agentProviderLabel} 호출 실패`,
+                    title: `${messageRuntime.providerLabel} 호출 실패`,
                     body: error.message,
                   },
                 ],
@@ -2972,7 +4998,7 @@ function App() {
         tone: "working",
         title: `${agentProviderLabel} 어닝 분석 준비 중`,
         body:
-          agentProvider === "antigravity-sdk"
+          agentProvider === ANTIGRAVITY_PROVIDER_ID
             ? `${selectedModelGroup?.label || "Gemini"} · ${selectedApproval?.label || "Default"} 권한으로 이벤트 컨텍스트를 전달하고 있습니다.`
             : `${modelSummaryLabel} 모델을 읽기 전용 Codex CLI 세션으로 호출하고 있습니다.`,
       };
@@ -3107,6 +5133,65 @@ function App() {
     }
   }
 
+  const defaultAgentRuntime = providerRuntimeForProvider(agentProvider);
+  const worldMemoryAgentRuntime = providerRuntimeForProvider(worldMemoryManagementProviderId());
+  const magazineAgentRuntime = providerRuntimeForProvider(magazineWritingProviderId());
+  const sidebarAgentRuntime =
+    activeView === "world-memory" && worldMemoryEnabled
+      ? worldMemoryAgentRuntime
+      : activeView === "magazine" && magazineEnabled
+        ? magazineAgentRuntime
+        : defaultAgentRuntime;
+  const enabledAgentProviderIds = enabledAgentProviders();
+  const agentProviderProfiles = agentProviderIds.map((providerId) => {
+    const providerStatus =
+      providerOptions.find((item) => item.id === providerId) ||
+      fallbackProviderOptions.find((item) => item.id === providerId) ||
+      { id: providerId, label: providerId };
+    const providerApprovalOptions =
+      providerId === ANTIGRAVITY_PROVIDER_ID
+        ? antigravityPolicyOptions
+        : approvalOptions.length
+          ? approvalOptions
+          : fallbackApprovalOptions;
+    const providerModelGroups = modelGroupsForProvider(providerId);
+    const savedProviderSettings = agentProviderSettings(providerId);
+    const providerSelection =
+      providerId === agentProvider
+        ? {
+            provider: providerId,
+            approval: selectedApproval?.id || approval,
+            model: selectedModelGroup?.slug || model,
+            reasoning: selectedReasoning?.id || reasoning,
+            speed: selectedSpeed?.id || speed,
+          }
+        : selectionForProvider(providerId, savedProviderSettings);
+    const providerModelGroup =
+      providerModelGroups.find((item) => item.slug === providerSelection.model) ||
+      providerModelGroups[0] ||
+      fallbackModelGroups[0];
+    const providerReasoningOptions = providerModelGroup?.reasoningLevels?.length
+      ? providerModelGroup.reasoningLevels
+      : fallbackModelGroups[0].reasoningLevels;
+    const providerSpeedOptions = getSpeedOptions(providerModelGroup);
+
+    return {
+      id: providerId,
+      label: providerStatus.label || (providerId === ANTIGRAVITY_PROVIDER_ID ? "Antigravity SDK" : "Codex CLI"),
+      enabled: isAgentProviderEnabled(providerId),
+      toggleDisabled: isAgentProviderEnabled(providerId) && enabledAgentProviderIds.length <= 1,
+      status: providerStatus,
+      approvalOptions: providerApprovalOptions,
+      approval: providerSelection.approval,
+      modelGroups: providerModelGroups,
+      model: providerSelection.model,
+      reasoningOptions: providerReasoningOptions,
+      reasoning: providerSelection.reasoning,
+      speedOptions: providerSpeedOptions,
+      speed: providerSelection.speed,
+    };
+  });
+
   return (
     <main
       className={isChatCanvasView ? "mockup-stage no-agent-sidebar" : "mockup-stage"}
@@ -3117,8 +5202,10 @@ function App() {
         activeView={activeView}
         arcaNotificationHealth={arcaNotificationHealth}
         editingPortfolioCanvasId={editingPortfolioCanvasId}
+        magazineStatus={magazineStatus}
         nameInputRef={portfolioCanvasNameInputRef}
         newsFeedStatus={newsFeedStatus}
+        magazineEnabled={magazineEnabled}
         onDraftChange={setPortfolioCanvasNameDraft}
         onDraftKeyDown={handlePortfolioCanvasNameKeyDown}
         onDuplicateCanvas={duplicatePortfolioCanvas}
@@ -3144,12 +5231,13 @@ function App() {
           <React.Suspense fallback={<RouteLoading label="설정 불러오는 중" />}>
             <SettingsView
               settings={newsFeedSettings}
-              busy={newsFeedSettingsBusy || worldMemorySettingsBusy}
+              busy={newsFeedSettingsBusy || worldMemorySettingsBusy || magazineSettingsBusy}
               savingFeedId={newsFeedSettingsSavingId}
               error={newsFeedSettingsError}
               onReload={() => {
                 void loadNewsFeedSettings();
                 void loadWorldMemorySettings({ refreshStatus: true });
+                void loadMagazineSettings({ quiet: true });
               }}
               onToggleFeed={toggleNewsFeedSource}
               onPollIntervalChange={updateNewsFeedPollInterval}
@@ -3181,8 +5269,15 @@ function App() {
               worldMemorySettingsBusy={worldMemorySettingsBusy}
               worldMemorySettingsSaving={worldMemorySettingsSaving}
               worldMemorySettingsError={worldMemorySettingsError}
+              magazineSettings={magazineSettings}
+              magazineSettingsBusy={magazineSettingsBusy}
+              magazineSettingsSaving={magazineSettingsSaving}
+              magazineSettingsError={magazineSettingsError}
               onToggleWorldMemoryTech={() => setWorldMemoryTechOpen((open) => !open)}
               onToggleWorldMemoryEnabled={updateWorldMemoryEnabled}
+              onWorldMemoryManagementProviderChange={updateWorldMemoryManagementProvider}
+              onToggleMagazineEnabled={updateMagazineEnabled}
+              onMagazineWritingProviderChange={updateMagazineWritingProvider}
               onReloadWorldMemory={loadWorldMemoryStatus}
               arcaAuth={{
                 status: arcaAuthStatus,
@@ -3200,6 +5295,9 @@ function App() {
                 provider: agentProvider,
                 onProviderChange: handleAgentProviderChange,
                 providerStatus: selectedProvider,
+                providerProfiles: agentProviderProfiles,
+                onProviderEnabledChange: updateProviderEnabled,
+                onProviderSettingChange: updateProviderSelection,
                 approvalOptions: activeApprovalOptions,
                 approval: selectedApproval?.id || approval,
                 onApprovalChange: (nextApproval) => updateAgentSelection({ approval: nextApproval }),
@@ -3292,8 +5390,8 @@ function App() {
               actionBusy={worldMemoryActionBusy}
               actionResult={worldMemoryActionResult}
               agentAction={worldMemoryAgentAction}
-              agentIcon={agentIcon}
-              agentProvider={agentProvider}
+              agentIcon={worldMemoryAgentRuntime.icon}
+              agentProvider={worldMemoryAgentRuntime.provider}
               agentOptionsReady={agentOptionsReady}
               isSending={isSending}
               onClearAgentAction={() => setWorldMemoryAgentAction(null)}
@@ -3318,6 +5416,426 @@ function App() {
               onRefresh={refreshNewsFeed}
             />
           </React.Suspense>
+        </section>
+      ) : activeView === "magazine" ? (
+        <section
+          className={`workspace-canvas magazine-canvas${magazineActiveArticle ? " is-reader-open" : ""}`}
+          aria-label="주식채널 매거진+"
+          ref={magazineCanvasRef}
+        >
+          <div className="magazine-empty-page">
+            <MagazineUpdateSchedule
+              status={magazineStatus}
+              articles={magazineArticles}
+              isStartingNow={magazineStartNowBusy}
+              onStartNow={startMagazineNow}
+            />
+            <h1 className="magazine-logo-heading">
+              <img
+                className="magazine-logo-image"
+                src={stockChannelMagazineLogo}
+                alt="Stock Channel Magazine+"
+              />
+            </h1>
+            <MagazineTopicRow
+              topics={magazineTopicCatalog}
+              activeTopic={magazineActiveTopic}
+              onSelectTopic={openMagazineTopic}
+            />
+            <div className="magazine-issue-layout" aria-label="매거진 기사 목업">
+              <article className="magazine-headline-story">
+                <div className="magazine-headline-copy">
+                  <span className="magazine-story-kicker">{magazineCoverHeadline.topic}</span>
+                  <h2>
+                    <a
+                      className="magazine-article-link"
+                      href="#magazine-reader"
+                      onClick={(event) => openMagazineArticle(event, magazineCoverHeadline)}
+                    >
+                      {magazineCoverHeadline.title}
+                    </a>
+                  </h2>
+                  <p>{magazineCoverHeadline.deck}</p>
+                  <MagazinePublishedTime article={magazineCoverHeadline} />
+                </div>
+                <a
+                  className="magazine-image-link"
+                  href="#magazine-reader"
+                  onClick={(event) => openMagazineArticle(event, magazineCoverHeadline)}
+                  aria-label={`${magazineCoverHeadline.title} 기사 열기`}
+                >
+                  <div className="magazine-featured-image magazine-headline-image">
+                    <img src={magazineCoverHeadline.image} alt={magazineCoverHeadline.imageAlt} />
+                  </div>
+                </a>
+              </article>
+              <div className="magazine-card-grid" aria-label="피처드 기사">
+                {magazineCoverCards.map((story) => (
+                  <article className="magazine-article-card" key={story.id || story.title}>
+                    <a
+                      className="magazine-image-link"
+                      href="#magazine-reader"
+                      onClick={(event) => openMagazineArticle(event, story)}
+                      aria-label={`${story.title} 기사 열기`}
+                    >
+                      <div className="magazine-featured-image">
+                        <img src={story.image} alt={story.imageAlt} />
+                      </div>
+                    </a>
+                    <div className="magazine-card-copy">
+                      <span className="magazine-story-kicker">{story.topic}</span>
+                      <h3>
+                        <a
+                          className="magazine-article-link"
+                          href="#magazine-reader"
+                          onClick={(event) => openMagazineArticle(event, story)}
+                        >
+                          {story.title}
+                        </a>
+                      </h3>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <section className="magazine-list-section" aria-labelledby="magazine-article-list-heading">
+                <div className="magazine-section-heading">
+                  <h2 id="magazine-article-list-heading">최신 기사</h2>
+                </div>
+                <MagazineArticleList
+                  articles={magazineArticles}
+                  listKey="latest"
+                  onOpenArticle={openMagazineArticle}
+                />
+              </section>
+            </div>
+          </div>
+          {magazineActiveTopicEntry ? (
+            <div
+              className="magazine-topic-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="magazine-topic-view-title"
+              ref={magazineTopicModalRef}
+            >
+              <div className="magazine-topic-shell">
+                <a className="magazine-topic-return-link" href="#magazine-all" onClick={closeMagazineTopic}>
+                  ← 전체 기사 보기로 돌아가기
+                </a>
+                <header className="magazine-topic-view-header">
+                  <h1>
+                    <a className="magazine-title-link" href="#magazine-all" onClick={closeMagazineTopic}>
+                      주식채널 매거진+
+                    </a>
+                  </h1>
+                  <MagazineTopicRow
+                    topics={magazineTopicCatalog}
+                    activeTopic={magazineActiveTopic}
+                    onSelectTopic={openMagazineTopic}
+                    ariaLabel="매거진 토픽 필터"
+                  />
+                </header>
+                <section className="magazine-list-section" aria-labelledby="magazine-topic-view-title">
+                  <div className="magazine-section-heading">
+                    <h2 id="magazine-topic-view-title">{magazineActiveTopic} 주제의 기사</h2>
+                  </div>
+                  <MagazineArticleList
+                    articles={magazineTopicArticles}
+                    listKey={`topic:${magazineActiveTopic}`}
+                    onOpenArticle={openMagazineArticle}
+                    emptyText={`${magazineActiveTopic} 주제로 분류된 기사가 아직 없습니다.`}
+                  />
+                </section>
+              </div>
+            </div>
+          ) : null}
+          {magazineActiveArticle ? (
+            <div className="magazine-reader-modal" role="dialog" aria-modal="true" aria-labelledby="magazine-reader-title">
+              <div className="magazine-reader-shell">
+                <div className="magazine-reader-actions">
+                  <div className="magazine-reader-left-actions">
+                    <button className="magazine-reader-close" type="button" onClick={closeMagazineArticle}>
+                      기사 닫기
+                    </button>
+                    <button
+                      className={[
+                        "magazine-reader-copy",
+                        magazineCopyStatus !== "idle" ? `is-${magazineCopyStatus}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      type="button"
+                      onClick={copyMagazineArticle}
+                      disabled={magazineCopyStatus === "copying"}
+                      title={magazineCopyError || undefined}
+                    >
+                      <Copy size={15} strokeWidth={2.2} aria-hidden="true" />
+                      <span>
+                        {magazineCopyStatus === "copying"
+                          ? "복사 중"
+                          : magazineCopyStatus === "copied"
+                            ? "복사됨"
+                            : magazineCopyStatus === "text"
+                              ? "텍스트 복사됨"
+                              : magazineCopyStatus === "error"
+                                ? "복사 실패"
+                                : "복사하기"}
+                      </span>
+                    </button>
+                  </div>
+                  <button
+                    className="magazine-reader-delete"
+                    type="button"
+                    onClick={openMagazineDeleteDialog}
+                    disabled={!magazineActiveArticle.id || magazineDeleting}
+                  >
+                    <Trash2 size={15} strokeWidth={2.2} aria-hidden="true" />
+                    <span>기사 삭제</span>
+                  </button>
+                </div>
+                <article className="magazine-reader-article" ref={magazineReaderArticleRef}>
+                  <div className="magazine-reader-topic-row" aria-label="기사 토픽">
+                    {magazineActiveArticle.topics.map((topic) => (
+                      <span className="magazine-list-topic" key={topic}>
+                        {topic}
+                      </span>
+                    ))}
+                  </div>
+                  <h1 id="magazine-reader-title">{magazineActiveArticle.title}</h1>
+                  <MagazinePublishedTime article={magazineActiveArticle} className="magazine-reader-published-time" />
+                  <p className="magazine-reader-summary">{magazineActiveArticle.summary}</p>
+                  <figure className="magazine-reader-figure">
+                    <div className="magazine-featured-image magazine-reader-image">
+                      <img src={magazineActiveArticle.image} alt={magazineActiveArticle.imageAlt} />
+                    </div>
+                    {magazineActiveArticle.imageCredit ? (
+                      <figcaption>{magazineActiveArticle.imageCredit}</figcaption>
+                    ) : null}
+                  </figure>
+                  <div className="magazine-reader-body">
+                    {magazineActiveArticle.bodyHtml ? (
+                      <div
+                        className="magazine-reader-html"
+                        dangerouslySetInnerHTML={{ __html: magazineActiveArticle.bodyHtml }}
+                      />
+                    ) : (
+                      magazineMockArticleSections.map((section) => (
+                        <section className="magazine-reader-section" key={section.heading}>
+                          <h2>{section.heading}</h2>
+                          <p>{section.body}</p>
+                        </section>
+                      ))
+                    )}
+                    {magazineActiveArticle.chartBlocks.length ? (
+                      <div className="magazine-reader-chart-list" aria-label="기사 데이터 차트">
+                        {magazineActiveArticle.chartBlocks.map((chart, index) => (
+                          <section className="magazine-reader-chart-section" key={chart.id || chart.title || index}>
+                            <h2>{chart.title}</h2>
+                            {chart.note ? <p>{chart.note}</p> : null}
+                            <div className="magazine-reader-chart-frame">
+                              <React.Suspense fallback={<div className="magazine-reader-chart-loading">차트 읽는 중</div>}>
+                                <MagazinePortfolioEChart
+                                  option={chart.option}
+                                  className="magazine-reader-echart"
+                                  ariaLabel={chart.ariaLabel || `${chart.title} 차트`}
+                                />
+                              </React.Suspense>
+                            </div>
+                          </section>
+                        ))}
+                      </div>
+                    ) : null}
+                    {magazineActiveArticle.followupOptions.length ? (
+                      <section className="magazine-reader-followup" aria-label="앞으로 알고 싶은 기사 방향">
+                        <h2>앞으로 이 분야에 대해 더 알고 싶은 것이 있으신가요?</h2>
+                        <div className="magazine-reader-followup-options">
+                          {magazineActiveArticle.followupOptions.map((option, index) => {
+                            const isSelected = selectedMagazinePreferenceIds.includes(option.id);
+                            const isSaving = magazinePreferenceSavingId === option.id;
+                            const tone = option.tone || magazineToneSequence[index % magazineToneSequence.length];
+                            return (
+                              <button
+                                className={[
+                                  "magazine-reader-followup-choice",
+                                  `is-${tone}`,
+                                  isSelected ? "is-selected" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                type="button"
+                                key={option.id}
+                                aria-pressed={isSelected}
+                                disabled={Boolean(magazinePreferenceSavingId)}
+                                onClick={() => saveMagazinePreference(option)}
+                              >
+                                {isSelected ? <Check size={14} strokeWidth={2.4} aria-hidden="true" /> : null}
+                                <span>{isSaving ? "저장 중" : option.label}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {magazinePreferenceNotice ? (
+                          <div
+                            className={[
+                              "magazine-reader-followup-notice",
+                              magazinePreferenceNoticeFading ? "is-fading" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            role="status"
+                          >
+                            {magazinePreferenceNotice}
+                          </div>
+                        ) : null}
+                      </section>
+                    ) : null}
+                    <section className="magazine-reader-comments" aria-label="기사 댓글">
+                      <h2>추가로 요청하고 싶은 것이 있거나 궁금하신 점이 있다면 알려주세요</h2>
+                      <div className="magazine-reader-comment-list">
+                        {magazineComments.length ? (
+                          magazineComments.map((comment) => {
+                            const replyStatusText = magazineCommentStatusText(comment.reply?.status);
+                            return (
+                              <article className="magazine-reader-comment" key={comment.id}>
+                                <div className="magazine-reader-comment-meta">
+                                  <strong>{comment.author || "사용자"}</strong>
+                                  <span>{formatDateTime(comment.createdAt)}</span>
+                                </div>
+                                <p>{comment.text}</p>
+                                {comment.reply ? (
+                                  <div
+                                    className={[
+                                      "magazine-reader-comment-reply",
+                                      comment.reply.status === "error" ? "is-error" : "",
+                                      ["waiting", "generating"].includes(comment.reply.status) ? "is-pending" : "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                  >
+                                    <div className="magazine-reader-comment-meta">
+                                      <strong>{comment.reply.author || "매거진 편집자 AI"}</strong>
+                                      <span>
+                                        {replyStatusText || formatDateTime(comment.reply.createdAt)}
+                                      </span>
+                                    </div>
+                                    {["waiting", "generating"].includes(comment.reply.status) ? (
+                                      <div className="magazine-reader-comment-pending">
+                                        <LoaderCircle size={16} strokeWidth={2.2} className="is-spinning" aria-hidden="true" />
+                                        <span>{replyStatusText}</span>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <div className="magazine-reader-comment-markdown">
+                                          <MarkdownText text={comment.reply.text} splitSingleLineParagraphs />
+                                        </div>
+                                        {comment.reply.biasEventIds?.length ? (
+                                          <div className="magazine-reader-comment-bias-applied" role="status">
+                                            <span className="magazine-reader-comment-bias-icon" aria-hidden="true">
+                                              <Check size={13} strokeWidth={2.7} />
+                                            </span>
+                                            <span>사용자의 편집 방향 수정 요청이 반영되었습니다</span>
+                                          </div>
+                                        ) : null}
+                                      </>
+                                    )}
+                                  </div>
+                                ) : null}
+                              </article>
+                            );
+                          })
+                        ) : (
+                          <p className="magazine-reader-comments-empty">아직 남겨진 코멘트가 없습니다.</p>
+                        )}
+                      </div>
+                      <form className="magazine-reader-comment-form" onSubmit={submitMagazineComment}>
+                        <label className="sr-only" htmlFor="magazine-comment-input">
+                          기사 코멘트
+                        </label>
+                        <textarea
+                          id="magazine-comment-input"
+                          value={magazineCommentDraft}
+                          maxLength={4000}
+                          onChange={(event) => setMagazineCommentDraft(event.target.value)}
+                          placeholder="궁금한 점이나 앞으로 보고 싶은 기사 방향을 적어주세요."
+                          disabled={magazineCommentSubmitting}
+                        />
+                        <div className="magazine-reader-comment-form-row">
+                          {magazineCommentError ? (
+                            <span className="magazine-reader-comment-error">{magazineCommentError}</span>
+                          ) : (
+                            <span>{magazineCommentDraft.length.toLocaleString("ko-KR")} / 4,000</span>
+                          )}
+                          <button
+                            className={[
+                              "magazine-reader-comment-submit",
+                              magazineCommentSubmitting ? "is-loading" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            type="submit"
+                            disabled={!magazineCommentDraft.trim() || magazineCommentSubmitting}
+                            aria-label={magazineCommentSubmitting ? "답변 준비 중" : "등록"}
+                            title={magazineCommentSubmitting ? "답변 준비 중" : undefined}
+                          >
+                            {magazineCommentSubmitting ? (
+                              <LoaderCircle size={16} strokeWidth={2.2} className="is-spinning" aria-hidden="true" />
+                            ) : (
+                              <>
+                                <SendHorizontal size={16} strokeWidth={2.2} aria-hidden="true" />
+                                <span>등록</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </form>
+                    </section>
+                    <button className="magazine-reader-return" type="button" onClick={closeMagazineArticle}>
+                      돌아가기
+                    </button>
+                  </div>
+                </article>
+              </div>
+              {magazineDeleteDialogOpen ? (
+                <div className="magazine-reader-delete-overlay">
+                  <div
+                    className="magazine-reader-delete-dialog"
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="magazine-delete-dialog-title"
+                    aria-describedby="magazine-delete-dialog-description"
+                  >
+                    <h2 id="magazine-delete-dialog-title">정말 삭제하시겠습니까?</h2>
+                    <p id="magazine-delete-dialog-description">삭제한 기사는 되돌릴 수 없습니다.</p>
+                    {magazineDeleteError ? (
+                      <p className="magazine-reader-delete-error" role="alert">
+                        {magazineDeleteError}
+                      </p>
+                    ) : null}
+                    <div className="magazine-reader-delete-dialog-actions">
+                      <button
+                        className="magazine-reader-delete-cancel"
+                        type="button"
+                        onClick={closeMagazineDeleteDialog}
+                        disabled={magazineDeleting}
+                      >
+                        취소
+                      </button>
+                      <button
+                        className="magazine-reader-delete-confirm"
+                        type="button"
+                        onClick={confirmMagazineArticleDelete}
+                        disabled={magazineDeleting}
+                      >
+                        {magazineDeleting ? (
+                          <LoaderCircle size={15} strokeWidth={2.2} className="is-spinning" aria-hidden="true" />
+                        ) : null}
+                        <span>{magazineDeleting ? "삭제 중" : "확인"}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       ) : activeView === "portfolio" ? (
         <section className="workspace-canvas portfolio-canvas" aria-label="포트폴리오">
@@ -3415,16 +5933,16 @@ function App() {
       {isChatCanvasView ? null : (
         <AgentSidebar
           addChatAttachmentFiles={addChatAttachmentFiles}
-          agentIcon={agentIcon}
+          agentIcon={sidebarAgentRuntime.icon}
           agentOptionsReady={agentOptionsReady}
-          agentProvider={agentProvider}
-          agentProviderAvailable={agentProviderAvailable}
-          agentProviderLabel={agentProviderLabel}
+          agentProvider={sidebarAgentRuntime.provider}
+          agentProviderAvailable={sidebarAgentRuntime.providerAvailable}
+          agentProviderLabel={sidebarAgentRuntime.providerLabel}
           attachedArticle={attachedArticle}
           attachmentError={attachmentError}
           chatAttachments={chatAttachments}
           codexStatus={codexStatus}
-          commandPreview={commandPreview}
+          commandPreview={sidebarAgentRuntime.commandPreview}
           fileInputRef={fileInputRef}
           handleComposerDragEnter={handleComposerDragEnter}
           handleComposerDragLeave={handleComposerDragLeave}
@@ -3440,23 +5958,23 @@ function App() {
           onNewChat={startNewChat}
           onPromptChange={setPrompt}
           onRemoveChatAttachment={removeChatAttachment}
-          onSelectApproval={(nextApproval) => updateAgentSelection({ approval: nextApproval })}
-          onSelectModel={(nextModel) => updateAgentSelection({ model: nextModel })}
-          onSelectReasoning={(nextReasoning) => updateAgentSelection({ reasoning: nextReasoning })}
-          onSelectSpeed={(nextSpeed) => updateAgentSelection({ speed: nextSpeed })}
+          onSelectApproval={(nextApproval) => updateProviderSelection(sidebarAgentRuntime.provider, { approval: nextApproval })}
+          onSelectModel={(nextModel) => updateProviderSelection(sidebarAgentRuntime.provider, { model: nextModel })}
+          onSelectReasoning={(nextReasoning) => updateProviderSelection(sidebarAgentRuntime.provider, { reasoning: nextReasoning })}
+          onSelectSpeed={(nextSpeed) => updateProviderSelection(sidebarAgentRuntime.provider, { speed: nextSpeed })}
           onStopSend={stopActiveChatResponse}
           prompt={prompt}
           promptHeight={promptHeight}
           promptOverflow={promptOverflow}
           promptRef={promptRef}
-          selectedProvider={selectedProvider}
+          selectedProvider={sidebarAgentRuntime.selectedProvider}
           sendPrompt={sendPrompt}
-          toolbarApprovalOptions={toolbarApprovalOptions}
-          toolbarApprovalValue={toolbarApprovalValue}
-          toolbarModelGroups={toolbarModelGroups}
-          toolbarModelValue={toolbarModelValue}
-          toolbarReasoningValue={toolbarReasoningValue}
-          toolbarSpeedValue={toolbarSpeedValue}
+          toolbarApprovalOptions={agentOptionsReady ? sidebarAgentRuntime.approvalOptions : loadingApprovalOptions}
+          toolbarApprovalValue={agentOptionsReady ? sidebarAgentRuntime.selectedApproval?.id : "loading"}
+          toolbarModelGroups={agentOptionsReady ? sidebarAgentRuntime.modelGroups : loadingModelGroups}
+          toolbarModelValue={agentOptionsReady ? sidebarAgentRuntime.selectedModelGroup?.slug : "loading"}
+          toolbarReasoningValue={agentOptionsReady ? sidebarAgentRuntime.selectedReasoning?.id : "loading"}
+          toolbarSpeedValue={agentOptionsReady ? sidebarAgentRuntime.selectedSpeed?.id : "loading"}
           visibleChatMessages={visibleChatMessages}
           worldMemoryActionBusy={worldMemoryActionBusy}
         />

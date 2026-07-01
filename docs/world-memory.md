@@ -90,6 +90,11 @@ surface stable while allowing memory payloads to evolve.
   boundary.
 - After writes, verify with the narrowest relevant command, usually `audit`,
   `embed-status`, or `python scripts/world_memory_harness.py --strict`.
+- To reduce orphan brief ratio after a user-approved curation decision, use
+  `python scripts/world_memory_cli.py brief-story-backfill --event-id <id> --story "<story>" --story-family "<family>"`.
+  This sets `manual_story_override` on the selected brief rows so later cleanup
+  preserves the human or LLM-reviewed story assignment. Do not guess event ids;
+  retrieve them from `list` or `semantic-search` first.
 
 ## Repair Guidance
 

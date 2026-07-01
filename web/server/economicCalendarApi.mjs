@@ -20,6 +20,7 @@ const ECONOMIC_FETCH_TIMEOUT_MS = 45000;
 const ECONOMIC_TRANSLATION_TIMEOUT_MS = 60000;
 const ECONOMIC_TRANSLATION_BATCH_SIZE = 12;
 const ECONOMIC_TRANSLATION_TITLE_MAX_CHARS = 220;
+const ECONOMIC_UNTRANSLATED_COPY_LATIN_WORDS = 2;
 const FINALIZED_CACHE_AFTER_HOURS = 24;
 const FINALIZED_CACHE_AFTER_MS = FINALIZED_CACHE_AFTER_HOURS * 60 * 60 * 1000;
 const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
@@ -508,6 +509,47 @@ function parseTranslationJsonPayload(text) {
   }
 }
 
+function compactEconomicTranslationText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function sameEconomicTranslationText(left, right) {
+  const normalizedLeft = compactEconomicTranslationText(left).toLocaleLowerCase("en-US");
+  const normalizedRight = compactEconomicTranslationText(right).toLocaleLowerCase("en-US");
+  return normalizedLeft && normalizedLeft === normalizedRight;
+}
+
+function economicTextLikelyNeedsKorean(value) {
+  const text = compactEconomicTranslationText(value);
+  if (!text || /[가-힣]/.test(text)) return false;
+  const latinWords = text.match(/[A-Za-z][A-Za-z'.-]{1,}/g) || [];
+  return latinWords.length >= ECONOMIC_UNTRANSLATED_COPY_LATIN_WORDS;
+}
+
+function hasKoreanText(value) {
+  return /[가-힣]/.test(String(value || ""));
+}
+
+export function normalizeEconomicTranslationCandidate(item = {}, translation = {}) {
+  const sourceText = compactEconomicTranslationText(item.sourceText);
+  const textKo = compactEconomicTranslationText(translation?.textKo);
+  const issues = [];
+
+  if (sourceText && !textKo) issues.push("textKo가 비어 있습니다");
+  if (sourceText && textKo && economicTextLikelyNeedsKorean(sourceText) && !hasKoreanText(textKo)) {
+    issues.push("textKo에 한국어가 없습니다");
+  }
+  if (sourceText && textKo && economicTextLikelyNeedsKorean(sourceText) && sameEconomicTranslationText(sourceText, textKo)) {
+    issues.push("textKo가 원문과 같습니다");
+  }
+
+  return {
+    ok: issues.length === 0,
+    textKo,
+    error: issues.length ? `번역 검증 보류: ${issues.join(", ")}` : "",
+  };
+}
+
 function runCodexEconomicTranslationBatch(items, modelInfo) {
   return new Promise((resolveBatch, reject) => {
     const tempDir = mkdtempSync(join(tmpdir(), "finance-agent-economic-calendar-"));
@@ -695,21 +737,24 @@ function startPendingEconomicEventNameTranslation() {
         );
         const translatedAt = new Date().toISOString();
         memory = readEconomicTranslationMemory();
+        let retryCount = 0;
         for (const item of pendingItems) {
           const entry = memory.entries[item.key] || item.entry;
           const translation = translationById.get(item.key);
-          const textKo = String(translation?.textKo || "").trim();
+          const candidate = normalizeEconomicTranslationCandidate(item, translation);
+          if (!candidate.ok) retryCount += 1;
           memory.entries[item.key] = {
             ...entry,
-            status: textKo ? "translated" : "pending",
-            textKo,
-            translatedAt: textKo ? translatedAt : entry.translatedAt || "",
+            status: candidate.ok ? "translated" : "pending",
+            textKo: candidate.ok ? candidate.textKo : "",
+            translatedAt: candidate.ok ? translatedAt : entry.translatedAt || "",
             model: translated.model || entry.model || "",
             reasoning: translated.reasoning || entry.reasoning || "",
-            error: "",
+            error: candidate.error,
           };
         }
         writeEconomicTranslationMemory(memory);
+        if (retryCount) break;
       } catch (error) {
         runtime.lastError = error.message || "경제 캘린더 이벤트명 번역 실패";
         memory = readEconomicTranslationMemory();
@@ -717,7 +762,7 @@ function startPendingEconomicEventNameTranslation() {
           const entry = memory.entries[item.key] || item.entry;
           memory.entries[item.key] = {
             ...entry,
-            status: "failed",
+            status: "pending",
             error: runtime.lastError,
           };
         }

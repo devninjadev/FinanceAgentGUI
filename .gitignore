@@ -15,6 +15,8 @@ Thumbs.db
 # Private runtime memory and user workspace state
 /data/agent-attachments/*
 /data/arca-browser-profile/*
+/data/magazine/*
+!/data/magazine/.gitkeep
 /data/reports/*
 !/data/reports/.gitkeep
 /data/secrets/*
@@ -33,9 +35,11 @@ Thumbs.db
 # Generated local feed/calendar caches
 /data/news-feed.json
 /data/news-feed-read-state.json
+/data/search_results.json
 /data/*-cache.json
 /data/*-settings.json
 /data/*-translation-memory.json
+/scratch_*.json
 
 # Python runtime artifacts
 __pycache__/

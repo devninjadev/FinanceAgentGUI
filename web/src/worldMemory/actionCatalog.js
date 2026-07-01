@@ -6,6 +6,7 @@ export const worldMemoryActionCatalog = {
   taxonomy: { label: "Taxonomy 조회", riskLevel: "low" },
   taxonomyRefresh: { label: "Taxonomy 재색인", riskLevel: "medium" },
   cleanupDryRun: { label: "Cleanup dry-run", riskLevel: "low" },
+  briefStoryBackfill: { label: "Brief story backfill", riskLevel: "medium" },
   storyLink: { label: "스토리 관계 기록", riskLevel: "medium" },
   storyMap: { label: "스토리 맵 조회", riskLevel: "low" },
   storyFamilyReview: { label: "스토리 패밀리 리뷰", riskLevel: "low" },

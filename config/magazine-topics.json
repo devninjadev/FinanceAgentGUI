@@ -1,0 +1,13 @@
+{
+  "topics": [
+    { "label": "시장", "emoji": "📈", "tone": "market" },
+    { "label": "금융", "emoji": "🏦", "tone": "finance" },
+    { "label": "경제", "emoji": "🌐", "tone": "economy" },
+    { "label": "산업", "emoji": "🏭", "tone": "industry" },
+    { "label": "테크", "emoji": "💻", "tone": "tech" },
+    { "label": "정치", "emoji": "🏛️", "tone": "policy" },
+    { "label": "AI", "emoji": "🤖", "tone": "ai" },
+    { "label": "기후", "emoji": "🌱", "tone": "climate" },
+    { "label": "크립토", "emoji": "🪙", "tone": "crypto" }
+  ]
+}

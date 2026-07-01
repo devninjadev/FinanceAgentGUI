@@ -18,6 +18,12 @@ import { FeedSourceLabel } from "../news/FeedSourceLabel.jsx";
 import { formatDateTime } from "../utils/formatters.js";
 import { worldMemoryAuditValue, worldMemoryStatusLabel } from "../worldMemory/statusHelpers.js";
 
+const agentModelProviderOptions = [
+  { id: "default", label: "기본 대화 모델" },
+  { id: "codex-cli", label: "Codex CLI" },
+  { id: "antigravity-sdk", label: "Antigravity SDK" },
+];
+
 const standardSpeedOption = {
   id: "standard",
   label: "표준",
@@ -202,6 +208,9 @@ function AgentSettingsSection({
   provider,
   onProviderChange,
   providerStatus,
+  providerProfiles = [],
+  onProviderEnabledChange = () => {},
+  onProviderSettingChange = () => {},
   approvalOptions,
   approval,
   onApprovalChange,
@@ -243,35 +252,33 @@ function AgentSettingsSection({
   const safeSpeedOptions = loading ? [loadingSpeedOption] : speedOptions.length ? speedOptions : [standardSpeedOption];
   const selectedApprovalOption =
     safeApprovalOptions.find((option) => option.id === approval) ?? safeApprovalOptions[0];
-  const modelOptions = safeModelGroups.map((group, index) => ({
-    id: group.slug,
-    label: index === 0
-      ? `최신 버전 · ${group.displayName || group.slug}`
-      : group.displayName || group.slug,
+  const fallbackProfiles = safeProviderOptions.map((option) => ({
+    id: option.id,
+    label: option.label,
+    enabled: option.id === provider,
+    toggleDisabled: option.id === provider,
+    status: option.id === provider ? providerStatus : option,
+    approvalOptions: safeApprovalOptions,
+    approval,
+    modelGroups: safeModelGroups,
+    model,
+    reasoningOptions: safeReasoningOptions,
+    reasoning,
+    speedOptions: safeSpeedOptions,
+    speed,
   }));
+  const profiles = loading ? [] : providerProfiles.length ? providerProfiles : fallbackProfiles;
+  const enabledProfiles = profiles.filter((profile) => profile.enabled);
+  const defaultProviderOptions = enabledProfiles.length
+    ? enabledProfiles.map((profile) => ({ id: profile.id, label: profile.label }))
+    : [{ id: selectedProvider?.id || provider, label: selectedProvider?.label || "에이전트" }];
+  const defaultProviderDisabled = loading || enabledProfiles.length < 2;
 
   return (
     <section className="settings-section" aria-labelledby="agent-settings-title">
       <div className="settings-section-header">
         <h2 id="agent-settings-title">에이전트 설정</h2>
-        <label className="settings-provider-field" htmlFor="agent-provider">
-          <span className="sr-only">기본 에이전트 제품</span>
-          <span className="settings-provider-select-shell">
-            <select
-              id="agent-provider"
-              value={selectedProvider?.id || provider}
-              disabled={loading}
-              onChange={(event) => onProviderChange(event.target.value)}
-            >
-              {safeProviderOptions.map((option) => (
-                <option value={option.id} key={option.id}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={15} strokeWidth={2.2} aria-hidden="true" />
-          </span>
-        </label>
+        <span>config/agent-settings.user.json</span>
       </div>
 
       {loading ? (
@@ -280,18 +287,6 @@ function AgentSettingsSection({
           <div>
             <strong>에이전트 설정 불러오는 중</strong>
             <p>저장된 사용자 설정을 확인한 뒤 선택값을 표시합니다.</p>
-          </div>
-        </div>
-      ) : providerStatus ? (
-        <div className={providerStatus.available ? "settings-agent-diagnostic is-ok" : "settings-agent-diagnostic is-error"}>
-          {providerStatus.available ? (
-            <CheckCircle2 size={16} strokeWidth={2.2} />
-          ) : (
-            <AlertTriangle size={16} strokeWidth={2.2} />
-          )}
-          <div>
-            <strong>{providerStatus.available ? `${selectedProvider?.label} 준비됨` : `${selectedProvider?.label} 확인 필요`}</strong>
-            <p>{providerStatus.detail || "연결 상태를 확인하고 있습니다."}</p>
           </div>
         </div>
       ) : null}
@@ -306,40 +301,144 @@ function AgentSettingsSection({
         </div>
       ) : null}
 
-      <div className="settings-agent-grid">
+      <div className="settings-default-model-control">
         <SettingsSelectField
-          id="agent-approval-policy"
-          label="에이전트 권한"
-          value={loading ? "loading" : approval}
-          options={safeApprovalOptions}
-          onChange={onApprovalChange}
-          description={loading ? "" : selectedApprovalOption?.detail || ""}
-          disabled={loading}
+          id="agent-default-provider"
+          label="기본 대화 모델"
+          value={loading ? "loading" : selectedProvider?.id || provider}
+          options={loading ? [{ id: "loading", label: "설정 로드" }] : defaultProviderOptions}
+          onChange={onProviderChange}
+          description={
+            loading
+              ? ""
+              : defaultProviderDisabled
+                ? "사용함 상태인 에이전트가 하나일 때는 자동으로 선택됩니다."
+                : "오른쪽 기본 대화창과 일반 채팅 요청에 사용할 에이전트입니다."
+          }
+          disabled={defaultProviderDisabled}
         />
-        <SettingsSelectField
-          id="agent-model-version"
-          label="모델 버전"
-          value={loading ? "loading" : model}
-          options={modelOptions}
-          onChange={onModelChange}
-          disabled={loading}
-        />
-        <SettingsSelectField
-          id="agent-reasoning-level"
-          label="추론 수준"
-          value={loading ? "loading" : reasoning}
-          options={safeReasoningOptions}
-          onChange={onReasoningChange}
-          disabled={loading}
-        />
-        <SettingsSelectField
-          id="agent-speed"
-          label="속도"
-          value={loading ? "loading" : speed}
-          options={safeSpeedOptions}
-          onChange={onSpeedChange}
-          disabled={loading}
-        />
+      </div>
+
+      <div className="settings-agent-provider-list">
+        {profiles.map((profile) => {
+          const profileApprovalOptions = profile.approvalOptions?.length
+            ? profile.approvalOptions
+            : safeApprovalOptions;
+          const profileModelGroups = profile.modelGroups?.length
+            ? profile.modelGroups
+            : safeModelGroups;
+          const profileReasoningOptions = profile.reasoningOptions?.length
+            ? profile.reasoningOptions
+            : safeReasoningOptions;
+          const profileSpeedOptions = profile.speedOptions?.length
+            ? profile.speedOptions
+            : safeSpeedOptions;
+          const profileApproval =
+            profileApprovalOptions.find((option) => option.id === profile.approval) ??
+            profileApprovalOptions[0];
+          const profileModelOptions = profileModelGroups.map((group, index) => ({
+            id: group.slug,
+            label:
+              index === 0
+                ? `최신 버전 · ${group.displayName || group.slug}`
+                : group.displayName || group.slug,
+          }));
+          const diagnosticClass = profile.enabled
+            ? profile.status?.available
+              ? "settings-agent-diagnostic is-ok"
+              : "settings-agent-diagnostic is-error"
+            : "settings-agent-diagnostic";
+
+          return (
+            <article
+              className={profile.enabled ? "settings-agent-provider-panel is-enabled" : "settings-agent-provider-panel"}
+              key={profile.id}
+            >
+              <div className="settings-agent-provider-head">
+                <div className="settings-agent-provider-title">
+                  <strong>{profile.label}</strong>
+                  <span>{profile.enabled ? "사용함" : "사용 안 함"}</span>
+                </div>
+                <button
+                  type="button"
+                  className={profile.enabled ? "settings-toggle is-on" : "settings-toggle"}
+                  role="switch"
+                  aria-checked={profile.enabled}
+                  aria-label={`${profile.label} 사용 여부`}
+                  disabled={loading || profile.toggleDisabled}
+                  onClick={() => onProviderEnabledChange(profile.id, !profile.enabled)}
+                >
+                  <span className="settings-toggle-track">
+                    <span className="settings-toggle-thumb" />
+                  </span>
+                  <span>{profile.enabled ? "사용함" : "사용 안 함"}</span>
+                </button>
+              </div>
+
+              <div className={diagnosticClass}>
+                {profile.enabled && profile.status?.available ? (
+                  <CheckCircle2 size={16} strokeWidth={2.2} />
+                ) : profile.enabled ? (
+                  <AlertTriangle size={16} strokeWidth={2.2} />
+                ) : (
+                  <ShieldCheck size={16} strokeWidth={2.2} />
+                )}
+                <div>
+                  <strong>
+                    {profile.enabled
+                      ? profile.status?.available
+                        ? `${profile.label} 준비됨`
+                        : `${profile.label} 확인 필요`
+                      : `${profile.label} 대기`}
+                  </strong>
+                  <p>
+                    {profile.enabled
+                      ? profile.status?.detail || "연결 상태를 확인하고 있습니다."
+                      : "사용함으로 전환하면 아래 세부 설정이 적용됩니다."}
+                  </p>
+                </div>
+              </div>
+
+              {profile.enabled ? (
+                <div className="settings-agent-grid">
+                  <SettingsSelectField
+                    id={`agent-${profile.id}-approval-policy`}
+                    label="에이전트 권한"
+                    value={profile.approval}
+                    options={profileApprovalOptions}
+                    onChange={(nextApproval) => onProviderSettingChange(profile.id, { approval: nextApproval })}
+                    description={profileApproval?.detail || selectedApprovalOption?.detail || ""}
+                    disabled={loading}
+                  />
+                  <SettingsSelectField
+                    id={`agent-${profile.id}-model-version`}
+                    label="모델 버전"
+                    value={profile.model}
+                    options={profileModelOptions}
+                    onChange={(nextModel) => onProviderSettingChange(profile.id, { model: nextModel })}
+                    disabled={loading}
+                  />
+                  <SettingsSelectField
+                    id={`agent-${profile.id}-reasoning-level`}
+                    label="추론 수준"
+                    value={profile.reasoning}
+                    options={profileReasoningOptions}
+                    onChange={(nextReasoning) => onProviderSettingChange(profile.id, { reasoning: nextReasoning })}
+                    disabled={loading}
+                  />
+                  <SettingsSelectField
+                    id={`agent-${profile.id}-speed`}
+                    label="속도"
+                    value={profile.speed}
+                    options={profileSpeedOptions}
+                    onChange={(nextSpeed) => onProviderSettingChange(profile.id, { speed: nextSpeed })}
+                    disabled={loading}
+                  />
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -751,8 +850,15 @@ export default function SettingsView({
   worldMemorySettingsBusy,
   worldMemorySettingsSaving,
   worldMemorySettingsError,
+  magazineSettings,
+  magazineSettingsBusy,
+  magazineSettingsSaving,
+  magazineSettingsError,
   onToggleWorldMemoryTech,
   onToggleWorldMemoryEnabled,
+  onWorldMemoryManagementProviderChange,
+  onToggleMagazineEnabled,
+  onMagazineWritingProviderChange,
   onReloadWorldMemory,
   arcaAuth,
 }) {
@@ -813,8 +919,15 @@ export default function SettingsView({
           settingsBusy={worldMemorySettingsBusy}
           settingsSaving={worldMemorySettingsSaving}
           settingsError={worldMemorySettingsError}
+          magazineSettings={magazineSettings}
+          magazineSettingsBusy={magazineSettingsBusy}
+          magazineSettingsSaving={magazineSettingsSaving}
+          magazineSettingsError={magazineSettingsError}
           onToggleTech={onToggleWorldMemoryTech}
           onToggleEnabled={onToggleWorldMemoryEnabled}
+          onManagementProviderChange={onWorldMemoryManagementProviderChange}
+          onToggleMagazineEnabled={onToggleMagazineEnabled}
+          onMagazineWritingProviderChange={onMagazineWritingProviderChange}
           onReload={onReloadWorldMemory}
         />
 
@@ -905,12 +1018,25 @@ function WorldMemoryDiagnosticsSection({
   settingsBusy = false,
   settingsSaving = false,
   settingsError = "",
+  magazineSettings = null,
+  magazineSettingsBusy = false,
+  magazineSettingsSaving = false,
+  magazineSettingsError = "",
   onToggleTech,
   onToggleEnabled,
+  onManagementProviderChange = () => {},
+  onToggleMagazineEnabled,
+  onMagazineWritingProviderChange = () => {},
   onReload,
 }) {
   const enabled = Boolean(settings?.enabled ?? status?.enabled);
   const toggleBusy = settingsBusy || settingsSaving;
+  const managementProvider = settings?.settings?.managementProvider || settings?.managementProvider || "default";
+  const magazineEnabled = enabled && Boolean(magazineSettings?.enabled);
+  const magazineToggleBusy = magazineSettingsBusy || magazineSettingsSaving;
+  const magazineToggleDisabled = !enabled || magazineToggleBusy;
+  const magazineWritingProvider =
+    magazineSettings?.settings?.writingProvider || magazineSettings?.writingProvider || "default";
   const displayError = enabled ? error : "";
   const dependencies = status?.dependencies;
   const dependencyIssues = dependencies?.issues || [];
@@ -942,7 +1068,7 @@ function WorldMemoryDiagnosticsSection({
           <em className={settingsError ? "is-error" : undefined}>
             {settingsError ||
               (enabled
-                ? `${settings?.configPath || "config/world-memory.user.json"}에 켜짐 상태를 저장합니다.`
+                ? "AI가 스스로 정보를 축적하고 분류하고 지속적으로 최신 이슈를 파악합니다."
                 : "꺼짐 상태에서는 사이드바 메뉴와 에이전트 전역 컨텍스트를 숨깁니다.")}
           </em>
         </div>
@@ -1044,6 +1170,59 @@ function WorldMemoryDiagnosticsSection({
               </div>
             </div>
           ) : null}
+        </div>
+      ) : null}
+
+      {enabled ? (
+        <div className="settings-feature-control">
+          <SettingsSelectField
+            id="world-memory-management-provider"
+            label="월드 메모리 관리 모델"
+            value={managementProvider}
+            options={agentModelProviderOptions}
+            disabled={toggleBusy}
+            onChange={onManagementProviderChange}
+            description="수집, 보고서/변경 제안 갱신, World Memory 화면 우측 채팅에 적용합니다."
+          />
+        </div>
+      ) : null}
+
+      <div className={magazineEnabled ? "settings-feature-row is-enabled" : "settings-feature-row is-disabled"}>
+        <div className="settings-source-main">
+          <strong className="settings-feature-title">매거진 기능 사용</strong>
+          <em className={magazineSettingsError ? "is-error" : undefined}>
+            {magazineSettingsError ||
+              (!enabled
+                ? "월드 메모리를 켠 다음에만 매거진을 켤 수 있습니다."
+                : "자동으로 생성되는 당신 만을 위한 경제/금융 매거진")}
+          </em>
+        </div>
+        <button
+          type="button"
+          className={magazineEnabled ? "settings-toggle is-on" : "settings-toggle"}
+          role="switch"
+          aria-checked={magazineEnabled}
+          disabled={magazineToggleDisabled}
+          onClick={() => onToggleMagazineEnabled?.(!magazineEnabled)}
+        >
+          <span className="settings-toggle-track">
+            <span className="settings-toggle-thumb" />
+          </span>
+          <span>{magazineSettingsSaving ? "저장 중" : magazineEnabled ? "켜짐" : "꺼짐"}</span>
+        </button>
+      </div>
+
+      {enabled ? (
+        <div className="settings-feature-control">
+          <SettingsSelectField
+            id="magazine-writing-provider"
+            label="매거진 작성 모델"
+            value={magazineWritingProvider}
+            options={agentModelProviderOptions}
+            disabled={magazineToggleBusy}
+            onChange={onMagazineWritingProviderChange}
+            description="자동 매거진 기사 수 산정과 기사 작성에 적용합니다."
+          />
         </div>
       ) : null}
     </section>

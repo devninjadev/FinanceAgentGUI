@@ -100,7 +100,14 @@ export const personaModeOptions = [
 export const emptyAgentSettings = {
   selectedProvider: "codex-cli",
   personaMode: "none",
-  providers: {},
+  providers: {
+    "codex-cli": {
+      enabled: true,
+    },
+    "antigravity-sdk": {
+      enabled: false,
+    },
+  },
 };
 
 export const antigravityPolicyOptions = [

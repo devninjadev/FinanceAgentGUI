@@ -1,5 +1,5 @@
 import React from "react";
-import BarChart3 from "lucide-react/dist/esm/icons/bar-chart-3.js";
+import BookOpenText from "lucide-react/dist/esm/icons/book-open-text.js";
 import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right.js";
@@ -11,6 +11,7 @@ import MessageSquare from "lucide-react/dist/esm/icons/message-square.js";
 import Newspaper from "lucide-react/dist/esm/icons/newspaper.js";
 import PieChart from "lucide-react/dist/esm/icons/chart-pie.js";
 import Settings from "lucide-react/dist/esm/icons/settings.js";
+import TrendingUp from "lucide-react/dist/esm/icons/trending-up.js";
 import { newsFeedHealthState } from "../news/newsFeedStatus.js";
 import { PortfolioCanvasNavList } from "../portfolio/PortfolioCanvasNavList.jsx";
 
@@ -21,6 +22,7 @@ const leftSidebarSections = [
       { label: "주식채널", icon: Home, view: "stock", statusKey: "arcaNotifications" },
       { label: "World Memory", icon: Database, view: "world-memory" },
       { label: "News Feed", icon: Newspaper, view: "news-feed", statusKey: "newsFeed" },
+      { label: "Magazine", icon: BookOpenText, view: "magazine" },
       { label: "Earning Calendar", icon: CalendarDays, view: "earning-calendar" },
       { label: "Economic Calendar", icon: Landmark, view: "economic-calendar" },
       { label: "채팅", icon: MessageSquare, view: "chat" },
@@ -62,6 +64,8 @@ export function AppNavigation({
   activeView,
   arcaNotificationHealth,
   editingPortfolioCanvasId,
+  magazineStatus,
+  magazineEnabled = false,
   nameInputRef,
   newsFeedStatus,
   onDraftChange,
@@ -87,7 +91,7 @@ export function AppNavigation({
     <aside className="app-sidebar" aria-label="FinanceAgentGUI navigation">
       <div className="app-sidebar-brand">
         <span className="brand-mark" aria-hidden="true">
-          <BarChart3 size={15} strokeWidth={2.3} />
+          <TrendingUp size={15} strokeWidth={2.4} />
         </span>
         <span>주식채널+</span>
       </div>
@@ -99,6 +103,7 @@ export function AppNavigation({
             <div className="nav-list">
               {section.items
                 .filter((item) => item.view !== "world-memory" || worldMemoryEnabled)
+                .filter((item) => item.view !== "magazine" || magazineEnabled)
                 .map((item) => {
                   const Icon = item.icon;
                   const itemStatusHealth =
@@ -115,8 +120,12 @@ export function AppNavigation({
                     showNewsFeedUnreadBadge
                       ? Math.max(0, Math.trunc(Number(newsFeedStatus?.readState?.unreadTranslatedCount || 0)))
                       : 0;
-                  const newsFeedUnreadText =
-                    newsFeedUnreadCount > 0 ? `+${formatUnreadBadgeCount(newsFeedUnreadCount)}` : "0";
+                  const newsFeedUnreadText = formatUnreadBadgeCount(newsFeedUnreadCount);
+                  const showMagazineArticleBadge = item.view === "magazine" && !isActiveItem;
+                  const magazineUnreadCount = showMagazineArticleBadge
+                    ? Math.max(0, Math.trunc(Number(magazineStatus?.readState?.unreadArticleCount || 0)))
+                    : 0;
+                  const magazineUnreadText = formatUnreadBadgeCount(magazineUnreadCount);
                   return (
                     <React.Fragment key={item.label}>
                       <button
@@ -141,6 +150,14 @@ export function AppNavigation({
                               aria-label={`안 읽은 News Feed ${formatUnreadBadgeCount(newsFeedUnreadCount)}개`}
                             >
                               {newsFeedUnreadText}
+                            </span>
+                          ) : null}
+                          {showMagazineArticleBadge ? (
+                            <span
+                              className="nav-unread-count nav-magazine-count"
+                              aria-label={`확인 안 한 Magazine 새 글 ${formatUnreadBadgeCount(magazineUnreadCount)}개`}
+                            >
+                              {magazineUnreadText}
                             </span>
                           ) : null}
                         </span>

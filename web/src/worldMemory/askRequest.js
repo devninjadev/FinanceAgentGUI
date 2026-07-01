@@ -87,7 +87,7 @@ export function buildWorldMemoryAskRequest(section, item = {}, extra = {}) {
       ? "- 사용자가 이후 수용/승인/그렇게 하자/진행/대안 실행처럼 답하면 의미 기반으로 의도를 분류하고, 가능한 경우 반드시 마지막에 ```world_memory_action 코드펜스를 하나 제안하세요. 실행됐다고 말하지 말고 GUI 확인 버튼으로 실행될 제안이라고 말하세요."
       : "",
     isMemoryChange
-      ? "- 사용자가 watch state로 수용하면 action은 stateSync가 아니라 stateAdd를 우선 사용하세요. stateSync는 기존 로그에서 파생 상태를 재동기화할 때만 사용합니다."
+      ? "- orphan brief backfill, story fill rate 개선, 특정 brief를 story/family에 묶는 제안은 eventId를 확인한 뒤 briefStoryBackfill을 우선 사용하세요. watch state로 수용하면 action은 stateSync가 아니라 stateAdd를 우선 사용하세요. stateSync는 기존 로그에서 파생 상태를 재동기화할 때만 사용합니다."
       : "",
     isMemoryChange
       ? "- 구조 수정 뒤 변경 제안 목록 갱신이 필요하면 report 또는 collectNow 같은 후속 갱신 절차를 설명하세요."
