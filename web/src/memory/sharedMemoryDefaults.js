@@ -12,7 +12,7 @@ export const emptyMemoryStatus = {
   },
   clients: [
     { id: "codex-cli", label: "Codex CLI", access: "read/write via shared memory API" },
-    { id: "antigravity-sdk", label: "Antigravity SDK", access: "read/write via shared memory API" },
+    { id: "antigravity-cli", label: "Antigravity CLI", access: "read/write via shared memory API" },
   ],
   gitPolicy: {
     tracked: false,

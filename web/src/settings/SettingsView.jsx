@@ -21,7 +21,7 @@ import { worldMemoryAuditValue, worldMemoryStatusLabel } from "../worldMemory/st
 const agentModelProviderOptions = [
   { id: "default", label: "기본 대화 모델" },
   { id: "codex-cli", label: "Codex CLI" },
-  { id: "antigravity-sdk", label: "Antigravity SDK" },
+  { id: "antigravity-cli", label: "Antigravity CLI" },
 ];
 
 const standardSpeedOption = {
@@ -96,12 +96,12 @@ const fallbackProviderOptions = [
     detail: "Codex CLI 확인 중",
   },
   {
-    id: "antigravity-sdk",
-    label: "Antigravity SDK",
+    id: "antigravity-cli",
+    label: "Antigravity CLI",
     available: false,
     status: "checking",
-    detail: "Antigravity SDK 확인 중",
-    installCommand: "python3 -m pip install --upgrade google-antigravity",
+    detail: "Antigravity CLI 확인 중",
+    installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
   },
 ];
 
@@ -135,6 +135,14 @@ const NEWS_FEED_POLL_INTERVAL_OPTIONS = Array.from({ length: 10 }, (_, index) =>
   };
 });
 
+const MAGAZINE_SCHEDULER_INTERVAL_OPTIONS = Array.from({ length: 10 }, (_, index) => {
+  const hours = index + 1;
+  return {
+    hours,
+    label: String(hours) + "시간",
+  };
+});
+
 function NewsFeedPollIntervalBar({ valueSeconds, disabled, saving, onChange }) {
   const selectedMinutes = Math.max(1, Math.min(10, Math.round(Number(valueSeconds || 180) / 60)));
   return (
@@ -164,6 +172,42 @@ function NewsFeedPollIntervalBar({ valueSeconds, disabled, saving, onChange }) {
         <strong>{saving ? "저장 중" : `${selectedMinutes}분마다 수집`}</strong>
         <span>RSS 피드 폴링 주기를 조절합니다.</span>
       </div>
+    </div>
+  );
+}
+
+function MagazineSchedulerIntervalBar({ valueHours, disabled, saving, onChange }) {
+  const selectedHours = Math.max(1, Math.min(10, Math.round(Number(valueHours || 6))));
+  return (
+    <div className={disabled ? "settings-interval-control is-disabled" : "settings-interval-control"}>
+      <div className="settings-interval-bar" role="radiogroup" aria-label="Magazine 기사 생성 간격">
+        {MAGAZINE_SCHEDULER_INTERVAL_OPTIONS.map((option) => {
+          const selected = option.hours === selectedHours;
+          return (
+            <button
+              className={selected ? "settings-interval-step is-selected" : "settings-interval-step"}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-label={`${option.label}마다 기사 생성`}
+              disabled={disabled || saving}
+              onClick={() => {
+                if (!selected) onChange(option.hours);
+              }}
+              key={option.hours}
+            >
+              {option.hours}
+            </button>
+          );
+        })}
+      </div>
+      <div className="settings-interval-copy">
+        <strong>{saving ? "저장 중" : `${selectedHours}시간마다 기사 생성`}</strong>
+        <span>{disabled ? "저장 중에는 생성 간격을 변경할 수 없습니다." : "자동 기사 생성 주기를 조절합니다."}</span>
+      </div>
+      <p className="settings-interval-warning">
+        이 기능은 토큰 소모가 대단히 많아 기사 생성 간격을 좁히면 ChatGPT Plus / Gemini Pro 요금에제서는 토큰 사용 한계에 빠르게 도달할 수 있습니다.
+      </p>
     </div>
   );
 }
@@ -859,6 +903,7 @@ export default function SettingsView({
   onWorldMemoryManagementProviderChange,
   onToggleMagazineEnabled,
   onMagazineWritingProviderChange,
+  onMagazineSchedulerIntervalChange,
   onReloadWorldMemory,
   arcaAuth,
 }) {
@@ -928,6 +973,7 @@ export default function SettingsView({
           onManagementProviderChange={onWorldMemoryManagementProviderChange}
           onToggleMagazineEnabled={onToggleMagazineEnabled}
           onMagazineWritingProviderChange={onMagazineWritingProviderChange}
+          onMagazineSchedulerIntervalChange={onMagazineSchedulerIntervalChange}
           onReload={onReloadWorldMemory}
         />
 
@@ -1027,6 +1073,7 @@ function WorldMemoryDiagnosticsSection({
   onManagementProviderChange = () => {},
   onToggleMagazineEnabled,
   onMagazineWritingProviderChange = () => {},
+  onMagazineSchedulerIntervalChange = () => {},
   onReload,
 }) {
   const enabled = Boolean(settings?.enabled ?? status?.enabled);
@@ -1037,6 +1084,15 @@ function WorldMemoryDiagnosticsSection({
   const magazineToggleDisabled = !enabled || magazineToggleBusy;
   const magazineWritingProvider =
     magazineSettings?.settings?.writingProvider || magazineSettings?.writingProvider || "default";
+  const magazineSchedulerIntervalHours = Math.max(
+    1,
+    Math.min(
+      10,
+      Math.round(
+        Number(magazineSettings?.settings?.schedulerIntervalHours ?? magazineSettings?.schedulerIntervalHours ?? 6)
+      )
+    )
+  );
   const displayError = enabled ? error : "";
   const dependencies = status?.dependencies;
   const dependencyIssues = dependencies?.issues || [];
@@ -1212,7 +1268,22 @@ function WorldMemoryDiagnosticsSection({
         </button>
       </div>
 
-      {enabled ? (
+      {magazineEnabled ? (
+        <div className="settings-subsection" aria-labelledby="magazine-interval-settings-title">
+          <div className="settings-subsection-header">
+            <h3 id="magazine-interval-settings-title">기사 생성 간격</h3>
+            <span>{magazineSchedulerIntervalHours}시간</span>
+          </div>
+          <MagazineSchedulerIntervalBar
+            valueHours={magazineSchedulerIntervalHours}
+            disabled={magazineToggleBusy}
+            saving={magazineSettingsSaving}
+            onChange={onMagazineSchedulerIntervalChange}
+          />
+        </div>
+      ) : null}
+
+      {magazineEnabled ? (
         <div className="settings-feature-control">
           <SettingsSelectField
             id="magazine-writing-provider"

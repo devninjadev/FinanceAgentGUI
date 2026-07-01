@@ -35,7 +35,7 @@ const EXTERNAL_MEMORY_LAYER_LIMIT = 8000;
 
 const PROVIDER_LABELS = {
   "codex-cli": "Codex CLI",
-  "antigravity-sdk": "Antigravity SDK",
+  "antigravity-cli": "Antigravity CLI",
 };
 
 function ensureMemoryDir() {
@@ -838,7 +838,7 @@ export function sharedMemoryStatus({ limit = PUBLIC_RECORD_LIMIT, offset = 0 } =
     },
     clients: [
       { id: "codex-cli", label: "Codex CLI", access: "read/write via shared memory API" },
-      { id: "antigravity-sdk", label: "Antigravity SDK", access: "read/write via shared memory API" },
+      { id: "antigravity-cli", label: "Antigravity CLI", access: "read/write via shared memory API" },
     ],
     gitPolicy: {
       tracked: false,

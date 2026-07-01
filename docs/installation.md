@@ -163,8 +163,12 @@ Common environment variables:
 - `ARCA_LOGIN_URL`: override for the Arca.live login URL
 - `ARCA_BROWSER_PATH`: explicit ChatGPT Atlas/Chrome/Edge/Chromium/Brave executable path
 - `ARCA_USER_AGENT`: optional Arca.live request user agent override
+- `ANTIGRAVITY_CLI_PATH`: optional explicit path to `agy` when it is not on `PATH`.
+- `ANTIGRAVITY_CLI_MODEL`: optional default Antigravity CLI model override, default `Gemini 3.5 Flash (Medium)`.
+- `ANTIGRAVITY_CLI_PRINT_TIMEOUT`: optional `agy -p` timeout, default `5m`.
 
 Keep user-specific config files and generated runtime data gitignored.
+Install Antigravity CLI with `curl -fsSL https://antigravity.google/cli/install.sh | bash` on macOS/Linux, then run `agy` in a terminal to complete Google OAuth. Missing CLI or OAuth readiness should surface as a provider readiness failure, with no alternate authentication or provider path.
 
 ## Private Runtime Data
 

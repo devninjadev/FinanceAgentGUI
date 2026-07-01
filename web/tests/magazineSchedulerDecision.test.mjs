@@ -6,6 +6,7 @@ import {
   normalizeMagazineSchedulerNextRunAt,
   normalizeMagazineArticleCountDecision,
 } from "../server/magazineApi.mjs";
+import { normalizeMagazineSchedulerIntervalHours } from "../server/magazineSettings.mjs";
 
 test("magazine scheduler preserves a model decision to skip with reason", () => {
   const decision = normalizeMagazineArticleCountDecision(
@@ -17,8 +18,8 @@ test("magazine scheduler preserves a model decision to skip with reason", () => 
     },
     {
       maxCount: 3,
-      provider: "antigravity-sdk",
-      model: "gemini-3.5-flash",
+      provider: "antigravity-cli",
+      model: "Gemini 3.5 Flash (Medium)",
       reasoning: "medium",
     },
   );
@@ -26,7 +27,7 @@ test("magazine scheduler preserves a model decision to skip with reason", () => 
   assert.equal(decision.schemaOk, true);
   assert.equal(decision.targetCount, 0);
   assert.equal(decision.basis, "llm-editorial-judgment");
-  assert.equal(decision.provider, "antigravity-sdk");
+  assert.equal(decision.provider, "antigravity-cli");
   assert.match(decision.reason, /독립 각도/);
 });
 
@@ -83,4 +84,11 @@ test("magazine scheduler rejects manual next-run timestamps in the past", () => 
       }),
     /future/,
   );
+});
+
+test("magazine scheduler interval defaults to 6 hours and stays in the settings range", () => {
+  assert.equal(normalizeMagazineSchedulerIntervalHours(undefined), 6);
+  assert.equal(normalizeMagazineSchedulerIntervalHours(0), 1);
+  assert.equal(normalizeMagazineSchedulerIntervalHours(99), 10);
+  assert.equal(normalizeMagazineSchedulerIntervalHours("4"), 4);
 });

@@ -200,14 +200,14 @@ User changes are stored in:
 config/magazine.user.json
 ```
 
-Do not store this switch in browser memory or localStorage. The Settings page must read/write the file-backed `/api/magazine/settings` endpoint. Magazine can only be enabled when World Memory is enabled; turning World Memory off also writes Magazine off.
+Do not store this switch or the scheduler interval in browser memory or localStorage. The Settings page must read/write the file-backed `/api/magazine/settings` endpoint. Magazine can only be enabled when World Memory is enabled; turning World Memory off also writes Magazine off.
 
 When the local web server starts, it starts the magazine scheduler only if both World Memory and Magazine are enabled, and unless `FINANCE_AGENT_MAGAZINE_SCHEDULER_DISABLED=1` or `FINANCE_AGENT_MAGAZINE_AUTORUN=0` is set.
 
 Default behavior:
 
-- first scheduled run: about 1 hour after server start
-- recurring interval: about 1 hour
+- first scheduled run: about 6 hours after server start by default
+- recurring interval: 6 hours by default, adjustable from 1-10 hours in Settings
 - per cycle article count: model editorial judgment 0-3, never random
 - generation order: sequential, one `--count 1` generator run at a time
 - replacement policy: `replace=false`, so scheduled runs append new article folders rather than replacing the issue
@@ -240,6 +240,8 @@ POST /api/magazine/status
 GET /api/magazine/read-state
 POST /api/magazine/read-state
 ```
+
+`PATCH /api/magazine/settings` accepts `{"schedulerIntervalHours":6}`. The value is stored in `config/magazine.user.json`, defaults to `6`, and is clamped to the Settings UI range of 1-10 hours. When Magazine is enabled and no scheduler cycle is active, changing the value re-arms the next pending run with the new interval.
 
 `POST /api/magazine/status` accepts `{"action":"runNow"}` to request an immediate manual scheduler cycle. The cycle still runs the article-count decision harness first, so a valid result can be `targetCount=0` with a reader-visible reason instead of forcing an article. The API starts the cycle in the background, returns the refreshed status snapshot, and rejects the request while a scheduler or generation cycle is already active.
 

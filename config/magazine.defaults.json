@@ -1,5 +1,6 @@
 {
   "version": 1,
   "enabled": false,
-  "writingProvider": "default"
+  "writingProvider": "default",
+  "schedulerIntervalHours": 6
 }

@@ -68,6 +68,16 @@ If detection fails, the recovery path should tell the user to set `ARCA_BROWSER_
 
 ## Known Compatibility Risks
 
+### Antigravity CLI OAuth
+
+Antigravity provider calls use the standalone `agy` CLI and its Google OAuth
+session. Install the CLI, then run `agy` in a terminal to complete the browser
+login flow before selecting Antigravity in the app.
+
+If `agy` is missing, unauthenticated, or unable to list models, Antigravity
+provider actions should fail with a clear readiness or generation error. Do not
+use an alternate authentication mechanism or another selected provider.
+
 ### World Memory local database
 
 World Memory stores user-specific SQLite data under `data/world-memory/`.

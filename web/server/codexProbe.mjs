@@ -17,6 +17,30 @@ import { isWorldMemoryEnabled } from "./worldMemorySettings.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
+
+function loadLocalEnvFile(filePath) {
+  if (!existsSync(filePath)) return;
+  const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const index = line.indexOf("=");
+    const key = line.slice(0, index).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key]) continue;
+    let value = line.slice(index + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+loadLocalEnvFile(join(GUIBUILD_ROOT, ".env"));
+loadLocalEnvFile(join(GUIBUILD_ROOT, ".env.local"));
+
 const GUIBUILD_AGENTS_PATH = join(GUIBUILD_ROOT, "AGENTS.md");
 const NEWS_FEED_DATA_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const WORLD_MEMORY_BASE_ARG = "data/world-memory";
@@ -52,15 +76,15 @@ const WORLD_MEMORY_CONTEXT_ENTRY_LIMIT = 8;
 const WORLD_MEMORY_CONTEXT_STATE_LIMIT = 8;
 const WORLD_MEMORY_VECTOR_CONTEXT_LIMIT = 6;
 const WORLD_MEMORY_VECTOR_CONTEXT_TIMEOUT_MS = 45000;
-const ANTIGRAVITY_PACKAGE_NAME = "google-antigravity";
-const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
-const ANTIGRAVITY_VERTEX_MODEL = "gemini-3.5-flash";
-const ANTIGRAVITY_VERTEX_LOCATION =
-  process.env.ANTIGRAVITY_VERTEX_LOCATION || "global";
-const ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING =
-  process.env.ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING !== "0";
-const ANTIGRAVITY_GROUNDING_SOURCE_LIMIT = 5;
-const ANTIGRAVITY_VERTEX_SERVICE = "aiplatform.googleapis.com";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
+const ANTIGRAVITY_CLI_DEFAULT_MODEL =
+  process.env.ANTIGRAVITY_CLI_MODEL || "Gemini 3.5 Flash (Medium)";
+const ANTIGRAVITY_CLI_PRINT_TIMEOUT =
+  process.env.ANTIGRAVITY_CLI_PRINT_TIMEOUT || "5m";
+const ANTIGRAVITY_CLI_INSTALL_COMMAND =
+  process.platform === "win32"
+    ? "irm https://antigravity.google/cli/install.ps1 | iex"
+    : "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const CODEX_PROVIDER_ID = "codex-cli";
 const AGENT_PROVIDER_IDS = new Set([
   CODEX_PROVIDER_ID,
@@ -131,30 +155,38 @@ const ANTIGRAVITY_SECURITY_PRESETS = {
   default: {
     id: "default",
     label: "Default",
-    sdkPolicy:
-      "workspace_only(workspaces) + ask_user(run_command/outside_workspace)",
+    cliArgs: [],
+    terminalAutoExecutionPolicy: "off",
+    fileAccessPolicy: "ask",
     detail:
-      "Workspace-scoped file access with user review for terminal commands and out-of-workspace file access.",
+      "Requires manual review for terminal commands and file access outside of the working folders.",
   },
   "full-machine": {
     id: "full-machine",
     label: "Full machine",
-    sdkPolicy: "machine-wide file scope + ask_user(run_command)",
-    detail: "Machine-wide file access with user review for terminal commands.",
+    cliArgs: [],
+    terminalAutoExecutionPolicy: "off",
+    fileAccessPolicy: "allow",
+    detail:
+      "Allows full-machine file access while terminal commands still require review.",
   },
   turbo: {
     id: "turbo",
     label: "Turbo mode",
-    sdkPolicy: "allow_all()",
+    cliArgs: ["--dangerously-skip-permissions"],
+    terminalAutoExecutionPolicy: "eager",
+    fileAccessPolicy: "allow",
     detail:
-      "Approve SDK tool calls automatically for trusted high-velocity sessions.",
+      "Disables safety barriers for high-velocity trusted sessions.",
   },
   custom: {
     id: "custom",
     label: "Custom",
-    sdkPolicy: "CapabilitiesConfig + explicit policy allow/deny/ask_user rules",
+    cliArgs: [],
+    terminalAutoExecutionPolicy: "custom",
+    fileAccessPolicy: "custom",
     detail:
-      "Reserved for explicit SDK policy and capability composition. The current GUI treats it conservatively.",
+      "Reserved for manually customized Antigravity CLI permissions.",
   },
 };
 
@@ -205,17 +237,6 @@ function tryRun(command, args, options = {}) {
 function findCodexPath() {
   try {
     return execFileSync("sh", ["-lc", "command -v codex"], {
-      encoding: "utf8",
-      timeout: 3000,
-    }).trim();
-  } catch {
-    return "";
-  }
-}
-
-function findGcloudPath() {
-  try {
-    return execFileSync("sh", ["-lc", "command -v gcloud"], {
       encoding: "utf8",
       timeout: 3000,
     }).trim();
@@ -454,6 +475,12 @@ function cleanAgentSettingValue(value, maxLength = 120) {
   return text.slice(0, maxLength);
 }
 
+function cleanAgentModelValue(value, maxLength = 160) {
+  const text = String(value || "").trim();
+  if (!text || !/^[\w .:/()+-]+$/.test(text)) return "";
+  return text.slice(0, maxLength);
+}
+
 function normalizeProviderId(value, fallback = CODEX_PROVIDER_ID) {
   const provider = cleanAgentSettingValue(value, 64);
   return AGENT_PROVIDER_IDS.has(provider) ? provider : fallback;
@@ -487,7 +514,7 @@ function normalizeAgentProviderSettings(raw = {}) {
     source.approval || source.approvalPolicy,
     64,
   );
-  const model = cleanAgentSettingValue(source.model, 120);
+  const model = cleanAgentModelValue(source.model, 160);
   const reasoning = cleanAgentSettingValue(
     source.reasoning || source.reasoningEffort,
     64,
@@ -676,266 +703,183 @@ function publicAgentSettingsSnapshot() {
 }
 
 function antigravityInstallCommand() {
-  const python = findPythonCommand();
-  return `${python?.display || "python3"} -m pip install --upgrade ${ANTIGRAVITY_PACKAGE_NAME}`;
+  return ANTIGRAVITY_CLI_INSTALL_COMMAND;
 }
 
-function getGcloudAntigravityStatus() {
-  const path = findGcloudPath();
-  if (!path) {
-    return {
-      available: false,
-      errorCode: "GCLOUD_NOT_FOUND",
-      error: "gcloud 명령을 찾지 못했습니다.",
-    };
-  }
-
-  const projectResult = tryRun(path, ["config", "get-value", "project"], {
-    timeout: 5000,
+function runAntigravityCliCommand(path, args, options = {}) {
+  return spawnSync(path, args, {
+    cwd: WEB_ROOT,
+    encoding: "utf8",
+    maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
+    timeout: options.timeout ?? 15000,
+    env: {
+      ...process.env,
+      NO_COLOR: "1",
+    },
   });
-  const rawProject = projectResult.ok ? projectResult.stdout.trim() : "";
-  const project = rawProject && rawProject !== "(unset)" ? rawProject : "";
-  const adcResult = tryRun(
-    path,
-    ["auth", "application-default", "print-access-token"],
-    {
-      timeout: 12000,
-    },
-  );
-  let agentPlatformApiEnabled = false;
-  let serviceError = "";
-
-  if (project) {
-    const serviceResult = tryRun(
-      path,
-      [
-        "services",
-        "list",
-        "--enabled",
-        `--filter=config.name:${ANTIGRAVITY_VERTEX_SERVICE}`,
-        "--format=value(config.name)",
-        "--project",
-        project,
-      ],
-      { timeout: 15000 },
-    );
-    agentPlatformApiEnabled =
-      serviceResult.ok &&
-      serviceResult.stdout.includes(ANTIGRAVITY_VERTEX_SERVICE);
-    serviceError = serviceResult.ok
-      ? ""
-      : serviceResult.stderr || serviceResult.error;
-  }
-
-  return {
-    available: true,
-    path,
-    project,
-    projectReady: Boolean(project),
-    adcReady: adcResult.ok,
-    adcError: adcResult.ok ? "" : adcResult.stderr || adcResult.error,
-    agentPlatformApiEnabled,
-    service: ANTIGRAVITY_VERTEX_SERVICE,
-    serviceError,
-  };
 }
 
-function runPythonProbe(script) {
-  const python = findPythonCommand();
-  if (!python) {
-    return {
-      pythonAvailable: false,
-      available: false,
-      packageName: ANTIGRAVITY_PACKAGE_NAME,
-      installCommand: "python3 -m pip install --upgrade google-antigravity",
-      errorCode: "PYTHON_NOT_FOUND",
-      error: "python3 또는 python 명령을 찾지 못했습니다.",
-    };
-  }
+function executableExists(command) {
+  const result = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    timeout: 3000,
+  });
+  return !result.error && result.status === 0;
+}
 
-  const result = spawnSync(
-    python.command,
-    [...python.argsPrefix, "-c", script],
-    {
-      cwd: WEB_ROOT,
-      encoding: "utf8",
-      maxBuffer: 4 * 1024 * 1024,
-      timeout: 12000,
-    },
-  );
-
-  if (result.error) {
-    return {
-      pythonAvailable: true,
-      python,
-      available: false,
-      packageName: ANTIGRAVITY_PACKAGE_NAME,
-      installCommand: `${python.display} -m pip install --upgrade ${ANTIGRAVITY_PACKAGE_NAME}`,
-      errorCode: "PYTHON_PROBE_FAILED",
-      error: result.error.message,
-    };
-  }
+function findAntigravityCliPath() {
+  const configured = String(process.env.ANTIGRAVITY_CLI_PATH || "").trim();
+  if (configured && executableExists(configured)) return configured;
 
   try {
-    return JSON.parse((result.stdout || "{}").trim() || "{}");
-  } catch (error) {
-    return {
-      pythonAvailable: true,
-      python,
-      available: false,
-      packageName: ANTIGRAVITY_PACKAGE_NAME,
-      installCommand: `${python.display} -m pip install --upgrade ${ANTIGRAVITY_PACKAGE_NAME}`,
-      errorCode: "PYTHON_PROBE_PARSE_FAILED",
-      error: error.message,
-      stderr: (result.stderr || "").trim(),
-    };
+    const path = execFileSync("sh", ["-lc", "command -v agy"], {
+      encoding: "utf8",
+      timeout: 3000,
+    }).trim();
+    if (path) return path;
+  } catch {
+    // Continue with common install locations.
   }
+
+  const home = homedir();
+  const candidates =
+    process.platform === "win32"
+      ? [
+          join(home, ".local", "bin", "agy.exe"),
+          join(home, "AppData", "Local", "Programs", "Antigravity CLI", "agy.exe"),
+        ]
+      : [join(home, ".local", "bin", "agy")];
+  return candidates.find((candidate) => existsSync(candidate) && executableExists(candidate)) || "";
 }
 
-function getAntigravitySdkStatus({ allowAuthProbe = true } = {}) {
-  const script = `
-import json
-import sys
-try:
-    from importlib import metadata
-except Exception:
-    import importlib_metadata as metadata
-
-payload = {
-    "pythonAvailable": True,
-    "pythonExecutable": sys.executable,
-    "pythonVersion": sys.version.split()[0],
-    "packageName": "${ANTIGRAVITY_PACKAGE_NAME}",
-    "installCommand": f"{sys.executable} -m pip install --upgrade ${ANTIGRAVITY_PACKAGE_NAME}",
+function parseAntigravityReasoningLevel(modelName = "") {
+  const match = String(modelName).match(/\(([^)]+)\)\s*$/);
+  return match ? match[1].trim() : "";
 }
-try:
-    version = metadata.version("${ANTIGRAVITY_PACKAGE_NAME}")
-    import google.antigravity  # noqa: F401
-    payload.update({
-        "available": True,
-        "version": version,
-        "importOk": True,
-        "error": "",
-        "errorCode": "",
-    })
-except metadata.PackageNotFoundError as exc:
-    payload.update({
-        "available": False,
-        "importOk": False,
-        "errorCode": "PACKAGE_NOT_FOUND",
-        "error": str(exc) or "${ANTIGRAVITY_PACKAGE_NAME} is not installed",
-    })
-except Exception as exc:
-    payload.update({
-        "available": False,
-        "importOk": False,
-        "errorCode": exc.__class__.__name__,
-        "error": str(exc),
-    })
-print(json.dumps(payload, ensure_ascii=False))
-`;
-  const status = runPythonProbe(script);
-  const publicStatus = {
-    ...status,
-    pythonExecutable: displayRuntimePath(status.pythonExecutable),
-    installCommand: antigravityInstallCommand(),
-  };
-  const apiKeyEnvAvailable = Boolean(
-    process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
-  );
-  if (!allowAuthProbe) {
-    const ready = Boolean(status.available && apiKeyEnvAvailable);
+
+function parseAntigravityModelBase(modelName = "") {
+  return String(modelName).replace(/\s*\([^)]+\)\s*$/, "").trim();
+}
+
+function parseAntigravityModels(stdout = "") {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^Usage:|^Flags:|^-h\b|^--help\b/i.test(line))
+    .map((name, index) => {
+      const reasoningLevel = parseAntigravityReasoningLevel(name);
+      const baseModel = parseAntigravityModelBase(name);
+      return {
+        id: name,
+        name,
+        displayName: name,
+        baseModel,
+        reasoningLevel,
+        category: "text",
+        selectable: true,
+        rank: index,
+      };
+    });
+}
+
+function getAntigravityCliStatus({ allowAuthProbe = true } = {}) {
+  const path = findAntigravityCliPath();
+  if (!path) {
     return {
       provider: ANTIGRAVITY_PROVIDER_ID,
-      label: "Antigravity SDK",
-      ready,
-      detail: ready
-        ? `${status.packageName} ${status.version} · Gemini API key`
-        : status.available
-          ? `${status.packageName} ${status.version} · 인증 확인은 Antigravity SDK 선택 시 수행`
-          : status.error ||
-            "google-antigravity 패키지가 설치되어 있지 않습니다.",
-      diagnosticCode: ready
-        ? "ANTIGRAVITY_SDK_READY"
-        : status.available
-          ? "ANTIGRAVITY_AUTH_PROBE_DEFERRED"
-          : status.errorCode || "PACKAGE_NOT_FOUND",
-      credentialMode: ready ? "gemini-api-key" : "",
-      apiKeyEnvAvailable,
-      gcloud: null,
-      vertex: {
-        service: ANTIGRAVITY_VERTEX_SERVICE,
-        model: ANTIGRAVITY_VERTEX_MODEL,
-        location: ANTIGRAVITY_VERTEX_LOCATION,
-        project: "",
-      },
-      needsInstall: !status.available,
-      authDeferred: Boolean(status.available && !ready),
-      ...publicStatus,
+      label: "Antigravity CLI",
+      ready: false,
+      available: false,
+      path: "",
+      version: "",
+      detail: "Antigravity CLI(agy)를 찾지 못했습니다.",
+      diagnosticCode: "ANTIGRAVITY_CLI_NOT_FOUND",
+      credentialMode: "",
+      installCommand: antigravityInstallCommand(),
+      needsInstall: true,
+      authChecked: false,
+      models: [],
     };
   }
-  const gcloud = status.available ? getGcloudAntigravityStatus() : null;
-  const vertexReady = Boolean(
-    gcloud?.adcReady && gcloud?.projectReady && gcloud?.agentPlatformApiEnabled,
-  );
-  const ready = Boolean(
-    status.available && (apiKeyEnvAvailable || vertexReady),
-  );
-  let diagnosticCode = status.errorCode || "";
-  if (status.pythonAvailable && status.available) {
-    if (ready) {
-      diagnosticCode = "ANTIGRAVITY_SDK_READY";
-    } else if (!apiKeyEnvAvailable && !gcloud?.available) {
-      diagnosticCode = "ANTIGRAVITY_GCLOUD_NOT_FOUND";
-    } else if (!apiKeyEnvAvailable && !gcloud?.adcReady) {
-      diagnosticCode = "ANTIGRAVITY_ADC_NOT_READY";
-    } else if (!apiKeyEnvAvailable && !gcloud?.projectReady) {
-      diagnosticCode = "ANTIGRAVITY_PROJECT_NOT_SET";
-    } else if (!apiKeyEnvAvailable && !gcloud?.agentPlatformApiEnabled) {
-      diagnosticCode = "ANTIGRAVITY_AGENT_PLATFORM_API_DISABLED";
-    } else {
-      diagnosticCode = "ANTIGRAVITY_AUTH_NOT_READY";
-    }
+
+  const versionResult = runAntigravityCliCommand(path, ["--version"], {
+    timeout: 5000,
+  });
+  if (versionResult.error || versionResult.status !== 0) {
+    const error =
+      versionResult.error?.message ||
+      versionResult.stderr?.trim() ||
+      versionResult.stdout?.trim() ||
+      "agy --version failed";
+    return {
+      provider: ANTIGRAVITY_PROVIDER_ID,
+      label: "Antigravity CLI",
+      ready: false,
+      available: false,
+      path: displayRuntimePath(path),
+      version: "",
+      detail: error,
+      diagnosticCode: "ANTIGRAVITY_CLI_VERSION_FAILED",
+      credentialMode: "",
+      installCommand: antigravityInstallCommand(),
+      needsInstall: false,
+      authChecked: false,
+      models: [],
+    };
   }
-  const credentialMode = apiKeyEnvAvailable
-    ? "gemini-api-key"
-    : vertexReady
-      ? "vertex-adc"
-      : "";
+
+  const version = (versionResult.stdout || versionResult.stderr || "").trim();
+  if (!allowAuthProbe) {
+    return {
+      provider: ANTIGRAVITY_PROVIDER_ID,
+      label: "Antigravity CLI",
+      ready: true,
+      available: true,
+      path: displayRuntimePath(path),
+      version,
+      detail: `agy ${version} · OAuth 상태는 선택 시 확인`,
+      diagnosticCode: "ANTIGRAVITY_CLI_INSTALLED",
+      credentialMode: "google-oauth",
+      installCommand: antigravityInstallCommand(),
+      needsInstall: false,
+      authChecked: false,
+      models: [],
+    };
+  }
+
+  const modelsResult = runAntigravityCliCommand(path, ["models"], {
+    timeout: 20000,
+  });
+  const models = modelsResult.status === 0 ? parseAntigravityModels(modelsResult.stdout) : [];
+  const ready = !modelsResult.error && modelsResult.status === 0 && models.length > 0;
   const detail = ready
-    ? `${status.packageName} ${status.version} · ${
-        credentialMode === "vertex-adc"
-          ? `Vertex ADC ${gcloud.project}`
-          : "Gemini API key"
-      } · ${ANTIGRAVITY_VERTEX_LOCATION}/${ANTIGRAVITY_VERTEX_MODEL}`
-    : status.available
-      ? status.error ||
-        (diagnosticCode === "ANTIGRAVITY_ADC_NOT_READY"
-          ? "SDK는 설치됐지만 gcloud Application Default Credentials가 준비되지 않았습니다."
-          : diagnosticCode === "ANTIGRAVITY_PROJECT_NOT_SET"
-            ? "SDK는 설치됐지만 gcloud 기본 프로젝트가 설정되지 않았습니다."
-            : diagnosticCode === "ANTIGRAVITY_AGENT_PLATFORM_API_DISABLED"
-              ? `${ANTIGRAVITY_VERTEX_SERVICE} API가 아직 활성화되지 않았습니다.`
-              : "SDK는 설치됐지만 인증 구성이 아직 준비되지 않았습니다.")
-      : status.error || "google-antigravity 패키지가 설치되어 있지 않습니다.";
+    ? `agy ${version} · Google OAuth · ${models[0]?.name || ANTIGRAVITY_CLI_DEFAULT_MODEL}`
+    : (
+        modelsResult.error?.message ||
+        modelsResult.stderr?.trim() ||
+        modelsResult.stdout?.trim() ||
+        "agy models failed"
+      );
 
   return {
     provider: ANTIGRAVITY_PROVIDER_ID,
-    label: "Antigravity SDK",
+    label: "Antigravity CLI",
     ready,
+    available: ready,
+    path: displayRuntimePath(path),
+    version,
     detail,
-    diagnosticCode,
-    credentialMode,
-    apiKeyEnvAvailable,
-    gcloud,
-    vertex: {
-      service: ANTIGRAVITY_VERTEX_SERVICE,
-      model: ANTIGRAVITY_VERTEX_MODEL,
-      location: ANTIGRAVITY_VERTEX_LOCATION,
-      project: gcloud?.project || "",
-    },
-    needsInstall: !status.available,
-    ...publicStatus,
+    diagnosticCode: ready
+      ? "ANTIGRAVITY_CLI_READY"
+      : "ANTIGRAVITY_CLI_AUTH_OR_MODEL_LIST_FAILED",
+    credentialMode: ready ? "google-oauth" : "",
+    installCommand: antigravityInstallCommand(),
+    needsInstall: false,
+    authChecked: true,
+    modelCount: models.length,
+    defaultModel: models[0]?.name || ANTIGRAVITY_CLI_DEFAULT_MODEL,
+    models,
   };
 }
 
@@ -943,27 +887,18 @@ function getAntigravityModelCatalog(
   antigravity,
   { allowBlocking = false } = {},
 ) {
-  if (!antigravity?.ready) {
+  if (!antigravity?.ready && !allowBlocking) {
     return {
       available: false,
-      source: "antigravity-sdk",
-      error: antigravity?.detail || "Antigravity SDK is not ready.",
+      loading: Boolean(antigravity?.path),
+      source: "agy models",
+      error: antigravity?.detail || "Antigravity CLI is not ready.",
       models: [],
     };
   }
 
-  const project = antigravity.vertex?.project || "";
-  const location = antigravity.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION;
-  if (!project || !location) {
-    return {
-      available: false,
-      source: "antigravity-sdk",
-      error: "Vertex project and location are required to list models.",
-      models: [],
-    };
-  }
-
-  const cacheKey = `${project}:${location}`;
+  const path = findAntigravityCliPath();
+  const cacheKey = `${path || "missing"}:${antigravity?.version || ""}`;
   const now = Date.now();
   if (
     antigravityCatalogCache?.cacheKey === cacheKey &&
@@ -976,127 +911,49 @@ function getAntigravityModelCatalog(
     };
   }
 
-  if (!allowBlocking) {
+  if (!allowBlocking && Array.isArray(antigravity?.models) && antigravity.models.length) {
+    return {
+      available: true,
+      source: "agy models",
+      defaultText: antigravity.defaultModel || antigravity.models[0]?.name || "",
+      modelCount: antigravity.models.length,
+      models: antigravity.models,
+    };
+  }
+
+  if (!path) {
     return {
       available: false,
-      loading: true,
-      source: "google-genai vertex models.list",
-      project,
-      location,
-      error:
-        "Antigravity model catalog lookup is deferred until the Antigravity provider is selected.",
+      source: "agy models",
+      error: "Antigravity CLI(agy)를 찾지 못했습니다.",
       models: [],
     };
   }
 
-  const script = `
-import json
-from typing import get_args
+  const result = runAntigravityCliCommand(path, ["models"], {
+    timeout: 20000,
+  });
+  if (result.error || result.status !== 0) {
+    return {
+      available: false,
+      source: "agy models",
+      errorCode: result.error ? "ANTIGRAVITY_CLI_MODELS_FAILED" : "",
+      error:
+        result.error?.message ||
+        result.stderr?.trim() ||
+        result.stdout?.trim() ||
+        `agy models exited ${result.status}`,
+      models: [],
+    };
+  }
 
-payload = {
-    "available": False,
-    "source": "google-genai vertex models.list",
-    "project": ${JSON.stringify(project)},
-    "location": ${JSON.stringify(location)},
-    "models": [],
-}
-
-def category_for(name):
-    lowered = name.lower()
-    if "embedding" in lowered:
-        return "embedding"
-    if "image" in lowered or lowered.startswith("imagen-"):
-        return "image"
-    if "tts" in lowered or "audio" in lowered:
-        return "audio"
-    if "lyria" in lowered:
-        return "music"
-    if lowered.startswith("veo-"):
-        return "video"
-    if "computer-use" in lowered:
-        return "computer-use"
-    return "text"
-
-try:
-    from google import genai
-    from google.antigravity.models import DEFAULT_IMAGE_GENERATION_MODEL, DEFAULT_MODEL
-    try:
-        from google.genai._gaos.types.interactions.model import Model
-        literal = get_args(Model)[0]
-        sdk_known = set(get_args(literal))
-    except Exception:
-        sdk_known = set()
-
-    client = genai.Client(
-        vertexai=True,
-        project=payload["project"],
-        location=payload["location"],
-    )
-    vertex_models = []
-    for model in client.models.list():
-        full_name = getattr(model, "name", "") or ""
-        name = full_name.split("/")[-1]
-        if not name or "gemini" not in name.lower():
-            continue
-        category = category_for(name)
-        vertex_models.append({
-            "id": name,
-            "name": name,
-            "fullName": full_name,
-            "category": category,
-            "selectable": category == "text",
-            "sdkKnown": name in sdk_known,
-            "isDefaultText": name == DEFAULT_MODEL,
-            "isDefaultImage": name == DEFAULT_IMAGE_GENERATION_MODEL,
-            "preview": "preview" in name,
-        })
-
-    preferred = [
-        DEFAULT_MODEL,
-        "gemini-3.1-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-3-pro-preview",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-    ]
-    rank = {name: index for index, name in enumerate(preferred)}
-    vertex_models.sort(key=lambda item: (
-        0 if item["selectable"] else 1,
-        rank.get(item["name"], 1000),
-        item["name"],
-    ))
-    payload.update({
-        "available": True,
-        "sdkDefaultText": DEFAULT_MODEL,
-        "sdkDefaultImage": DEFAULT_IMAGE_GENERATION_MODEL,
-        "sdkKnownCount": len(sdk_known),
-        "vertexGeminiCount": len(vertex_models),
-        "models": vertex_models,
-    })
-except Exception as exc:
-    payload.update({
-        "available": False,
-        "errorCode": exc.__class__.__name__,
-        "error": str(exc),
-    })
-
-print(json.dumps(payload, ensure_ascii=False))
-`;
-
-  const result = runPythonProbe(script);
+  const models = parseAntigravityModels(result.stdout);
   const catalog = {
-    available: Boolean(result.available),
-    source: result.source || "google-genai vertex models.list",
-    project,
-    location,
-    errorCode: result.errorCode || "",
-    error: result.error || "",
-    sdkDefaultText: result.sdkDefaultText || "",
-    sdkDefaultImage: result.sdkDefaultImage || "",
-    sdkKnownCount: Number(result.sdkKnownCount || 0),
-    vertexGeminiCount: Number(result.vertexGeminiCount || 0),
-    models: Array.isArray(result.models) ? result.models : [],
+    available: models.length > 0,
+    source: "agy models",
+    defaultText: models[0]?.name || ANTIGRAVITY_CLI_DEFAULT_MODEL,
+    modelCount: models.length,
+    models,
   };
   if (catalog.available) {
     antigravityCatalogCache = {
@@ -1124,15 +981,13 @@ function providerOptionsFromStatus(codex, antigravity) {
     },
     {
       id: ANTIGRAVITY_PROVIDER_ID,
-      label: "Antigravity SDK",
+      label: "Antigravity CLI",
       available: Boolean(antigravity.ready),
       status: antigravity.ready ? "ok" : "error",
       detail:
-        antigravity.detail || "Antigravity SDK 상태를 확인하지 못했습니다.",
-      diagnosticCode: antigravity.diagnosticCode || "ANTIGRAVITY_SDK_NOT_READY",
-      installCommand:
-        antigravity.installCommand ||
-        "python3 -m pip install --upgrade google-antigravity",
+        antigravity.detail || "Antigravity CLI 상태를 확인하지 못했습니다.",
+      diagnosticCode: antigravity.diagnosticCode || "ANTIGRAVITY_CLI_NOT_READY",
+      installCommand: antigravity.installCommand || antigravityInstallCommand(),
     },
   ];
 }
@@ -1140,6 +995,12 @@ function providerOptionsFromStatus(codex, antigravity) {
 function safeCliValue(value, fallback, pattern = /^[A-Za-z0-9_.-]+$/) {
   const text = String(value || "").trim();
   return pattern.test(text) ? text : fallback;
+}
+
+function safeAntigravityCliModel(value, fallback = ANTIGRAVITY_CLI_DEFAULT_MODEL) {
+  const text = String(value || "").trim();
+  if (!text || text.length > 160 || /[\r\n\0]/.test(text)) return fallback;
+  return text;
 }
 
 function readAppAgentsInstructions() {
@@ -1729,13 +1590,11 @@ function buildRequiredWebResearchSection(payload = {}) {
   if (payload.requireWebSearch !== true) return "";
   const provider =
     payload.provider === ANTIGRAVITY_PROVIDER_ID
-      ? "Antigravity SDK"
+      ? "Antigravity CLI"
       : "Codex CLI";
   const webGroundingStatus =
     payload.provider === ANTIGRAVITY_PROVIDER_ID
-      ? ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING
-        ? "Antigravity Google Search grounding enabled"
-        : "Antigravity Google Search grounding disabled"
+      ? "Antigravity CLI가 제공하는 웹/브라우저 도구가 있으면 사용"
       : "Codex CLI/App Server에서 웹 검색 도구가 제공되면 사용";
   return [
     "[웹 검색/최신 확인 요구]",
@@ -3147,24 +3006,20 @@ function buildAntigravityChatPrompt(payload, status, preparedAttachments = {}) {
     .join("\n");
 
   const statusContext = {
-    provider: "Antigravity SDK",
-    sdkVersion: status.version || "",
+    provider: "Antigravity CLI",
+    cliPath: status.path || "",
+    cliVersion: status.version || "",
     credentialMode: status.credentialMode || "",
-    project: status.vertex?.project || "",
-    location: status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION,
-    configuredModel:
-      payload.model || status.vertex?.model || ANTIGRAVITY_VERTEX_MODEL,
-    webGrounding: ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING
-      ? "Google Search grounding enabled"
-      : "disabled",
+    authStrict: "google-oauth",
+    configuredModel: payload.model || status.defaultModel || ANTIGRAVITY_CLI_DEFAULT_MODEL,
     securityPreset,
   };
 
   return [
-    "너는 FinanceAgentGUI 오른쪽 사이드바 안에서 응답하는 Antigravity SDK 기반 에이전트다.",
+    "너는 FinanceAgentGUI 오른쪽 사이드바 안에서 응답하는 Antigravity CLI 기반 에이전트다.",
     "한국어로 자연스럽고 가볍게 답한다. 인사나 잡담에는 진단 리포트를 내지 말고 짧고 다정하게 받아친다. 이모지는 쓰지 않는다.",
-    "사용자가 설정, 인증, SDK, 모델, 연결 상태를 물을 때만 Antigravity 상태 정보를 언급한다.",
-    "최신 정보, 실시간 정보, 웹 검색, RAG, 출처 확인이 필요한 질문에는 Google Search grounding 결과를 활용한다. 로컬 News Feed 컨텍스트와 웹 검색 결과가 함께 있을 때는 날짜와 출처를 구분해서 설명한다.",
+    "사용자가 설정, 인증, CLI, 모델, 연결 상태를 물을 때만 Antigravity 상태 정보를 언급한다.",
+    "최신 정보, 실시간 정보, 웹 검색, RAG, 출처 확인이 필요한 질문에는 사용 가능한 Antigravity CLI 도구와 로컬 컨텍스트를 활용한다.",
     "현재 채팅은 로컬 GUI 안의 일반 대화 모드다. 사용자가 명시적으로 실행을 요청하지 않은 로컬 파일 수정, 설치, 삭제, 외부 쓰기 작업은 수행하지 말고 설명이나 확인 질문으로 답한다.",
     "금융 에이전트 GUI의 작업 실행은 별도 job/승인 흐름으로 연결될 예정이므로, 지금은 질문에 대한 응답을 우선한다.",
     appAgents
@@ -3340,169 +3195,37 @@ export function runCodexChat(payload = {}) {
   });
 }
 
-function antigravityThinkingLevel(reasoning = "") {
-  const normalized = String(reasoning || "")
-    .trim()
-    .toLowerCase();
-  if (normalized === "minimal") return "MINIMAL";
-  if (normalized === "low") return "LOW";
-  if (normalized === "high") return "HIGH";
-  return "MEDIUM";
+function antigravityCliReasoningLevel(model = "", preferredReasoning = "") {
+  return (
+    parseAntigravityReasoningLevel(model).toLowerCase() ||
+    safeCliValue(preferredReasoning, "medium")
+  );
 }
 
-export function runAntigravityGenerate({
-  prompt,
-  attachments = [],
-  model,
-  project,
-  location,
-  webGrounding = ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING,
-  thinkingLevel = "",
-}) {
-  const python = findPythonCommand();
-  if (!python) {
+function antigravityCliArgs({ model, approval }) {
+  const securityPreset = antigravitySecurityPreset(approval);
+  return [
+    ...securityPreset.cliArgs,
+    "--model",
+    model,
+    `--print-timeout=${ANTIGRAVITY_CLI_PRINT_TIMEOUT}`,
+    "-p",
+    "-",
+  ];
+}
+
+function runAntigravityCliPrint({ prompt, model, approval, timeoutMs = CHAT_TIMEOUT_MS }) {
+  const path = findAntigravityCliPath();
+  if (!path) {
     return Promise.reject(
-      new Error("python3 또는 python 명령을 찾지 못했습니다."),
+      new Error("Antigravity CLI(agy)를 찾지 못했습니다."),
     );
   }
 
-  const script = `
-import json
-import sys
-
-payload = json.loads(sys.stdin.read() or "{}")
-
-try:
-    from google import genai
-    from google.genai import types
-except Exception as exc:
-    print(json.dumps({
-        "ok": False,
-        "error": f"{exc.__class__.__name__}: {exc}",
-    }, ensure_ascii=False))
-    sys.exit(1)
-
-model = payload.get("model")
-if not model:
-    print(json.dumps({
-        "ok": False,
-        "error": "Antigravity model is required.",
-    }, ensure_ascii=False))
-    sys.exit(1)
-
-client = genai.Client(
-    vertexai=True,
-    project=payload.get("project"),
-    location=payload.get("location"),
-)
-
-def append_unique(items, value):
-    if value and value not in items:
-        items.append(value)
-
-def collect_grounding(response):
-    sources = []
-    queries = []
-    for candidate in getattr(response, "candidates", []) or []:
-        metadata = getattr(candidate, "grounding_metadata", None)
-        if not metadata:
-            continue
-        for query in getattr(metadata, "web_search_queries", []) or []:
-            append_unique(queries, query)
-        for grounding_chunk in getattr(metadata, "grounding_chunks", []) or []:
-            web = getattr(grounding_chunk, "web", None)
-            if not web:
-                continue
-            uri = (getattr(web, "uri", "") or "").strip()
-            if not uri:
-                continue
-            title = (getattr(web, "title", "") or "").strip() or uri
-            if any(source.get("uri") == uri for source in sources):
-                continue
-            sources.append({"title": title, "uri": uri})
-    return {"enabled": bool(payload.get("web_grounding")), "queries": queries, "sources": sources}
-
-def answer_with_sources(text, grounding):
-    source_limit = int(payload.get("grounding_source_limit") or 5)
-    sources = (grounding.get("sources") or [])[:source_limit]
-    clean_text = (text or "").strip()
-    if not sources:
-        return clean_text
-    lines = ["", "참고 웹 출처:"]
-    for source in sources:
-        title = str(source.get("title") or source.get("uri") or "source").replace("\\n", " ").strip()
-        uri = str(source.get("uri") or "").strip()
-        if uri:
-            lines.append(f"- [{title}]({uri})")
-    return clean_text + "\\n" + "\\n".join(lines)
-
-def build_contents():
-    contents = [payload.get("prompt", "")]
-    text_mime_types = {
-        "application/json",
-        "application/javascript",
-        "application/xml",
-        "application/x-yaml",
-        "application/yaml",
-        "text/csv",
-    }
-    for attachment in payload.get("attachments") or []:
-        path = attachment.get("path") or ""
-        name = attachment.get("name") or "attachment"
-        mime_type = attachment.get("mime_type") or "application/octet-stream"
-        if not path:
-            continue
-        try:
-            if mime_type.startswith("image/") or mime_type == "application/pdf":
-                with open(path, "rb") as f:
-                    contents.append(types.Part.from_bytes(data=f.read(), mime_type=mime_type))
-            elif mime_type.startswith("text/") or mime_type in text_mime_types:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    text = f.read(120000)
-                contents.append(f"[첨부 텍스트 파일: {name} / {mime_type}]\\n{text}")
-            else:
-                contents.append(f"[첨부 파일: {name} / {mime_type} / 로컬 경로: {path}]")
-        except Exception as exc:
-            contents.append(f"[첨부 파일 읽기 실패: {name} / {mime_type} / {exc}]")
-    return contents
-
-try:
-    config_kwargs = {}
-    if payload.get("web_grounding"):
-        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-    if payload.get("thinking_level"):
-        config_kwargs["thinking_config"] = types.ThinkingConfig(
-            thinking_level=payload.get("thinking_level"),
-        )
-    config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
-    response = client.models.generate_content(
-        model=model,
-        contents=build_contents(),
-        config=config,
-    )
-    text = getattr(response, "text", "") or ""
-    if not text.strip():
-        text = str(response)
-    grounding = collect_grounding(response)
-    answer = answer_with_sources(text, grounding)
-    print(json.dumps({
-        "ok": True,
-        "model": model,
-        "answer": answer,
-        "grounding": grounding,
-    }, ensure_ascii=False))
-    sys.exit(0)
-except Exception as exc:
-    print(json.dumps({
-        "ok": False,
-        "model": model,
-        "error": f"{exc.__class__.__name__}: {exc}",
-    }, ensure_ascii=False))
-    sys.exit(1)
-`;
-
+  const startedAt = Date.now();
   return new Promise((resolveGenerate, reject) => {
-    const child = spawn(python.command, [...python.argsPrefix, "-c", script], {
+    const args = antigravityCliArgs({ model, approval });
+    const child = spawn(path, args, {
       cwd: WEB_ROOT,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
@@ -3511,6 +3234,8 @@ except Exception as exc:
         NO_COLOR: "1",
       },
     });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -3518,14 +3243,14 @@ except Exception as exc:
       if (settled) return;
       settled = true;
       child.kill("SIGTERM");
-      reject(new Error("Antigravity SDK response timed out"));
-    }, CHAT_TIMEOUT_MS);
+      reject(new Error("Antigravity CLI response timed out"));
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      stdout += chunk;
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr += chunk;
     });
     child.on("error", (error) => {
       if (settled) return;
@@ -3537,439 +3262,81 @@ except Exception as exc:
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-
-      try {
-        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-        const result = JSON.parse(lines.at(-1) || "{}");
-        if (code !== 0 || !result.ok) {
-          reject(
-            new Error(
-              result.error || stderr.trim() || `Antigravity SDK exited ${code}`,
-            ),
-          );
-          return;
-        }
-        resolveGenerate(result);
-      } catch (error) {
-        reject(new Error(stderr.trim() || stdout.trim() || error.message));
-      }
-    });
-
-    child.stdin.end(
-      JSON.stringify({
-        prompt,
-        model,
-        project,
-        location,
-        web_grounding: webGrounding,
-        thinking_level: thinkingLevel,
-        grounding_source_limit: ANTIGRAVITY_GROUNDING_SOURCE_LIMIT,
-        attachments: attachments.map((attachment) => ({
-          name: attachment.name,
-          path: attachment.path,
-          mime_type: attachment.mimeType,
-          kind: attachment.kind,
-          size: attachment.size,
-        })),
-      }),
-    );
-  });
-}
-
-function streamAntigravityGenerate({
-  prompt,
-  attachments = [],
-  model,
-  project,
-  location,
-  webGrounding = ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING,
-  thinkingLevel = "",
-  onDelta = () => {},
-}) {
-  const python = findPythonCommand();
-  if (!python) {
-    return Promise.reject(
-      new Error("python3 또는 python 명령을 찾지 못했습니다."),
-    );
-  }
-
-  const script = `
-import json
-import sys
-
-def emit(event):
-    print(json.dumps(event, ensure_ascii=False), flush=True)
-
-payload = json.loads(sys.stdin.read() or "{}")
-
-try:
-    from google import genai
-    from google.genai import types
-except Exception as exc:
-    emit({
-        "type": "error",
-        "error": f"{exc.__class__.__name__}: {exc}",
-    })
-    sys.exit(1)
-
-model = payload.get("model")
-if not model:
-    emit({
-        "type": "error",
-        "error": "Antigravity model is required.",
-    })
-    sys.exit(1)
-
-client = genai.Client(
-    vertexai=True,
-    project=payload.get("project"),
-    location=payload.get("location"),
-)
-
-def append_unique(items, value):
-    if value and value not in items:
-        items.append(value)
-
-def merge_grounding(response, sources, queries):
-    for candidate in getattr(response, "candidates", []) or []:
-        metadata = getattr(candidate, "grounding_metadata", None)
-        if not metadata:
-            continue
-        for query in getattr(metadata, "web_search_queries", []) or []:
-            append_unique(queries, query)
-        for grounding_chunk in getattr(metadata, "grounding_chunks", []) or []:
-            web = getattr(grounding_chunk, "web", None)
-            if not web:
-                continue
-            uri = (getattr(web, "uri", "") or "").strip()
-            if not uri:
-                continue
-            title = (getattr(web, "title", "") or "").strip() or uri
-            if any(source.get("uri") == uri for source in sources):
-                continue
-            sources.append({"title": title, "uri": uri})
-
-def answer_with_sources(text, sources):
-    source_limit = int(payload.get("grounding_source_limit") or 5)
-    selected_sources = sources[:source_limit]
-    clean_text = (text or "").strip()
-    if not selected_sources:
-        return clean_text
-    lines = ["", "참고 웹 출처:"]
-    for source in selected_sources:
-        title = str(source.get("title") or source.get("uri") or "source").replace("\\n", " ").strip()
-        uri = str(source.get("uri") or "").strip()
-        if uri:
-            lines.append(f"- [{title}]({uri})")
-    return clean_text + "\\n" + "\\n".join(lines)
-
-def build_contents():
-    contents = [payload.get("prompt", "")]
-    text_mime_types = {
-        "application/json",
-        "application/javascript",
-        "application/xml",
-        "application/x-yaml",
-        "application/yaml",
-        "text/csv",
-    }
-    for attachment in payload.get("attachments") or []:
-        path = attachment.get("path") or ""
-        name = attachment.get("name") or "attachment"
-        mime_type = attachment.get("mime_type") or "application/octet-stream"
-        if not path:
-            continue
-        try:
-            if mime_type.startswith("image/") or mime_type == "application/pdf":
-                with open(path, "rb") as f:
-                    contents.append(types.Part.from_bytes(data=f.read(), mime_type=mime_type))
-            elif mime_type.startswith("text/") or mime_type in text_mime_types:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    text = f.read(120000)
-                contents.append(f"[첨부 텍스트 파일: {name} / {mime_type}]\\n{text}")
-            else:
-                contents.append(f"[첨부 파일: {name} / {mime_type} / 로컬 경로: {path}]")
-        except Exception as exc:
-            contents.append(f"[첨부 파일 읽기 실패: {name} / {mime_type} / {exc}]")
-    return contents
-
-try:
-    answer_parts = []
-    grounding_sources = []
-    grounding_queries = []
-    config_kwargs = {}
-    if payload.get("web_grounding"):
-        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-    if payload.get("thinking_level"):
-        config_kwargs["thinking_config"] = types.ThinkingConfig(
-            thinking_level=payload.get("thinking_level"),
-        )
-    config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=build_contents(),
-        config=config,
-    ):
-        merge_grounding(chunk, grounding_sources, grounding_queries)
-        text = getattr(chunk, "text", "") or ""
-        if not text:
-            continue
-        answer_parts.append(text)
-        emit({
-            "type": "delta",
-            "text": text,
-        })
-
-    grounding = {
-        "enabled": bool(payload.get("web_grounding")),
-        "queries": grounding_queries,
-        "sources": grounding_sources,
-    }
-    answer = answer_with_sources("".join(answer_parts), grounding_sources)
-    emit({
-        "type": "done",
-        "model": model,
-        "answer": answer,
-        "grounding": grounding,
-    })
-    sys.exit(0)
-except Exception as exc:
-    emit({
-        "type": "error",
-        "model": model,
-        "error": f"{exc.__class__.__name__}: {exc}",
-    })
-    sys.exit(1)
-`;
-
-  return new Promise((resolveGenerate, reject) => {
-    const child = spawn(python.command, [...python.argsPrefix, "-c", script], {
-      cwd: WEB_ROOT,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-      },
-    });
-    let stdoutBuffer = "";
-    let stderr = "";
-    let result = null;
-    let streamError = null;
-    let settled = false;
-    let callbackError = null;
-
-    const readStreamLine = (rawLine) => {
-      const line = rawLine.trim();
-      if (!line) return;
-
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        stderr += `${line}\n`;
-        return;
-      }
-
-      if (event.type === "delta") {
-        const text = event.text || event.delta || "";
-        if (!text) return;
-        try {
-          onDelta(text);
-        } catch (error) {
-          callbackError = error;
-          child.kill("SIGTERM");
-        }
-        return;
-      }
-
-      if (event.type === "done") {
-        result = event;
-        return;
-      }
-
-      if (event.type === "error") {
-        streamError = event;
-      }
-    };
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGTERM");
-      reject(new Error("Antigravity SDK response timed out"));
-    }, CHAT_TIMEOUT_MS);
-
-    child.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString();
-      const lines = stdoutBuffer.split(/\r?\n/);
-      stdoutBuffer = lines.pop() || "";
-      for (const line of lines) {
-        readStreamLine(line);
-      }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      readStreamLine(stdoutBuffer);
-
-      if (callbackError) {
-        reject(callbackError);
-        return;
-      }
-
-      if (code !== 0 || streamError) {
+      const answer = stdout.trim();
+      if (code !== 0) {
         reject(
-          new Error(
-            streamError?.error ||
-              stderr.trim() ||
-              `Antigravity SDK exited ${code}`,
-          ),
+          new Error((stderr.trim() || answer || `agy exited ${code}`).trim()),
         );
         return;
       }
-
-      if (!result) {
-        reject(
-          new Error(
-            stderr.trim() ||
-              "Antigravity SDK stream ended without a done event.",
-          ),
-        );
-        return;
-      }
-
       resolveGenerate({
         ok: true,
-        model: result.model || model,
-        answer: result.answer || "",
-        grounding: result.grounding || null,
+        model,
+        answer,
+        elapsedMs: Date.now() - startedAt,
       });
     });
 
-    child.stdin.end(
-      JSON.stringify({
-        prompt,
-        model,
-        project,
-        location,
-        web_grounding: webGrounding,
-        thinking_level: thinkingLevel,
-        grounding_source_limit: ANTIGRAVITY_GROUNDING_SOURCE_LIMIT,
-        attachments: attachments.map((attachment) => ({
-          name: attachment.name,
-          path: attachment.path,
-          mime_type: attachment.mimeType,
-          kind: attachment.kind,
-          size: attachment.size,
-        })),
-      }),
-    );
+    child.stdin.end(prompt, "utf8");
   });
 }
 
+export async function runAntigravityGenerate({
+  prompt,
+  model = "",
+  approval = "default",
+  timeoutMs = CHAT_TIMEOUT_MS,
+} = {}) {
+  const status = getAntigravityCliStatus({ allowAuthProbe: true });
+  if (!status.ready) {
+    throw new Error(status.detail || "Antigravity CLI 인증이 준비되지 않았습니다.");
+  }
+
+  const selectedModel = safeAntigravityCliModel(
+    model,
+    status.defaultModel || ANTIGRAVITY_CLI_DEFAULT_MODEL,
+  );
+  try {
+    return await runAntigravityCliPrint({
+      prompt,
+      model: selectedModel,
+      approval,
+      timeoutMs,
+    });
+  } catch (error) {
+    throw new Error(
+      `선택한 Antigravity CLI 모델 ${selectedModel} 호출 실패: ${error.message}`,
+    );
+  }
+}
+
 function buildAntigravityDiagnosticAnswer(status) {
-  const installCommand =
-    status.installCommand ||
-    "python3 -m pip install --upgrade google-antigravity";
-
-  if (!status.pythonAvailable) {
-    return [
-      "Antigravity SDK를 실행하려면 먼저 Python 런타임을 확인해야 합니다.",
-      "",
-      `현재 진단: ${status.error || "python3 또는 python 명령을 찾지 못했습니다."}`,
-      "",
-      "다음 단계로 Python 설치 또는 경로 확인 진단을 진행할까요?",
-    ].join("\n");
-  }
-
-  if (!status.available) {
-    return [
-      "Antigravity SDK provider를 선택했지만 아직 SDK가 준비되지 않았습니다.",
-      "",
-      `진단 코드: \`${status.errorCode || "ANTIGRAVITY_SDK_NOT_READY"}\``,
-      `상태: \`${status.error || "google-antigravity 패키지를 찾지 못했습니다."}\``,
-      "",
-      "권장 다음 단계:",
-      `- \`${installCommand}\``,
-      "- 설치 후 SDK import, 인증, 기본 스트리밍 응답 probe를 다시 확인",
-      "",
-      "이 방향으로 Antigravity SDK 설치/업데이트 안내를 진행할까요?",
-    ].join("\n");
-  }
+  const installCommand = status.installCommand || antigravityInstallCommand();
 
   if (!status.ready) {
-    if (status.diagnosticCode === "ANTIGRAVITY_ADC_NOT_READY") {
-      const project = status.gcloud?.project || "<gcloud-project-id>";
-      return [
-        "Antigravity SDK는 설치되어 있지만 gcloud Application Default Credentials가 아직 준비되지 않았습니다.",
-        "",
-        `진단 코드: \`${status.diagnosticCode}\``,
-        "",
-        "다음 단계:",
-        `- \`gcloud auth application-default login --project ${project}\``,
-        "",
-        "이 인증 흐름을 진행할까요?",
-      ].join("\n");
-    }
-
-    if (status.diagnosticCode === "ANTIGRAVITY_PROJECT_NOT_SET") {
-      return [
-        "Antigravity SDK는 설치되어 있지만 gcloud 기본 프로젝트가 설정되지 않았습니다.",
-        "",
-        "다음 단계:",
-        "- 사용할 Google Cloud 프로젝트를 선택하고 `gcloud config set project <project-id>`를 실행",
-        "- 이후 Application Default Credentials와 Agent Platform API 상태를 다시 확인",
-        "",
-        "프로젝트 설정부터 진행할까요?",
-      ].join("\n");
-    }
-
-    if (status.diagnosticCode === "ANTIGRAVITY_AGENT_PLATFORM_API_DISABLED") {
-      const project = status.gcloud?.project || "<gcloud-project-id>";
-      return [
-        "Antigravity SDK는 설치와 ADC 인증까지 확인됐지만 Agent Platform API가 아직 활성화되지 않았습니다.",
-        "",
-        `프로젝트: \`${project}\``,
-        `필요 API: \`${ANTIGRAVITY_VERTEX_SERVICE}\``,
-        "",
-        "다음 단계:",
-        `- \`gcloud services enable ${ANTIGRAVITY_VERTEX_SERVICE} --project ${project}\``,
-        "",
-        "이 API 활성화를 진행할까요?",
-      ].join("\n");
-    }
-
     return [
-      "Antigravity SDK는 설치되어 있지만 인증 구성이 아직 완전히 준비되지 않았습니다.",
+      "Antigravity CLI가 아직 준비되지 않았습니다.",
       "",
-      `진단 코드: \`${status.diagnosticCode || "ANTIGRAVITY_AUTH_NOT_READY"}\``,
-      `상태: \`${status.detail || status.error || "추가 인증 진단이 필요합니다."}\``,
+      `진단 코드: \`${status.diagnosticCode || "ANTIGRAVITY_CLI_NOT_READY"}\``,
+      `상태: \`${status.detail || status.error || "추가 CLI 진단이 필요합니다."}\``,
       "",
-      "다음 단계로 gcloud ADC 또는 Gemini API key 설정을 확인할까요?",
+      "다음 단계:",
+      `- 설치가 필요하면 \`${installCommand}\``,
+      "- 인증이 필요하면 터미널에서 `agy`를 실행해 Google OAuth 로그인을 완료",
+      "",
+      "인증이나 CLI가 준비되지 않으면 다른 provider로 우회하지 않고 실패합니다.",
     ].join("\n");
   }
 
   return [
-    "Antigravity SDK는 설치와 인증까지 준비되어 있습니다.",
+    "Antigravity CLI는 설치와 인증까지 준비되어 있습니다.",
     "",
+    `경로: ${status.path || "agy"}`,
     `버전: ${status.version || "확인됨"}`,
-    `Python: ${status.pythonVersion || "확인됨"}`,
-    `인증: ${status.credentialMode === "vertex-adc" ? "Vertex ADC" : "Gemini API key"}`,
-    status.vertex?.project ? `프로젝트: ${status.vertex.project}` : "",
-    `기본 모델: ${status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION}/${status.vertex?.model || ANTIGRAVITY_VERTEX_MODEL}`,
+    "인증: Google OAuth",
+    `기본 모델: ${status.defaultModel || ANTIGRAVITY_CLI_DEFAULT_MODEL}`,
     "",
-    "이제 일반 채팅은 SDK 진단 리포트 대신 선택한 Gemini 모델로 직접 응답합니다.",
+    "이제 일반 채팅은 `agy --print -` 경로로 직접 응답합니다.",
     "",
     "설정, 인증, 모델 카탈로그 문제가 있을 때만 진단 안내로 전환합니다.",
   ]
@@ -3979,12 +3346,12 @@ function buildAntigravityDiagnosticAnswer(status) {
 
 function runAntigravityDiagnosticChat(payload = {}) {
   const startedAt = Date.now();
-  const status = getAntigravitySdkStatus();
+  const status = getAntigravityCliStatus();
   return {
     answer: buildAntigravityDiagnosticAnswer(status),
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
-    model: "antigravity-sdk",
+    providerLabel: "Antigravity CLI",
+    model: "antigravity-cli",
     reasoning: "diagnostic",
     approval: antigravitySecurityPreset(payload.approval).id,
     antigravity: status,
@@ -3994,33 +3361,30 @@ function runAntigravityDiagnosticChat(payload = {}) {
 
 async function runAntigravityChat(payload = {}) {
   const startedAt = Date.now();
-  const status = getAntigravitySdkStatus({ allowAuthProbe: true });
+  const status = getAntigravityCliStatus({ allowAuthProbe: true });
   if (!status.ready) {
-    return runAntigravityDiagnosticChat(payload);
+    throw new Error(status.detail || "Antigravity CLI 인증이 준비되지 않았습니다.");
   }
 
-  const model = safeCliValue(payload.model, ANTIGRAVITY_VERTEX_MODEL);
-  const reasoning = safeCliValue(payload.reasoning, "medium");
-  const location = status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION;
-  const project = status.vertex?.project || "";
-  if (!project) {
-    return runAntigravityDiagnosticChat(payload);
-  }
+  const model = safeAntigravityCliModel(
+    payload.model,
+    status.defaultModel || ANTIGRAVITY_CLI_DEFAULT_MODEL,
+  );
+  const reasoning = antigravityCliReasoningLevel(model, payload.reasoning);
+  const securityPreset = antigravitySecurityPreset(payload.approval);
 
   let result;
   const preparedAttachments = prepareChatAttachments(payload.attachments);
   try {
-    result = await runAntigravityGenerate({
+    result = await runAntigravityCliPrint({
       prompt: buildAntigravityChatPrompt(payload, status, preparedAttachments),
-      attachments: preparedAttachments.attachments,
       model,
-      project,
-      location,
-      thinkingLevel: antigravityThinkingLevel(reasoning),
+      approval: securityPreset.id,
+      timeoutMs: chatTimeoutMsForPayload(payload),
     });
   } catch (error) {
     throw new Error(
-      `선택한 Antigravity 모델 ${location}/${model} 호출 실패: ${error.message}`,
+      `선택한 Antigravity CLI 모델 ${model} 호출 실패: ${error.message}`,
     );
   } finally {
     cleanupPreparedAttachments(preparedAttachments);
@@ -4029,11 +3393,10 @@ async function runAntigravityChat(payload = {}) {
   return {
     answer: result.answer,
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
+    providerLabel: "Antigravity CLI",
     model: result.model || model,
     reasoning,
-    approval: antigravitySecurityPreset(payload.approval).id,
-    grounding: result.grounding || null,
+    approval: securityPreset.id,
     antigravity: status,
     elapsedMs: Date.now() - startedAt,
   };
@@ -4069,26 +3432,26 @@ function chatTimeoutMessageForPayload(payload = {}) {
 
 function streamAntigravityDiagnosticChat(payload = {}, res) {
   const startedAt = Date.now();
-  const status = getAntigravitySdkStatus();
+  const status = getAntigravityCliStatus();
   const approval = antigravitySecurityPreset(payload.approval).id;
   writeStreamEvent(res, "started", {
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
-    model: "antigravity-sdk",
+    providerLabel: "Antigravity CLI",
+    model: "antigravity-cli",
     reasoning: "diagnostic",
     approval,
   });
   writeStreamEvent(res, "status", {
-    title: "Antigravity SDK 진단",
+    title: "Antigravity CLI 진단",
     body: status.ready
-      ? "SDK 설치, 인증, Agent Platform API 준비 상태를 확인했습니다."
-      : "SDK와 인증 상태를 확인했고, 다음 단계 안내를 준비하고 있습니다.",
+      ? "CLI 설치, OAuth 인증, 모델 목록 상태를 확인했습니다."
+      : "CLI와 인증 상태를 확인했고, 다음 단계 안내를 준비하고 있습니다.",
   });
   writeStreamEvent(res, "done", {
     answer: buildAntigravityDiagnosticAnswer(status),
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
-    model: "antigravity-sdk",
+    providerLabel: "Antigravity CLI",
+    model: "antigravity-cli",
     reasoning: "diagnostic",
     approval,
     antigravity: status,
@@ -4099,46 +3462,32 @@ function streamAntigravityDiagnosticChat(payload = {}, res) {
 
 function streamAntigravityChat(payload = {}, res) {
   const startedAt = Date.now();
-  const status = getAntigravitySdkStatus({ allowAuthProbe: true });
+  const status = getAntigravityCliStatus({ allowAuthProbe: true });
   if (!status.ready) {
-    streamAntigravityDiagnosticChat(payload, res);
+    writeStreamEvent(res, "error", {
+      error: status.detail || "Antigravity CLI 인증이 준비되지 않았습니다.",
+    });
+    res.end();
     return;
   }
 
-  const model = safeCliValue(payload.model, ANTIGRAVITY_VERTEX_MODEL);
-  const reasoning = safeCliValue(payload.reasoning, "medium");
+  const model = safeAntigravityCliModel(
+    payload.model,
+    status.defaultModel || ANTIGRAVITY_CLI_DEFAULT_MODEL,
+  );
+  const reasoning = antigravityCliReasoningLevel(model, payload.reasoning);
   const securityPreset = antigravitySecurityPreset(payload.approval);
   writeStreamEvent(res, "started", {
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
+    providerLabel: "Antigravity CLI",
     model,
     reasoning,
     approval: securityPreset.label,
   });
   writeStreamEvent(res, "status", {
     title: "Antigravity 응답 생성 중",
-    body: `${status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION}/${model} · ${securityPreset.label} preset · ${
-      ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING
-        ? "Google Search grounding 포함"
-        : "웹 grounding 비활성"
-    }`,
+    body: `agy · ${model} · ${securityPreset.label} preset`,
   });
-
-  const project = status.vertex?.project || "";
-  if (!project) {
-    writeStreamEvent(res, "done", {
-      answer: buildAntigravityDiagnosticAnswer(status),
-      provider: ANTIGRAVITY_PROVIDER_ID,
-      providerLabel: "Antigravity SDK",
-      model: "antigravity-sdk",
-      reasoning: "diagnostic",
-      approval: securityPreset.id,
-      antigravity: status,
-      elapsedMs: Date.now() - startedAt,
-    });
-    res.end();
-    return;
-  }
 
   let preparedAttachments;
   try {
@@ -4151,36 +3500,28 @@ function streamAntigravityChat(payload = {}, res) {
     return;
   }
 
-  streamAntigravityGenerate({
+  runAntigravityCliPrint({
     prompt: buildAntigravityChatPrompt(payload, status, preparedAttachments),
-    attachments: preparedAttachments.attachments,
     model,
-    project,
-    location: status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION,
-    webGrounding: ANTIGRAVITY_GOOGLE_SEARCH_GROUNDING,
-    thinkingLevel: antigravityThinkingLevel(reasoning),
-    onDelta: (text) => {
-      writeStreamEvent(res, "delta", { text });
-    },
+    approval: securityPreset.id,
+    timeoutMs: chatTimeoutMsForPayload(payload),
   })
     .then((result) => {
       writeStreamEvent(res, "message", {
         text: result.answer,
         provider: ANTIGRAVITY_PROVIDER_ID,
-        providerLabel: "Antigravity SDK",
+        providerLabel: "Antigravity CLI",
         model: result.model || model,
         reasoning,
         approval: securityPreset.id,
-        grounding: result.grounding || null,
       });
       writeStreamEvent(res, "done", {
         answer: result.answer,
         provider: ANTIGRAVITY_PROVIDER_ID,
-        providerLabel: "Antigravity SDK",
+        providerLabel: "Antigravity CLI",
         model: result.model || model,
         reasoning,
         approval: securityPreset.id,
-        grounding: result.grounding || null,
         antigravity: status,
         elapsedMs: Date.now() - startedAt,
       });
@@ -4190,7 +3531,7 @@ function streamAntigravityChat(payload = {}, res) {
     .catch((error) => {
       cleanupPreparedAttachments(preparedAttachments);
       writeStreamEvent(res, "error", {
-        error: `선택한 Antigravity 모델 ${status.vertex?.location || ANTIGRAVITY_VERTEX_LOCATION}/${model} 호출 실패: ${error.message}`,
+        error: `선택한 Antigravity CLI 모델 ${model} 호출 실패: ${error.message}`,
       });
       res.end();
     });
@@ -5060,16 +4401,16 @@ function selectedAntigravityModel(catalog, preferredModel = "") {
     return preferredModel;
   }
   return (
-    models.find((item) => item.name === catalog?.sdkDefaultText)?.name ||
+    models.find((item) => item.name === catalog?.defaultText)?.name ||
     models[0]?.name ||
-    ANTIGRAVITY_VERTEX_MODEL
+    ANTIGRAVITY_CLI_DEFAULT_MODEL
   );
 }
 
-function selectedAntigravityReasoning(preferredReasoning = "") {
-  return ["minimal", "low", "medium", "high"].includes(preferredReasoning)
-    ? preferredReasoning
-    : "medium";
+function selectedAntigravityReasoning(preferredReasoning = "", model = "") {
+  const fromModel = parseAntigravityReasoningLevel(model).toLowerCase();
+  if (fromModel) return fromModel;
+  return preferredReasoning ? safeCliValue(preferredReasoning, "medium") : "medium";
 }
 
 function selectedAntigravitySpeed(preferredSpeed = "") {
@@ -5077,7 +4418,6 @@ function selectedAntigravitySpeed(preferredSpeed = "") {
 }
 
 function selectedAntigravityApproval(preferredApproval = "") {
-  if (preferredApproval === "sdk-read-only") return "default";
   return antigravitySecurityPreset(preferredApproval).id;
 }
 
@@ -5101,7 +4441,13 @@ function selectedAgentOptions({
         antigravityModelCatalog,
         providerSettings.model,
       ),
-      reasoning: selectedAntigravityReasoning(providerSettings.reasoning),
+      reasoning: selectedAntigravityReasoning(
+        providerSettings.reasoning,
+        selectedAntigravityModel(
+          antigravityModelCatalog,
+          providerSettings.model,
+        ),
+      ),
       speed: selectedAntigravitySpeed(providerSettings.speed),
       modelOption: "",
     };
@@ -5140,7 +4486,7 @@ export function getCodexOptions() {
     agentSettings,
     ANTIGRAVITY_PROVIDER_ID,
   );
-  const antigravity = getAntigravitySdkStatus({
+  const antigravity = getAntigravityCliStatus({
     allowAuthProbe:
       antigravityEnabled || selectedProviderId === ANTIGRAVITY_PROVIDER_ID,
   });

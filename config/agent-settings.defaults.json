@@ -10,10 +10,10 @@
       "reasoning": "high",
       "speed": "standard"
     },
-    "antigravity-sdk": {
+    "antigravity-cli": {
       "enabled": false,
       "approval": "turbo",
-      "model": "gemini-3.5-flash",
+      "model": "Gemini 3.5 Flash (Medium)",
       "reasoning": "medium",
       "speed": "standard"
     }

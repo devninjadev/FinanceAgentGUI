@@ -47,8 +47,8 @@ export function PortfolioWidgetCanvas({
 }) {
   const gridRef = useRef(null);
   const isStrategyCanvas = canvasMode === "strategy-research";
-  const agentIcon = agentProvider === "antigravity-sdk" ? antigravityLogo : codexLogo;
-  const agentIconAlt = agentProvider === "antigravity-sdk" ? "Antigravity" : "Codex";
+  const agentIcon = agentProvider === "antigravity-cli" ? antigravityLogo : codexLogo;
+  const agentIconAlt = agentProvider === "antigravity-cli" ? "Antigravity" : "Codex";
   const gridModel = useMemo(() => portfolioGridModel(widgets), [widgets]);
   const [activeWidgetInteraction, setActiveWidgetInteraction] = useState(null);
 

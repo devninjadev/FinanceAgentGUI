@@ -22,7 +22,7 @@ function worldMemorySignalToneClass(tone) {
 }
 
 function worldMemoryAskAgentLabel(agentProvider = "") {
-  return agentProvider === "antigravity-sdk" ? "Antigravity에게 질문하기" : "Codex에게 질문하기";
+  return agentProvider === "antigravity-cli" ? "Antigravity에게 질문하기" : "Codex에게 질문하기";
 }
 
 function WorldMemoryAskButton({ agentIcon, label, disabled = false, onClick }) {
@@ -212,7 +212,15 @@ function WorldMemoryAgentActionCard({
 }) {
   if (!action) return null;
   const catalog = worldMemoryActionCatalog[action.action] || {};
-  const paramsText = JSON.stringify(action.options || {}, null, 2);
+  const params =
+    action.options && typeof action.options === "object"
+      ? action.options
+      : action.params && typeof action.params === "object"
+        ? action.params
+        : action.raw?.params && typeof action.raw.params === "object"
+          ? action.raw.params
+          : {};
+  const paramsText = JSON.stringify(params, null, 2);
   return (
     <section className="world-memory-agent-action" aria-labelledby="world-memory-agent-action-title">
       <div className="world-memory-agent-action-main">
@@ -229,7 +237,7 @@ function WorldMemoryAgentActionCard({
       </div>
       {paramsText !== "{}" ? <pre>{paramsText}</pre> : null}
       <div className="world-memory-agent-action-buttons">
-        <button type="button" onClick={() => onExecute(action)} disabled={busy}>
+        <button type="button" data-testid="world-memory-agent-execute" onClick={() => onExecute(action)} disabled={busy}>
           {busy ? <LoaderCircle size={15} strokeWidth={2.2} /> : <Play size={15} strokeWidth={2.2} />}
           <span>{busy ? "실행 중" : "확인 후 실행"}</span>
         </button>

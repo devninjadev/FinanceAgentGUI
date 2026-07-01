@@ -14,7 +14,7 @@ const fallbackSettings = {
   managementProvider: "default",
 };
 
-const MODEL_PROVIDER_IDS = new Set(["default", "codex-cli", "antigravity-sdk"]);
+const MODEL_PROVIDER_IDS = new Set(["default", "codex-cli", "antigravity-cli"]);
 
 function ensureConfigDir() {
   mkdirSync(CONFIG_DIR, { recursive: true });

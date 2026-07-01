@@ -18,6 +18,11 @@ import {
   runAntigravityGenerate,
   sendJson,
 } from "./codexProbe.mjs";
+import {
+  ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+  ANTIGRAVITY_TRANSLATION_REASONING,
+  selectAntigravityModelForReasoning,
+} from "../src/agent/antigravityModelSelection.js";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
@@ -36,10 +41,8 @@ const TRANSLATION_TIMEOUT_MS = 60000;
 const FETCH_TIMEOUT_MS = 20000;
 const FEED_FETCH_STAGGER_WINDOW_MS = 60000;
 const TRANSLATION_BODY_MAX_CHARS = 1200;
-const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
-const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
-const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
-const ANTIGRAVITY_FALLBACK_MODEL = "gemini-3.5-flash";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
+const UNICODE_REPLACEMENT_CHARACTER = "\uFFFD";
 const UNTRANSLATED_COPY_LATIN_WORDS = 2;
 const runtimeKey = Symbol.for("financeAgentGui.newsFeedCollector");
 const defaultFeedHeaders = {
@@ -436,16 +439,48 @@ function readStore() {
   }
   try {
     const store = JSON.parse(readFileSync(STORE_PATH, "utf8"));
-    return {
+    return sanitizeStoredTranslationIntegrity({
       ...emptyStore(),
       ...store,
       collector: { ...emptyStore().collector, ...(store.collector || {}) },
       feeds: Array.isArray(store.feeds) ? store.feeds : [],
       items: Array.isArray(store.items) ? store.items : [],
-    };
+    });
   } catch {
     return emptyStore();
   }
+}
+
+function sanitizeStoredTranslationIntegrity(store) {
+  let sanitizedCount = 0;
+  const items = store.items.map((item) => {
+    if (
+      item?.translationStatus !== "translated" ||
+      (!hasUnicodeReplacementCharacter(item.translatedText) &&
+        !hasUnicodeReplacementCharacter(item.translatedTitle))
+    ) {
+      return item;
+    }
+    sanitizedCount += 1;
+    return {
+      ...item,
+      translatedTitle: "",
+      translatedText: "",
+      translatedAt: "",
+      translationStatus: "pending",
+      translationError:
+        "저장된 번역에 유니코드 대체 문자가 있어 재번역 대기열로 이동했습니다.",
+    };
+  });
+  if (!sanitizedCount) return store;
+  return {
+    ...store,
+    collector: {
+      ...store.collector,
+      translationLastError: `${sanitizedCount}개 항목의 깨진 번역을 재시도 대기열로 이동했습니다.`,
+    },
+    items,
+  };
 }
 
 function writeStore(store) {
@@ -667,12 +702,13 @@ function latestAntigravityTranslationModel(options) {
   const catalogModels = Array.isArray(options.antigravityModelCatalog?.models)
     ? options.antigravityModelCatalog.models.filter((item) => item?.selectable && item?.name)
     : [];
-  return (
-    catalogModels[0]?.name ||
-    options.selected?.model ||
-    options.antigravity?.vertex?.model ||
-    ANTIGRAVITY_FALLBACK_MODEL
-  );
+  return selectAntigravityModelForReasoning(catalogModels, {
+    currentModel:
+      options.agentSettings?.settings?.providers?.[ANTIGRAVITY_PROVIDER_ID]?.model ||
+      options.selected?.model ||
+      options.antigravity?.defaultModel ||
+      ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+  });
 }
 
 function codexTranslationModel(options) {
@@ -700,25 +736,16 @@ function codexTranslationModel(options) {
 function antigravityTranslationModel(options) {
   const status = options.antigravity || {};
   if (!status.ready) {
-    throw new Error(status.detail || status.error || "Antigravity SDK가 번역에 사용할 준비가 되지 않았습니다.");
-  }
-
-  const project = status.vertex?.project || "";
-  const location = status.vertex?.location || "global";
-  if (!project) {
-    throw new Error("Antigravity SDK 번역을 위한 Vertex project가 설정되지 않았습니다.");
+    throw new Error(status.detail || status.error || "Antigravity CLI가 번역에 사용할 준비가 되지 않았습니다.");
   }
 
   const model = latestAntigravityTranslationModel(options);
   return {
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
+    providerLabel: "Antigravity CLI",
     model,
-    modelLabel: `Antigravity SDK · ${location}/${model}`,
+    modelLabel: `Antigravity CLI · ${model}`,
     reasoning: ANTIGRAVITY_TRANSLATION_REASONING,
-    thinkingLevel: ANTIGRAVITY_TRANSLATION_THINKING_LEVEL,
-    project,
-    location,
   };
 }
 
@@ -784,6 +811,10 @@ function compactTranslationText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function hasUnicodeReplacementCharacter(value) {
+  return String(value || "").includes(UNICODE_REPLACEMENT_CHARACTER);
+}
+
 function sameTranslationText(left, right) {
   const normalizedLeft = compactTranslationText(left).toLocaleLowerCase("en-US");
   const normalizedRight = compactTranslationText(right).toLocaleLowerCase("en-US");
@@ -807,6 +838,9 @@ export function normalizeNewsFeedTranslationCandidate(item = {}, translation = {
 
   const issues = [];
   if (sourceBody && !bodyKo) issues.push("bodyKo가 비어 있습니다");
+  if (bodyKo && hasUnicodeReplacementCharacter(bodyKo)) {
+    issues.push("bodyKo에 유니코드 대체 문자가 포함되어 있습니다");
+  }
   if (sourceBody && bodyKo && likelyNeedsKoreanTranslation(sourceBody) && !hasKoreanText(bodyKo)) {
     issues.push("bodyKo에 한국어가 없습니다");
   }
@@ -881,6 +915,8 @@ function runCodexTranslationBatch(items, modelInfo) {
         NO_COLOR: "1",
       },
     });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
 
     const timer = setTimeout(() => {
       if (settled) return;
@@ -891,11 +927,11 @@ function runCodexTranslationBatch(items, modelInfo) {
     }, TRANSLATION_TIMEOUT_MS);
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      stdout += chunk;
     });
 
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr += chunk;
     });
 
     child.on("error", (error) => {
@@ -929,10 +965,8 @@ async function runAntigravityTranslationBatch(items, modelInfo) {
   const result = await runAntigravityGenerate({
     prompt: translationPrompt(items),
     model: modelInfo.model,
-    project: modelInfo.project,
-    location: modelInfo.location,
-    webGrounding: false,
-    thinkingLevel: modelInfo.thinkingLevel,
+    approval: "default",
+    timeoutMs: TRANSLATION_TIMEOUT_MS,
   });
   return parseJsonPayload(result.answer);
 }

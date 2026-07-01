@@ -66,6 +66,21 @@ test("news feed translation harness rejects English-only paraphrases", () => {
   assert.match(candidate.error, /한국어가 없습니다/);
 });
 
+test("news feed translation harness rejects Unicode replacement characters", () => {
+  const candidate = normalizeNewsFeedTranslationCandidate(
+    {
+      title: "FRANCE TO HOLD FIRST ROUND OF PRESIDENTIAL ELECTION APRIL 18, 2027",
+      originalText: "FRANCE TO HOLD FIRST ROUND OF PRESIDENTIAL ELECTION APRIL 18, 2027",
+    },
+    {
+      bodyKo: "프랑스가 2027년 4월 18일에 대통령 선거 1차 투표를 실시\uFFFD\uFFFD 예정이다.",
+    },
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /유니코드 대체 문자/);
+});
+
 test("news feed parser preserves RSS item URLs as sourceUrl", () => {
   const parsed = parseFeedXml(
     `<?xml version="1.0"?>

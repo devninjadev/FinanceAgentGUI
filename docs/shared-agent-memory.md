@@ -1,6 +1,6 @@
 # Shared Agent Memory
 
-FinanceAgentGUI keeps runtime chat and task memory in a local-only store so Codex CLI and Antigravity SDK can read and write the same records without depending on hidden product chat history.
+FinanceAgentGUI keeps runtime chat and task memory in a local-only store so Codex CLI and Antigravity CLI can read and write the same records without depending on hidden product chat history.
 
 ## Runtime Files
 
@@ -83,7 +83,7 @@ Content-Type: application/json
   "provider": "codex-cli",
   "screen": "settings",
   "title": "공유 메모리 설계",
-  "summary": "Codex CLI와 Antigravity SDK가 같은 로컬 메모리 API를 쓰도록 결정했다.",
+  "summary": "Codex CLI와 Antigravity CLI가 같은 로컬 메모리 API를 쓰도록 결정했다.",
   "decisions": ["기록 파일은 Git에서 제외한다."],
   "openQuestions": [],
   "tags": ["memory", "codex", "antigravity"],
@@ -104,7 +104,7 @@ POST /api/memory/context
 Content-Type: application/json
 
 {
-  "provider": "antigravity-sdk",
+  "provider": "antigravity-cli",
   "screen": "news-feed",
   "query": "News Feed 설정과 메모리 저장 정책",
   "limit": 6

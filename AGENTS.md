@@ -66,7 +66,7 @@ instructions should be written relative to this project folder.
 
 ## Shared Local Memory
 
-- Codex CLI and Antigravity SDK share the same local memory contract.
+- Codex CLI and Antigravity CLI share the same local memory contract.
 - Records live in `data/shared-memory/events.jsonl`; the latest index is `data/shared-memory/index.json`.
 - The generated prompt context lives in `data/shared-memory/memory_summary.md` and is built from two layers: a user memory layer and an external memory layer.
 - User memory is a loose notebook, not a rigid profile table. Timestamped entries are compressed once per local day; failed compression retries one hour later and is skipped if it misses the next day's compression window.
@@ -96,7 +96,7 @@ instructions should be written relative to this project folder.
 - Staged magazine generation must compare candidates against recent uploaded articles before publish. Reusing the same News Feed id or the same non-image external/source URL anchor is a hard novelty failure. Reusing the same primary World Memory event id is continuity context, not a standalone veto; it becomes a failure only when the article also stays in the same `storyFamily` without a fresh News Feed or source URL anchor. Independent delta is not whole-article embedding distance and not a changed title, image, or surface `storyFamily`; it needs a new post-cutoff News Feed item, official/external source URL, number, policy execution, price reaction, or company action. New articles should include `metadata.eventSignature` as a compact primary claimlet (`role`, `actor`, `action`, `object[]`, `time`, `marketMechanism`, `sourceIds[]`), or `metadata.eventSignatures[]` with exactly one primary card plus optional supporting cards. Novelty embedding should use the primary claimlet plus source titles and `noveltyNote`, not the article body. Ambiguous cases should be judged by an LLM novelty classification of `same_event`, `independent_followup`, or `unrelated`.
 - Run `node scripts/magazine_article_style_check.mjs` before publishing generated magazine articles; use `--strict` when replacing production-like articles.
 - Magazine is a World Memory adjunct feature and defaults off. The switch persists to `config/magazine.user.json` with tracked defaults in `config/magazine.defaults.json`; do not store this setting in browser memory.
-- The local server starts the magazine scheduler only when both World Memory and Magazine are enabled. It runs about once per hour, picks 0-3 articles per cycle, and generates them one by one with `replace=false`; runtime state lives in `data/magazine/scheduler-state.json`.
+- The local server starts the magazine scheduler only when both World Memory and Magazine are enabled. It defaults to a 6-hour cycle, can be adjusted from 1-10 hours in Settings, picks 0-3 articles per cycle, and generates them one by one with `replace=false`; runtime state lives in `data/magazine/scheduler-state.json`.
 - Magazine unread state is coarse page-open state in `data/magazine/read-state.json`; do not add per-article read flags unless the product direction changes.
 - Reader follow-up preferences are multi-select toggles stored in `data/magazine/editorial-preferences.json` through `/api/magazine/preferences`; use active selections and their 30/90/180/365-day decayed `effectiveSignals` as soft editorial guidance, not a permanent override.
 - Magazine article comments are stored per article in `comments.json`; user comments are authored as `사용자`, and the one-level AI reply is authored as `매거진 편집자 AI`.
@@ -129,7 +129,7 @@ The app is a local GitHub-delivered console whose environment may be repaired by
 
 - If no provider is ready, explain the current provider state and the next setup action.
 - Codex/GPT providers should verify CLI or API availability, model catalog, approval policy, sandbox settings, and basic chat readiness.
-- Antigravity/Gemini providers should verify SDK availability, Gemini API key or Vertex ADC, project, region, API enablement, model access, and smoke-probed model names.
+- Antigravity providers should verify the `agy` CLI path, Google OAuth readiness, model catalog access, selected model, and security preset. If the CLI or OAuth session is missing or invalid, fail the selected Antigravity action instead of using another authentication or provider path.
 - Do not silently fall back to another provider when the selected provider is not ready; show cause and recovery choices.
 - Installation, update, authentication, and settings changes require user confirmation.
 

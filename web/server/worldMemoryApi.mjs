@@ -312,9 +312,9 @@ function defaultModelPolicy() {
       role: "collection + report generation",
     },
     antigravity: {
-      provider: "antigravity-sdk",
-      providerLabel: "Antigravity SDK",
-      model: "gemini-3.5-flash",
+      provider: "antigravity-cli",
+      providerLabel: "Antigravity CLI",
+      model: "Gemini 3.5 Flash (Medium)",
       modelLabel: "latest available Antigravity model",
       reasoning: "medium",
       role: "collection + report generation",
@@ -325,13 +325,13 @@ function defaultModelPolicy() {
 }
 
 function normalizeWorldMemoryProviderSetting(value) {
-  return value === "codex-cli" || value === "antigravity-sdk" ? value : "default";
+  return value === "codex-cli" || value === "antigravity-cli" ? value : "default";
 }
 
 function resolvePreferredWorldMemoryProvider(setting, options = {}) {
   const configuredProvider = normalizeWorldMemoryProviderSetting(setting);
   if (configuredProvider !== "default") return configuredProvider;
-  return options?.selected?.provider === "antigravity-sdk" ? "antigravity-sdk" : "codex-cli";
+  return options?.selected?.provider === "antigravity-cli" ? "antigravity-cli" : "codex-cli";
 }
 
 function resolveWorldMemoryModelPolicy() {
@@ -350,8 +350,8 @@ function resolveWorldMemoryModelPolicy() {
       : [];
     const antigravityModel =
       antigravityModels[0]?.name ||
-      options.antigravity?.vertex?.model ||
-      options.agentSettings?.settings?.providers?.["antigravity-sdk"]?.model ||
+      options.antigravity?.defaultModel ||
+      options.agentSettings?.settings?.providers?.["antigravity-cli"]?.model ||
       fallback.antigravity.model;
 
     return {
@@ -372,9 +372,7 @@ function resolveWorldMemoryModelPolicy() {
         model: antigravityModel,
         modelLabel: antigravityModels[0]?.displayName || antigravityModel,
         reasoning: "medium",
-        location: options.antigravity?.vertex?.location || "",
-        project: options.antigravity?.vertex?.project || "",
-        projectConfigured: Boolean(options.antigravity?.vertex?.project),
+        credentialMode: options.antigravity?.credentialMode || "",
       },
       resolvedAt: nowIso(),
       source: "runtime-options",
@@ -1197,23 +1195,21 @@ function renderReportHtmlDocument(view) {
 
 async function runWorldMemoryModelText({ prompt, modelPolicy, taskType }) {
   const preferredProvider =
-    modelPolicy?.preferredProvider === "antigravity-sdk" ? "antigravity-sdk" : "codex-cli";
+    modelPolicy?.preferredProvider === "antigravity-cli" ? "antigravity-cli" : "codex-cli";
 
-  if (preferredProvider === "antigravity-sdk") {
-    if (!modelPolicy?.antigravity?.available || !modelPolicy.antigravity.project) {
-      throw new Error("월드 메모리 관리 모델로 선택된 Antigravity SDK를 사용할 수 없습니다.");
+  if (preferredProvider === "antigravity-cli") {
+    if (!modelPolicy?.antigravity?.available || modelPolicy.antigravity.credentialMode !== "google-oauth") {
+      throw new Error("월드 메모리 관리 모델로 선택된 Antigravity CLI를 사용할 수 없습니다.");
     }
     const result = await runAntigravityGenerate({
       prompt,
       model: modelPolicy.antigravity.model,
-      project: modelPolicy.antigravity.project,
-      location: modelPolicy.antigravity.location || "global",
-      webGrounding: false,
-      thinkingLevel: "MEDIUM",
+      approval: "default",
+      timeoutMs: WORLD_MEMORY_MODEL_TIMEOUT_MS,
     });
     return {
       answer: String(result.answer || "").trim(),
-      provider: "antigravity-sdk",
+      provider: "antigravity-cli",
       model: result.model || modelPolicy.antigravity.model,
       reasoning: "medium",
       elapsedMs: result.elapsedMs,

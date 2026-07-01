@@ -23,6 +23,10 @@ import {
   modelGroupsFromAntigravityCatalog,
   personaModeOptions,
 } from "./agent/agentOptions.js";
+import {
+  ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+  selectAntigravityModelForReasoning,
+} from "./agent/antigravityModelSelection.js";
 import { attachmentsSummary } from "./agent/attachments.js";
 import { messageToHistoryText, parseSseEvent } from "./agent/chatProtocol.js";
 import { buildPromptWithArticleContext } from "./arca/articleContext.js";
@@ -109,7 +113,7 @@ const PortfolioWorkspace = React.lazy(() =>
 
 const initialChatMessages = [];
 const CODEX_PROVIDER_ID = "codex-cli";
-const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
 const agentProviderIds = [CODEX_PROVIDER_ID, ANTIGRAVITY_PROVIDER_ID];
 function normalizeAgentModelProvider(value) {
   return value === CODEX_PROVIDER_ID || value === ANTIGRAVITY_PROVIDER_ID ? value : "default";
@@ -427,7 +431,7 @@ function magazineArticleCountDecisionLabel(status) {
   if (!decision) return "";
   const targetCount = Number.isFinite(Number(decision.targetCount)) ? Number(decision.targetCount) : 0;
   const maxCount = Number.isFinite(Number(decision.maxCount)) ? Number(decision.maxCount) : 3;
-  const provider = decision.provider === "antigravity-sdk" ? "Antigravity" : decision.provider === "codex-cli" ? "Codex" : "";
+  const provider = decision.provider === "antigravity-cli" ? "Antigravity" : decision.provider === "codex-cli" ? "Codex" : "";
   const suffix = decision.fallback ? "fallback" : provider;
   const reason = String(decision.reason || "").trim();
   return [
@@ -1001,7 +1005,7 @@ function normalizeMagazineClipboardBodyHtml(node) {
 }
 
 function magazineClipboardProviderName(provider) {
-  return provider === "antigravity-sdk" ? "Antigravity" : "Codex";
+  return provider === "antigravity-cli" ? "Antigravity" : "Codex";
 }
 
 function magazineClipboardAttributionText(provider) {
@@ -1180,6 +1184,7 @@ const defaultMagazineSettings = {
   enabled: false,
   worldMemoryEnabled: false,
   writingProvider: "default",
+  schedulerIntervalHours: 6,
   disabledReason: "",
   configPath: "config/magazine.user.json",
   defaultConfigPath: "config/magazine.defaults.json",
@@ -1187,6 +1192,7 @@ const defaultMagazineSettings = {
     version: 1,
     enabled: false,
     writingProvider: "default",
+    schedulerIntervalHours: 6,
   },
 };
 
@@ -2102,8 +2108,10 @@ function App() {
   const newsFeedTranslationModelLabel = useMemo(() => {
     if (!agentOptionsReady) return "";
     if (agentProvider === ANTIGRAVITY_PROVIDER_ID) {
-      const translationModel = antigravityCatalogGroups[0]?.slug || selectedModelGroup?.slug || model || "gemini-3.5-flash";
-      return `Antigravity SDK · ${translationModel} · minimal`;
+      const translationModel = selectAntigravityModelForReasoning(antigravityCatalogGroups, {
+        currentModel: selectedModelGroup?.slug || model || ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+      });
+      return `Antigravity CLI · ${translationModel}`;
     }
 
     const translationGroup = modelGroups[0] || selectedModelGroup;
@@ -2390,8 +2398,8 @@ function App() {
     }
     if (runtime.provider === ANTIGRAVITY_PROVIDER_ID) {
       return runtime.selectedProvider?.available
-        ? `Antigravity SDK · ${runtime.selectedApproval?.label || "Default"} · us-central1/${runtime.selectedModelGroup?.slug || "gemini-2.5-flash"}`
-        : runtime.selectedProvider?.installCommand || "python3 -m pip install --upgrade google-antigravity";
+        ? `agy --model "${runtime.selectedModelGroup?.slug || "Gemini 3.5 Flash (Medium)"}" · ${runtime.selectedApproval?.label || "Default"}`
+        : runtime.selectedProvider?.installCommand || "curl -fsSL https://antigravity.google/cli/install.sh | bash";
     }
     const approvalFlag = runtime.selectedApproval?.cli || "";
     const modelFlag = runtime.selectedModelGroup?.slug ? `-m ${runtime.selectedModelGroup.slug}` : "";
@@ -2438,7 +2446,7 @@ function App() {
       provider: runtimeProvider,
       selectedProvider: providerStatus,
       providerLabel: agentOptionsReady
-        ? providerStatus?.label || (runtimeProvider === ANTIGRAVITY_PROVIDER_ID ? "Antigravity SDK" : "Codex CLI")
+        ? providerStatus?.label || (runtimeProvider === ANTIGRAVITY_PROVIDER_ID ? "Antigravity CLI" : "Codex CLI")
         : "에이전트",
       providerAvailable: agentOptionsReady && Boolean(providerStatus?.available),
       icon: agentOptionsReady && runtimeProvider === ANTIGRAVITY_PROVIDER_ID ? antigravityLogo : codexLogo,
@@ -3010,6 +3018,32 @@ function App() {
     }
   }
 
+  async function updateMagazineSchedulerInterval(schedulerIntervalHours) {
+    if (magazineSettingsSaving) return;
+    const safeIntervalHours = Math.max(1, Math.min(10, Math.round(Number(schedulerIntervalHours || 6))));
+    setMagazineSettingsSaving(true);
+    setMagazineSettingsError("");
+    try {
+      const response = await fetch("/api/magazine/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ schedulerIntervalHours: safeIntervalHours }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const nextSettings = { ...defaultMagazineSettings, ...payload };
+      setMagazineSettings(nextSettings);
+      await refreshMagazineStatus();
+    } catch (error) {
+      setMagazineSettingsError(error.message);
+    } finally {
+      setMagazineSettingsSaving(false);
+    }
+  }
+
   async function loadArcaNotifications({ quiet = false } = {}) {
     if (!quiet) setArcaNotificationBusy(true);
     try {
@@ -3146,13 +3180,16 @@ function App() {
 
   async function executeWorldMemoryAgentAction(proposal) {
     if (!proposal?.action || worldMemoryActionBusy) return;
-    const label = proposal.label || worldMemoryActionCatalog[proposal.action]?.label || proposal.action;
-    const needsConfirm = proposal.riskLevel !== "low";
-    if (needsConfirm && typeof window !== "undefined") {
-      const ok = window.confirm(`월드메모리 작업을 실행할까요?\n\n${label}\n위험도: ${proposal.riskLevel}`);
-      if (!ok) return;
-    }
-    const result = await runWorldMemoryAction(proposal.action, proposal.options || {});
+    const options =
+      proposal.options && typeof proposal.options === "object"
+        ? proposal.options
+        : proposal.params && typeof proposal.params === "object"
+          ? proposal.params
+          : proposal.raw?.params && typeof proposal.raw.params === "object"
+            ? proposal.raw.params
+            : {};
+    const result = await runWorldMemoryAction(proposal.action, options);
+    if (!result?.ok) return;
     if (result?.ok && worldMemoryActionsNeedingReportRefresh.has(proposal.action)) {
       await runWorldMemoryAction("refreshReport", {
         sourceAction: proposal.action,
@@ -4232,8 +4269,8 @@ function App() {
     }
     if (agentProvider === ANTIGRAVITY_PROVIDER_ID) {
       return selectedProvider?.available
-        ? `Antigravity SDK · ${selectedApproval?.label || "Default"} · us-central1/${selectedModelGroup?.slug || "gemini-2.5-flash"}`
-        : selectedProvider?.installCommand || "python3 -m pip install --upgrade google-antigravity";
+        ? `agy --model "${selectedModelGroup?.slug || "Gemini 3.5 Flash (Medium)"}" · ${selectedApproval?.label || "Default"}`
+        : selectedProvider?.installCommand || "curl -fsSL https://antigravity.google/cli/install.sh | bash";
     }
     const approvalFlag = selectedApproval?.cli || "";
     const modelFlag = selectedModelGroup?.slug ? `-m ${selectedModelGroup.slug}` : "";
@@ -5177,7 +5214,7 @@ function App() {
 
     return {
       id: providerId,
-      label: providerStatus.label || (providerId === ANTIGRAVITY_PROVIDER_ID ? "Antigravity SDK" : "Codex CLI"),
+      label: providerStatus.label || (providerId === ANTIGRAVITY_PROVIDER_ID ? "Antigravity CLI" : "Codex CLI"),
       enabled: isAgentProviderEnabled(providerId),
       toggleDisabled: isAgentProviderEnabled(providerId) && enabledAgentProviderIds.length <= 1,
       status: providerStatus,
@@ -5278,6 +5315,7 @@ function App() {
               onWorldMemoryManagementProviderChange={updateWorldMemoryManagementProvider}
               onToggleMagazineEnabled={updateMagazineEnabled}
               onMagazineWritingProviderChange={updateMagazineWritingProvider}
+              onMagazineSchedulerIntervalChange={updateMagazineSchedulerInterval}
               onReloadWorldMemory={loadWorldMemoryStatus}
               arcaAuth={{
                 status: arcaAuthStatus,

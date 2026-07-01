@@ -70,12 +70,12 @@ export const fallbackProviderOptions = [
     detail: "Codex CLI 확인 중",
   },
   {
-    id: "antigravity-sdk",
-    label: "Antigravity SDK",
+    id: "antigravity-cli",
+    label: "Antigravity CLI",
     available: false,
     status: "checking",
-    detail: "Antigravity SDK 확인 중",
-    installCommand: "python3 -m pip install --upgrade google-antigravity",
+    detail: "Antigravity CLI 확인 중",
+    installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
   },
 ];
 
@@ -104,7 +104,7 @@ export const emptyAgentSettings = {
     "codex-cli": {
       enabled: true,
     },
-    "antigravity-sdk": {
+    "antigravity-cli": {
       enabled: false,
     },
   },
@@ -126,8 +126,8 @@ export const antigravityPolicyOptions = [
   {
     id: "turbo",
     label: "Turbo mode",
-    cli: "",
-    detail: "SDK 도구 호출을 최대한 자동 승인하는 고속 모드입니다. 신뢰한 작업에만 사용해야 합니다.",
+    cli: "--dangerously-skip-permissions",
+    detail: "Antigravity CLI 권한 확인을 건너뛰는 고속 모드입니다. 신뢰한 작업에만 사용해야 합니다.",
   },
   {
     id: "custom",
@@ -176,17 +176,17 @@ export const fallbackModelGroups = [
 
 export const antigravityModelGroups = [
   {
-    id: "gemini-2.5-flash",
-    slug: "gemini-2.5-flash",
-    label: "2.5 Flash",
-    displayName: "Gemini 2.5 Flash (Vertex)",
-    defaultReasoningLevel: "diagnostic",
+    id: "Gemini 3.5 Flash (Medium)",
+    slug: "Gemini 3.5 Flash (Medium)",
+    label: "3.5 Flash",
+    displayName: "Gemini 3.5 Flash (Medium)",
+    defaultReasoningLevel: "medium",
     reasoningLevels: [
       {
-        id: "diagnostic",
-        label: "진단",
+        id: "medium",
+        label: "보통",
         cli: "",
-        detail: "SDK 준비 전 fallback 진단 모드입니다.",
+        detail: "Antigravity CLI 기본 모델입니다.",
       },
     ],
     speedOptions: [standardSpeedOption],
@@ -238,11 +238,9 @@ export function modelGroupsFromAntigravityCatalog(catalog) {
       id: item.name,
       slug: item.name,
       label: labelAntigravityModel(item.name),
-      displayName: `Gemini ${labelAntigravityModel(item.name)}`,
-      description: item.sdkKnown
-        ? "Antigravity SDK known model and Vertex-listed in the configured region."
-        : "Vertex-listed Gemini model in the configured region.",
-      defaultReasoningLevel: "medium",
+      displayName: item.displayName || item.name,
+      description: "Antigravity CLI model returned by agy models.",
+      defaultReasoningLevel: item.reasoningLevel?.toLowerCase() || "medium",
       reasoningLevels: antigravityReasoningLevels,
       speedOptions: [standardSpeedOption],
     }));

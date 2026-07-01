@@ -91,7 +91,7 @@ export function AgentSidebar({
             className={
               !agentOptionsReady
                 ? "logo-orbit logo-orbit-loading"
-                : agentProvider === "antigravity-sdk"
+                : agentProvider === "antigravity-cli"
                   ? "logo-orbit logo-orbit-antigravity"
                   : "logo-orbit"
             }

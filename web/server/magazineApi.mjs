@@ -45,32 +45,17 @@ const WORLD_MEMORY_VECTOR_POLICY = {
   retrievalMode: "world_memory_cli.py semantic-search vector similarity",
 };
 const MAGAZINE_CODEX_PROVIDER_ID = "codex-cli";
-const MAGAZINE_ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const MAGAZINE_ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
 
 const MAGAZINE_GENERATION_TIMEOUT_MS = 31 * 60 * 1000;
-const MAGAZINE_SCHEDULER_INTERVAL_MS = clampInteger(
-  process.env.FINANCE_AGENT_MAGAZINE_INTERVAL_MS,
-  60_000,
-  24 * 60 * 60 * 1000,
-  60 * 60 * 1000
-);
-const MAGAZINE_SCHEDULER_INITIAL_DELAY_MS = clampInteger(
-  process.env.FINANCE_AGENT_MAGAZINE_INITIAL_DELAY_MS,
-  0,
-  MAGAZINE_SCHEDULER_INTERVAL_MS,
-  MAGAZINE_SCHEDULER_INTERVAL_MS
-);
+const MAGAZINE_SCHEDULER_DEFAULT_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const MAGAZINE_SCHEDULER_MIN_INTERVAL_MS = 60_000;
+const MAGAZINE_SCHEDULER_MAX_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAGAZINE_SCHEDULER_MAX_PER_CYCLE = clampInteger(
   process.env.FINANCE_AGENT_MAGAZINE_MAX_PER_CYCLE,
   0,
   3,
   3
-);
-const MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS = clampInteger(
-  process.env.FINANCE_AGENT_MAGAZINE_RETRY_INTERVAL_MS,
-  60_000,
-  MAGAZINE_SCHEDULER_INTERVAL_MS,
-  Math.min(15 * 60 * 1000, MAGAZINE_SCHEDULER_INTERVAL_MS)
 );
 const MAGAZINE_SCHEDULER_MAX_MANUAL_DELAY_MS = 24 * 60 * 60 * 1000;
 
@@ -1420,9 +1405,44 @@ function clampInteger(value, min, max, fallback) {
   return Math.max(min, Math.min(max, number));
 }
 
+function magazineSchedulerIntervalMs() {
+  const settingsIntervalMs = readMagazineSettings().schedulerIntervalHours * 60 * 60 * 1000;
+  const fallback = Number.isFinite(settingsIntervalMs) && settingsIntervalMs > 0
+    ? settingsIntervalMs
+    : MAGAZINE_SCHEDULER_DEFAULT_INTERVAL_MS;
+  return clampInteger(
+    process.env.FINANCE_AGENT_MAGAZINE_INTERVAL_MS,
+    MAGAZINE_SCHEDULER_MIN_INTERVAL_MS,
+    MAGAZINE_SCHEDULER_MAX_INTERVAL_MS,
+    fallback
+  );
+}
+
+function magazineSchedulerRetryIntervalMs(intervalMs = magazineSchedulerIntervalMs()) {
+  return clampInteger(
+    process.env.FINANCE_AGENT_MAGAZINE_RETRY_INTERVAL_MS,
+    MAGAZINE_SCHEDULER_MIN_INTERVAL_MS,
+    intervalMs,
+    Math.min(15 * 60 * 1000, intervalMs)
+  );
+}
+
+function magazineSchedulerInitialDelayMs(intervalMs = magazineSchedulerIntervalMs()) {
+  return clampInteger(
+    process.env.FINANCE_AGENT_MAGAZINE_INITIAL_DELAY_MS,
+    0,
+    intervalMs,
+    intervalMs
+  );
+}
+
 function safeGeneratorCliValue(value, fallback, pattern = /^[A-Za-z0-9._:-]+$/) {
   const text = cleanText(value || "");
   return pattern.test(text) ? text : fallback;
+}
+
+function safeGeneratorModelValue(value, fallback) {
+  return safeGeneratorCliValue(value, fallback, /^[\w .:/()+-]+$/);
 }
 
 function truncateSchedulerText(value, limit = 260) {
@@ -1448,7 +1468,7 @@ function normalizeAgentProviderSettings(raw = {}) {
   const source = raw && typeof raw === "object" ? raw : {};
   return {
     approval: safeGeneratorCliValue(source.approval || source.approvalPolicy || "", ""),
-    model: safeGeneratorCliValue(source.model || "", ""),
+    model: safeGeneratorModelValue(source.model || "", ""),
     reasoning: safeGeneratorCliValue(source.reasoning || source.reasoningEffort || "", ""),
     speed: safeGeneratorCliValue(source.speed || source.serviceTier || "standard", "standard"),
   };
@@ -1485,7 +1505,7 @@ async function readMagazineSchedulerAgent() {
   const useAntigravity = provider === MAGAZINE_ANTIGRAVITY_PROVIDER_ID;
   return {
     provider,
-    model: settings.model || (useAntigravity ? "gemini-3.5-flash" : "gpt-5.5"),
+    model: settings.model || (useAntigravity ? "Gemini 3.5 Flash (Medium)" : "gpt-5.5"),
     reasoning: settings.reasoning || (useAntigravity ? "medium" : "high"),
     approval: useAntigravity ? settings.approval || "turbo" : "never",
     speed: settings.speed || "standard",
@@ -1871,7 +1891,7 @@ function runMagazineGenerator(body = {}, action = "generateWithCodex") {
   const count = clampInteger(body.count, 1, 10, 1);
   const requestedCount = count;
   const replace = body.replace !== false;
-  const model = safeGeneratorCliValue(body.model || (useAntigravity ? "gemini-3.5-flash" : ""), "");
+  const model = safeGeneratorModelValue(body.model || (useAntigravity ? "Gemini 3.5 Flash (Medium)" : ""), "");
   const reasoning = safeGeneratorCliValue(body.reasoning || (useAntigravity ? "medium" : ""), "");
   const sandbox = safeGeneratorCliValue(body.sandbox || "", "", /^[A-Za-z-]+$/);
   const approval = safeGeneratorCliValue(body.approval || (useAntigravity ? "turbo" : "never"), useAntigravity ? "turbo" : "never", /^[A-Za-z-]+$/);
@@ -1950,21 +1970,36 @@ function magazineSchedulerDisabled() {
   );
 }
 
+function magazineSchedulerHasActiveWork() {
+  return Boolean(
+    magazineSchedulerRuntime.running ||
+      magazineSchedulerRuntime.currentCycle ||
+      magazineSchedulerRuntime.activeCycle ||
+      magazineSchedulerRuntime.manualStartRequestedAt ||
+      activeMagazineGenerationLock()
+  );
+}
+
 function publicMagazineSchedulerState() {
   const settings = publicMagazineSettingsSnapshot();
   const generationLock = activeMagazineGenerationLock();
+  const intervalMs = magazineSchedulerIntervalMs();
+  const retryIntervalMs = magazineSchedulerRetryIntervalMs(intervalMs);
+  const initialDelayMs = magazineSchedulerInitialDelayMs(intervalMs);
   return {
     enabled: !magazineSchedulerDisabled(),
     settings,
     started: magazineSchedulerRuntime.started,
     startedAt: magazineSchedulerRuntime.startedAt,
     running: magazineSchedulerRuntime.running,
-    intervalMs: MAGAZINE_SCHEDULER_INTERVAL_MS,
-    intervalMinutes: Math.round((MAGAZINE_SCHEDULER_INTERVAL_MS / 60000) * 100) / 100,
-    retryIntervalMs: MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS,
-    retryIntervalMinutes: Math.round((MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS / 60000) * 100) / 100,
-    retryWindowMs: MAGAZINE_SCHEDULER_INTERVAL_MS,
-    initialDelayMs: MAGAZINE_SCHEDULER_INITIAL_DELAY_MS,
+    intervalMs,
+    intervalMinutes: Math.round((intervalMs / 60000) * 100) / 100,
+    intervalHours: Math.round((intervalMs / (60 * 60 * 1000)) * 100) / 100,
+    intervalSource: process.env.FINANCE_AGENT_MAGAZINE_INTERVAL_MS ? "env" : "settings",
+    retryIntervalMs,
+    retryIntervalMinutes: Math.round((retryIntervalMs / 60000) * 100) / 100,
+    retryWindowMs: intervalMs,
+    initialDelayMs,
     maxPerCycle: MAGAZINE_SCHEDULER_MAX_PER_CYCLE,
     nextRunAt: magazineSchedulerRuntime.nextRunAt,
     nextRetryAt: magazineSchedulerRuntime.nextRetryAt,
@@ -2007,7 +2042,8 @@ function scheduleMagazineTimer(delayOverrideMs = null) {
   if (!magazineSchedulerRuntime.started || magazineSchedulerDisabled()) return;
 
   const now = Date.now();
-  const nextRunMs = parseTimestamp(magazineSchedulerRuntime.nextRunAt) || now + MAGAZINE_SCHEDULER_INTERVAL_MS;
+  const intervalMs = magazineSchedulerIntervalMs();
+  const nextRunMs = parseTimestamp(magazineSchedulerRuntime.nextRunAt) || now + intervalMs;
   const retryMs = parseTimestamp(magazineSchedulerRuntime.nextRetryAt);
   let targetMs = nextRunMs;
   if (retryMs > now) targetMs = Math.min(targetMs, retryMs);
@@ -2022,7 +2058,7 @@ function scheduleMagazineTimer(delayOverrideMs = null) {
   magazineSchedulerRuntime.timer.unref?.();
 }
 
-function scheduleNextMagazineCycle(delayMs = MAGAZINE_SCHEDULER_INTERVAL_MS) {
+function scheduleNextMagazineCycle(delayMs = null) {
   if (!magazineSchedulerRuntime.started || magazineSchedulerDisabled()) {
     clearMagazineSchedulerTimer();
     magazineSchedulerRuntime.nextRunAt = "";
@@ -2031,7 +2067,8 @@ function scheduleNextMagazineCycle(delayMs = MAGAZINE_SCHEDULER_INTERVAL_MS) {
     void writeMagazineSchedulerState();
     return;
   }
-  const safeDelayMs = clampInteger(delayMs, 0, 24 * 60 * 60 * 1000, MAGAZINE_SCHEDULER_INTERVAL_MS);
+  const intervalMs = magazineSchedulerIntervalMs();
+  const safeDelayMs = clampInteger(delayMs, 0, MAGAZINE_SCHEDULER_MAX_INTERVAL_MS, intervalMs);
   magazineSchedulerRuntime.nextRunAt = nowIso(new Date(Date.now() + safeDelayMs));
   magazineSchedulerRuntime.nextRetryAt = "";
   magazineSchedulerRuntime.activeCycle = null;
@@ -2118,7 +2155,7 @@ export async function requestImmediateMagazineSchedulerRun(options = {}) {
       error: error.message,
     };
     await writeMagazineSchedulerState();
-    scheduleNextMagazineCycle(MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    scheduleNextMagazineCycle(magazineSchedulerRetryIntervalMs());
   });
 
   return publicMagazineSchedulerState();
@@ -2126,21 +2163,23 @@ export async function requestImmediateMagazineSchedulerRun(options = {}) {
 
 function canRetryMagazineCycle(cycle) {
   const deadlineMs = parseTimestamp(cycle?.deadlineAt);
-  return Boolean(deadlineMs && Date.now() + MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS < deadlineMs);
+  const retryIntervalMs = magazineSchedulerRetryIntervalMs();
+  return Boolean(deadlineMs && Date.now() + retryIntervalMs < deadlineMs);
 }
 
 function nextDelayAfterClosedCycle(cycle) {
   const deadlineMs = parseTimestamp(cycle?.deadlineAt);
+  const retryIntervalMs = magazineSchedulerRetryIntervalMs();
   if (deadlineMs && Date.now() < deadlineMs) {
-    return Math.max(0, deadlineMs - Date.now()) + MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS;
+    return Math.max(0, deadlineMs - Date.now()) + retryIntervalMs;
   }
-  return MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS;
+  return retryIntervalMs;
 }
 
 async function buildMagazineCycle({ trigger, scheduledAt, sourceCycle = null }) {
   const now = nowIso();
   const baseScheduledAt = sourceCycle?.scheduledAt || scheduledAt || magazineSchedulerRuntime.nextRunAt || now;
-  const deadlineAt = sourceCycle?.deadlineAt || addMs(baseScheduledAt, MAGAZINE_SCHEDULER_INTERVAL_MS);
+  const deadlineAt = sourceCycle?.deadlineAt || addMs(baseScheduledAt, magazineSchedulerIntervalMs());
   const countPlan = sourceCycle
     ? {
         agent: await readMagazineSchedulerAgent(),
@@ -2199,13 +2238,14 @@ async function runScheduledMagazineCycle(trigger = "timer", options = {}) {
     };
     magazineSchedulerRuntime.manualStartRequestedAt = "";
     await writeMagazineSchedulerState();
-    scheduleMagazineTimer(MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    scheduleMagazineTimer(magazineSchedulerRetryIntervalMs());
     return magazineSchedulerRuntime.lastCycle;
   }
 
   const generationLock = activeMagazineGenerationLock();
   if (generationLock) {
-    const retryAt = addMs(Date.now(), MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    const retryIntervalMs = magazineSchedulerRetryIntervalMs();
+    const retryAt = addMs(Date.now(), retryIntervalMs);
     const lockAgent = await readMagazineSchedulerAgent();
     const blockedCycle = {
       id: randomUUID(),
@@ -2232,7 +2272,7 @@ async function runScheduledMagazineCycle(trigger = "timer", options = {}) {
     magazineSchedulerRuntime.nextRunAt = retryAt;
     magazineSchedulerRuntime.nextRetryAt = "";
     await writeMagazineSchedulerState();
-    scheduleMagazineTimer(MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    scheduleMagazineTimer(retryIntervalMs);
     return blockedCycle;
   }
 
@@ -2316,7 +2356,7 @@ async function runScheduledMagazineCycle(trigger = "timer", options = {}) {
 
   if (cycle.status === "retry_wait") {
     magazineSchedulerRuntime.activeCycle = cycle;
-    magazineSchedulerRuntime.nextRetryAt = addMs(Date.now(), MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    magazineSchedulerRuntime.nextRetryAt = addMs(Date.now(), magazineSchedulerRetryIntervalMs());
     magazineSchedulerRuntime.nextRunAt = cycle.deadlineAt;
     await writeMagazineSchedulerState();
     scheduleMagazineTimer();
@@ -2329,7 +2369,7 @@ async function runScheduledMagazineCycle(trigger = "timer", options = {}) {
 
   if (cycle.status === "complete") {
     const nextRunMs = parseTimestamp(cycle.deadlineAt);
-    const delayMs = nextRunMs ? Math.max(0, nextRunMs - Date.now()) : MAGAZINE_SCHEDULER_INTERVAL_MS;
+    const delayMs = nextRunMs ? Math.max(0, nextRunMs - Date.now()) : magazineSchedulerIntervalMs();
     scheduleNextMagazineCycle(delayMs);
   } else {
     scheduleNextMagazineCycle(nextDelayAfterClosedCycle(cycle));
@@ -2344,7 +2384,7 @@ async function handleMagazineSchedulerTimer() {
     return;
   }
   if (magazineSchedulerRuntime.running) {
-    scheduleMagazineTimer(MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+    scheduleMagazineTimer(magazineSchedulerRetryIntervalMs());
     return;
   }
 
@@ -2365,7 +2405,7 @@ async function handleMagazineSchedulerTimer() {
       magazineSchedulerRuntime.nextRetryAt = "";
       magazineSchedulerRuntime.lastCycle = failedCycle;
       await writeMagazineSchedulerState();
-      scheduleNextMagazineCycle(MAGAZINE_SCHEDULER_RETRY_INTERVAL_MS);
+      scheduleNextMagazineCycle(magazineSchedulerRetryIntervalMs());
       return;
     }
     void runScheduledMagazineCycle("retry", { sourceCycle: activeCycle });
@@ -2385,7 +2425,8 @@ export function startMagazineScheduler() {
   if (magazineSchedulerRuntime.started || magazineSchedulerDisabled()) return;
   magazineSchedulerRuntime.started = true;
   magazineSchedulerRuntime.startedAt = nowIso();
-  scheduleNextMagazineCycle(MAGAZINE_SCHEDULER_INITIAL_DELAY_MS);
+  const intervalMs = magazineSchedulerIntervalMs();
+  scheduleNextMagazineCycle(magazineSchedulerInitialDelayMs(intervalMs));
 }
 
 export function stopMagazineScheduler() {
@@ -2397,6 +2438,32 @@ export function stopMagazineScheduler() {
   magazineSchedulerRuntime.currentCycle = null;
   magazineSchedulerRuntime.activeCycle = null;
   void writeMagazineSchedulerState();
+}
+
+function applyMagazineSchedulerSettingsChange(previousSettings, nextSettings) {
+  if (!nextSettings.enabled) {
+    stopMagazineScheduler();
+    return;
+  }
+
+  if (!magazineSchedulerRuntime.started) {
+    startMagazineScheduler();
+    return;
+  }
+
+  const intervalChanged =
+    Number(previousSettings?.schedulerIntervalHours || 0) !== Number(nextSettings.schedulerIntervalHours || 0);
+  if (!intervalChanged) return;
+
+  if (!magazineSchedulerHasActiveWork()) {
+    scheduleNextMagazineCycle(magazineSchedulerIntervalMs());
+    return;
+  }
+
+  void writeMagazineSchedulerState({
+    settingsChangedAt: nowIso(),
+    pendingIntervalHours: nextSettings.schedulerIntervalHours,
+  });
 }
 
 async function magazineStatusSnapshot() {
@@ -2621,12 +2688,9 @@ async function handleMagazineSettings(req, res) {
 
     if (req.method === "PATCH" || req.method === "POST") {
       const body = await readJsonBody(req);
+      const previousSettings = readMagazineSettings();
       const settings = writeMagazineSettingsPatch(body);
-      if (settings.enabled) {
-        startMagazineScheduler();
-      } else {
-        stopMagazineScheduler();
-      }
+      applyMagazineSchedulerSettingsChange(previousSettings, settings);
       sendJson(res, publicMagazineSettingsSnapshot());
       return;
     }

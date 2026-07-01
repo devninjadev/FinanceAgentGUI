@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCodexOptions, readJsonBody, runAntigravityGenerate, sendJson } from "./codexProbe.mjs";
+import {
+  ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+  ANTIGRAVITY_TRANSLATION_REASONING,
+  selectAntigravityModelForReasoning,
+} from "../src/agent/antigravityModelSelection.js";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
@@ -23,10 +28,7 @@ const ECONOMIC_TRANSLATION_TITLE_MAX_CHARS = 220;
 const ECONOMIC_UNTRANSLATED_COPY_LATIN_WORDS = 2;
 const FINALIZED_CACHE_AFTER_HOURS = 24;
 const FINALIZED_CACHE_AFTER_MS = FINALIZED_CACHE_AFTER_HOURS * 60 * 60 * 1000;
-const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
-const ANTIGRAVITY_TRANSLATION_REASONING = "minimal";
-const ANTIGRAVITY_TRANSLATION_THINKING_LEVEL = "MINIMAL";
-const ANTIGRAVITY_FALLBACK_MODEL = "gemini-3.5-flash";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
 const PYTHON_UTF8_ENV = {
   ...process.env,
   PYTHONIOENCODING: "utf-8",
@@ -402,12 +404,13 @@ function latestAntigravityTranslationModel(options) {
   const catalogModels = Array.isArray(options.antigravityModelCatalog?.models)
     ? options.antigravityModelCatalog.models.filter((item) => item?.selectable && item?.name)
     : [];
-  return (
-    catalogModels[0]?.name ||
-    options.selected?.model ||
-    options.antigravity?.vertex?.model ||
-    ANTIGRAVITY_FALLBACK_MODEL
-  );
+  return selectAntigravityModelForReasoning(catalogModels, {
+    currentModel:
+      options.agentSettings?.settings?.providers?.[ANTIGRAVITY_PROVIDER_ID]?.model ||
+      options.selected?.model ||
+      options.antigravity?.defaultModel ||
+      ANTIGRAVITY_TRANSLATION_FALLBACK_MODEL,
+  });
 }
 
 function codexEconomicTranslationModel(options) {
@@ -433,23 +436,16 @@ function codexEconomicTranslationModel(options) {
 function antigravityEconomicTranslationModel(options) {
   const status = options.antigravity || {};
   if (!status.ready) {
-    throw new Error(status.detail || status.error || "Antigravity SDK가 번역에 사용할 준비가 되지 않았습니다.");
+    throw new Error(status.detail || status.error || "Antigravity CLI가 번역에 사용할 준비가 되지 않았습니다.");
   }
-
-  const project = status.vertex?.project || "";
-  const location = status.vertex?.location || "global";
-  if (!project) throw new Error("Antigravity SDK 번역을 위한 Vertex project가 설정되지 않았습니다.");
 
   const model = latestAntigravityTranslationModel(options);
   return {
     provider: ANTIGRAVITY_PROVIDER_ID,
-    providerLabel: "Antigravity SDK",
+    providerLabel: "Antigravity CLI",
     model,
-    modelLabel: `Antigravity SDK · ${location}/${model}`,
+    modelLabel: `Antigravity CLI · ${model}`,
     reasoning: ANTIGRAVITY_TRANSLATION_REASONING,
-    thinkingLevel: ANTIGRAVITY_TRANSLATION_THINKING_LEVEL,
-    project,
-    location,
   };
 }
 
@@ -656,10 +652,8 @@ async function runAntigravityEconomicTranslationBatch(items, modelInfo) {
   const result = await runAntigravityGenerate({
     prompt: economicEventNameTranslationPrompt(items),
     model: modelInfo.model,
-    project: modelInfo.project,
-    location: modelInfo.location,
-    webGrounding: false,
-    thinkingLevel: modelInfo.thinkingLevel,
+    approval: "default",
+    timeoutMs: ECONOMIC_TRANSLATION_TIMEOUT_MS,
   });
   return parseTranslationJsonPayload(result.answer);
 }

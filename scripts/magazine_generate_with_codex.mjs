@@ -13,7 +13,7 @@ const NEWS_FEED_STORE_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const WORLD_MEMORY_STATE_PATH = join(GUIBUILD_ROOT, "data", "world-memory", "collector-state.json");
 const LOCK_PATH = join(GUIBUILD_ROOT, "data", "magazine", ".generation.lock");
 const CODEX_PROVIDER_ID = "codex-cli";
-const ANTIGRAVITY_PROVIDER_ID = "antigravity-sdk";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
 
 function argValue(name, fallback = "") {
   const index = process.argv.indexOf(name);
@@ -30,8 +30,17 @@ function cleanCliValue(value, fallback, pattern = /^[A-Za-z0-9._:-]+$/) {
   return pattern.test(text) ? text : fallback;
 }
 
+function cleanAntigravityModel(value, fallback = "Gemini 3.5 Flash (Medium)") {
+  const text = String(value || "").trim();
+  return /^[\w .:/()+-]+$/.test(text) ? text : fallback;
+}
+
 function findCodexCommand() {
   return process.env.CODEX_CLI_PATH || "codex";
+}
+
+function findAntigravityCommand() {
+  return process.env.ANTIGRAVITY_CLI_PATH || "agy";
 }
 
 function findPythonCommand() {
@@ -64,7 +73,7 @@ function isAntigravityProvider(provider) {
 }
 
 function agentLabelForProvider(provider) {
-  return isAntigravityProvider(provider) ? "Antigravity SDK" : "Codex CLI";
+  return isAntigravityProvider(provider) ? "Antigravity CLI" : "Codex CLI";
 }
 
 function parseTimestamp(value) {
@@ -608,139 +617,35 @@ async function runCodexPrompt({ codex, approval, sandbox, model, reasoning, outp
   }
 }
 
-function antigravityThinkingLevel(reasoning) {
-  const normalized = String(reasoning || "").trim().toLowerCase();
-  if (normalized === "minimal") return "minimal";
-  if (normalized === "low") return "low";
-  if (normalized === "high") return "high";
-  return "medium";
+function antigravitySecurityArgs(approval) {
+  return String(approval || "").trim().toLowerCase() === "turbo"
+    ? ["--dangerously-skip-permissions"]
+    : [];
 }
 
-function antigravityAgentScript() {
-  return `
-import asyncio
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-from google.antigravity import Agent, LocalAgentConfig, types
-from google.antigravity.hooks import policy
-
-payload = json.loads(sys.stdin.read() or "{}")
-
-def gcloud_project():
-    try:
-        result = subprocess.run(
-            ["gcloud", "config", "get-value", "project"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=8,
-            check=False,
-        )
-        value = (result.stdout or "").strip()
-        if value and value != "(unset)":
-            return value
-    except Exception:
-        return ""
-    return ""
-
-def thinking_level(value):
-    normalized = str(value or "medium").strip().lower()
-    if normalized == "minimal":
-        return types.ThinkingLevel.MINIMAL
-    if normalized == "low":
-        return types.ThinkingLevel.LOW
-    if normalized == "high":
-        return types.ThinkingLevel.HIGH
-    return types.ThinkingLevel.MEDIUM
-
-async def main():
-    workspace = payload.get("workspace") or os.getcwd()
-    output_path = payload.get("output_path")
-    prompt = payload.get("prompt") or ""
-    model = payload.get("model") or "gemini-3.5-flash"
-    project = (
-        payload.get("project")
-        or os.environ.get("ANTIGRAVITY_VERTEX_PROJECT")
-        or os.environ.get("GOOGLE_CLOUD_PROJECT")
-        or gcloud_project()
-    )
-    location = payload.get("location") or os.environ.get("ANTIGRAVITY_VERTEX_LOCATION") or "global"
-    if not output_path:
-        raise RuntimeError("output_path is required")
-    if not project:
-        raise RuntimeError("Antigravity Vertex project is required")
-
-    endpoint = types.VertexEndpoint(
-        project=project,
-        location=location,
-        options=types.GeminiModelOptions(thinking_level=thinking_level(payload.get("reasoning"))),
-    )
-    text_model = types.ModelTarget(
-        name=model,
-        types=[types.ModelType.TEXT],
-        endpoint=endpoint,
-    )
-    app_data_dir = payload.get("app_data_dir")
-    save_dir = payload.get("save_dir")
-    approval = str(payload.get("approval") or "").strip().lower()
-    policies = [policy.allow_all()] if approval == "turbo" else policy.confirm_run_command()
-    config = LocalAgentConfig(
-        system_instructions=(
-            "You are running inside FinanceAgentGUI. Follow the user's task exactly. "
-            "Only modify files under the configured workspace and runtime staging paths."
-        ),
-        model=text_model,
-        vertex=True,
-        project=project,
-        location=location,
-        policies=policies,
-        workspaces=[workspace],
-        app_data_dir=app_data_dir,
-        save_dir=save_dir,
-    )
-
-    async with Agent(config) as agent:
-        response = await agent.chat(prompt)
-        final_text = (await response.text()).strip()
-
-    Path(output_path).write_text(final_text + ("\\n" if final_text else ""), encoding="utf-8")
-    print(json.dumps({
-        "ok": True,
-        "provider": "antigravity-sdk",
-        "model": model,
-        "reasoning": payload.get("reasoning") or "medium",
-        "approval": approval or "default",
-        "project": project,
-        "location": location,
-        "outputPath": output_path,
-    }, ensure_ascii=False))
-
-asyncio.run(main())
-`;
+function antigravityPrintTimeout() {
+  return String(process.env.ANTIGRAVITY_CLI_PRINT_TIMEOUT || "30m").trim() || "30m";
 }
 
 async function runAntigravityPrompt({
   approval,
   model,
-  reasoning,
   outputPath,
   prompt,
   timeoutMs,
-  tempDir,
-  project,
-  location,
 }) {
-  const python = findPythonCommand();
-  if (!python) {
-    throw new Error("python3 또는 python 명령을 찾지 못했습니다.");
-  }
+  const agy = findAntigravityCommand();
+  const args = [
+    ...antigravitySecurityArgs(approval),
+    "--model",
+    cleanAntigravityModel(model),
+    `--print-timeout=${antigravityPrintTimeout()}`,
+    "-p",
+    "-",
+  ];
 
   return new Promise((resolvePrompt, reject) => {
-    const child = spawn(python.command, [...python.argsPrefix, "-c", antigravityAgentScript()], {
+    const child = spawn(agy, args, {
       cwd: GUIBUILD_ROOT,
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["pipe", "pipe", "pipe"],
@@ -750,7 +655,7 @@ async function runAntigravityPrompt({
     const timer = timeoutMs
       ? setTimeout(() => {
           child.kill("SIGTERM");
-          reject(new Error(`Antigravity SDK timed out after ${timeoutMs}ms`));
+          reject(new Error(`Antigravity CLI timed out after ${timeoutMs}ms`));
         }, timeoutMs)
       : null;
 
@@ -769,13 +674,14 @@ async function runAntigravityPrompt({
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
       if (code !== 0) {
-        const error = new Error((stderr || stdout || `Antigravity SDK exited ${code}`).trim());
+        const error = new Error((stderr || stdout || `Antigravity CLI exited ${code}`).trim());
         error.code = code;
         error.stdout = stdout;
         error.stderr = stderr;
         reject(error);
         return;
       }
+      writeFileSync(outputPath, stdout.trim() ? `${stdout.trim()}\n` : "", "utf8");
       const finalAnswer = existsSync(outputPath) ? readFileSync(outputPath, "utf8").trim() : "";
       if (finalAnswer) {
         console.log("\n--- Antigravity final answer ---");
@@ -784,20 +690,7 @@ async function runAntigravityPrompt({
       resolvePrompt({ stdout, stderr });
     });
 
-    child.stdin.end(
-      JSON.stringify({
-        workspace: GUIBUILD_ROOT,
-        app_data_dir: join(tempDir, "antigravity-app-data"),
-        save_dir: join(tempDir, "antigravity-save"),
-        output_path: outputPath,
-        prompt,
-        model,
-        reasoning: antigravityThinkingLevel(reasoning),
-        approval,
-        project,
-        location,
-      }),
-    );
+    child.stdin.end(prompt);
   });
 }
 
@@ -859,7 +752,7 @@ function buildSequentialPrompt({ articleIndex, count, articleDirectory, agentLab
   ].join("\n");
 }
 
-async function runStrictCheckWithRepair({ provider, codex, approval, sandbox, model, reasoning, timeoutMs, tempDir, count, repairRounds, articleDirectory, staged, agentLabel, project, location, publishedAt, existingArticleCount, previousArticleIds, generationAgent }) {
+async function runStrictCheckWithRepair({ provider, codex, approval, sandbox, model, reasoning, timeoutMs, tempDir, count, repairRounds, articleDirectory, staged, agentLabel, publishedAt, existingArticleCount, previousArticleIds, generationAgent }) {
   for (let attempt = 0; attempt <= repairRounds; attempt += 1) {
     console.log("\nRunning local magazine style check...");
     try {
@@ -889,7 +782,7 @@ async function runStrictCheckWithRepair({ provider, codex, approval, sandbox, mo
         throw error;
       }
       const repairNumber = attempt + 1;
-      const repairOutputPath = join(tempDir, `codex-repair-${repairNumber}.txt`);
+      const repairOutputPath = join(tempDir, `${provider}-repair-${repairNumber}.txt`);
       console.warn(`\nMagazine strict check failed; starting ${agentLabel} repair round ${repairNumber}/${repairRounds}.`);
       await runAgentPrompt({
         provider,
@@ -902,8 +795,6 @@ async function runStrictCheckWithRepair({ provider, codex, approval, sandbox, mo
         prompt: buildRepairPrompt({ count, checkOutput, articleDirectory, staged, agentLabel }),
         timeoutMs,
         tempDir,
-        project,
-        location,
       });
     }
   }
@@ -991,10 +882,19 @@ async function main() {
   const provider = cleanCliValue(argValue("--provider", process.env.MAGAZINE_AGENT_PROVIDER || CODEX_PROVIDER_ID), CODEX_PROVIDER_ID);
   const antigravity = isAntigravityProvider(provider);
   const agentLabel = agentLabelForProvider(provider);
-  const model = cleanCliValue(
-    argValue("--model", antigravity ? process.env.MAGAZINE_ANTIGRAVITY_MODEL || "gemini-3.5-flash" : process.env.MAGAZINE_CODEX_MODEL || "gpt-5.5"),
-    antigravity ? "gemini-3.5-flash" : "gpt-5.5",
-  );
+  const model = antigravity
+    ? cleanAntigravityModel(
+        argValue(
+          "--model",
+          process.env.MAGAZINE_ANTIGRAVITY_CLI_MODEL ||
+            process.env.MAGAZINE_ANTIGRAVITY_MODEL ||
+            "Gemini 3.5 Flash (Medium)",
+        ),
+      )
+    : cleanCliValue(
+        argValue("--model", process.env.MAGAZINE_CODEX_MODEL || "gpt-5.5"),
+        "gpt-5.5",
+      );
   const reasoning = cleanCliValue(
     argValue("--reasoning", antigravity ? process.env.MAGAZINE_ANTIGRAVITY_REASONING || "medium" : process.env.MAGAZINE_CODEX_REASONING || "high"),
     antigravity ? "medium" : "high",
@@ -1005,14 +905,12 @@ async function main() {
     /^[A-Za-z-]+$/,
   );
   const sandbox = cleanCliValue(argValue("--sandbox", process.env.MAGAZINE_CODEX_SANDBOX || "workspace-write"), "workspace-write", /^[A-Za-z-]+$/);
-  const project = cleanCliValue(argValue("--project", process.env.MAGAZINE_ANTIGRAVITY_PROJECT || process.env.ANTIGRAVITY_VERTEX_PROJECT || ""), "");
-  const location = cleanCliValue(argValue("--location", process.env.MAGAZINE_ANTIGRAVITY_LOCATION || process.env.ANTIGRAVITY_VERTEX_LOCATION || "global"), "global");
   const timeoutMs = Number.parseInt(argValue("--timeout-ms", process.env.MAGAZINE_CODEX_TIMEOUT_MS || "1800000"), 10) || 1800000;
   const repairRounds = Number.parseInt(argValue("--repair-rounds", process.env.MAGAZINE_CODEX_REPAIR_ROUNDS || "2"), 10) || 2;
   const sequential = !hasArg("--batch") && process.env.MAGAZINE_CODEX_BATCH !== "1";
   const codex = antigravity ? "" : findCodexCommand();
-  const tempDir = mkdtempSync(join(tmpdir(), "finance-agent-magazine-codex-"));
-  const outputPath = join(tempDir, "codex-final.txt");
+  const tempDir = mkdtempSync(join(tmpdir(), `finance-agent-magazine-${antigravity ? "antigravity-cli" : "codex"}-`));
+  const outputPath = join(tempDir, `${antigravity ? "antigravity-cli" : "codex"}-final.txt`);
   const stagingRoot = mkdtempSync(join(MAGAZINE_DATA_DIR, ".generation-stage-"));
   const stagingArticlesDir = join(stagingRoot, "articles");
   const publishedAt = nowKstIso();
@@ -1038,7 +936,7 @@ async function main() {
     console.log(`Starting ${agentLabel} magazine generation: count=${count}, replace=${replace}, model=${model}, reasoning=${reasoning}, approval=${approval}, repairRounds=${repairRounds}, sequential=${sequential}, publishedAt=${publishedAt}`);
     if (sequential && count > 1) {
       for (let articleIndex = 1; articleIndex <= count; articleIndex += 1) {
-        const sequentialOutputPath = join(tempDir, `codex-article-${articleIndex}.txt`);
+        const sequentialOutputPath = join(tempDir, `${provider}-article-${articleIndex}.txt`);
         console.log(`\nStarting sequential article generation ${articleIndex}/${count}`);
         await runAgentPrompt({
           provider,
@@ -1051,8 +949,6 @@ async function main() {
           prompt: buildSequentialPrompt({ articleIndex, count, articleDirectory: stagingArticlesDir, agentLabel }),
           timeoutMs,
           tempDir,
-          project,
-          location,
         });
         assertArticleCount(stagingArticlesDir, articleIndex);
       }
@@ -1069,8 +965,6 @@ async function main() {
         prompt,
         timeoutMs,
         tempDir,
-        project,
-        location,
       });
     }
     assertArticleCount(stagingArticlesDir, count);
@@ -1089,8 +983,6 @@ async function main() {
       articleDirectory: stagingArticlesDir,
       staged: true,
       agentLabel,
-      project,
-      location,
       publishedAt,
       existingArticleCount,
       previousArticleIds,
