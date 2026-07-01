@@ -51,7 +51,10 @@ function ReportListItem({ report, selected, onSelect, onDelete, deleting = false
           type="button"
           aria-label={`${report.title} 삭제`}
           title="삭제"
-          onClick={() => onDelete(report)}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(report);
+          }}
           disabled={deleting}
         >
           {deleting ? <LoaderCircle size={15} strokeWidth={2.2} /> : <Trash2 size={15} strokeWidth={2.1} />}
@@ -356,6 +359,7 @@ export default function ReportsView({
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedReportId, setSelectedReportId] = useState("");
   const [deletingReportId, setDeletingReportId] = useState("");
+  const [deleteCandidate, setDeleteCandidate] = useState(null);
   const [scoutStage, setScoutStage] = useState("idle");
   const [scout, setScout] = useState(null);
   const [scoutError, setScoutError] = useState("");
@@ -500,10 +504,20 @@ export default function ReportsView({
     }
   }, [isSending, onResearchPrompt, selectedScoutIssue]);
 
-  const deleteReport = useCallback(async (report) => {
+  const requestDeleteReport = useCallback((report) => {
     if (!report?.id) return;
-    const confirmed = window.confirm(`'${report.title}' 보고서를 삭제할까요?\n삭제하면 이 목록에서 사라집니다.`);
-    if (!confirmed) return;
+    setReportsError("");
+    setDeleteCandidate(report);
+  }, []);
+
+  const cancelDeleteReport = useCallback(() => {
+    if (deletingReportId) return;
+    setDeleteCandidate(null);
+  }, [deletingReportId]);
+
+  const deleteReport = useCallback(async () => {
+    const report = deleteCandidate;
+    if (!report?.id || deletingReportId) return;
 
     setDeletingReportId(report.id);
     setReportsError("");
@@ -521,12 +535,15 @@ export default function ReportsView({
         if (current !== report.id && nextReports.some((item) => item.id === current)) return current;
         return nextReports[0]?.id || "";
       });
+      setDeleteCandidate(null);
     } catch (error) {
       setReportsError(error.message || "보고서를 삭제하지 못했습니다.");
     } finally {
       setDeletingReportId("");
     }
-  }, []);
+  }, [deleteCandidate, deletingReportId]);
+
+  const deleteCandidateBusy = Boolean(deleteCandidate?.id && deletingReportId === deleteCandidate.id);
 
   return (
     <div className="reports-layout">
@@ -570,7 +587,7 @@ export default function ReportsView({
               report={report}
               selected={activeReport?.id === report.id}
               onSelect={selectReport}
-              onDelete={deleteReport}
+              onDelete={requestDeleteReport}
               deleting={deletingReportId === report.id}
               key={report.id}
             />
@@ -630,6 +647,52 @@ export default function ReportsView({
           <ReportsEmptyState searchQuery={searchQuery} busy={reportsBusy} error={reportsError} />
         )}
       </section>
+
+      {deleteCandidate ? (
+        <div className="report-delete-overlay" role="presentation">
+          <div
+            className="report-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="report-delete-dialog-title"
+            aria-describedby="report-delete-dialog-description"
+          >
+            <div className="report-delete-dialog-header">
+              <span className="report-delete-dialog-icon" aria-hidden="true">
+                <Trash2 size={18} strokeWidth={2.1} />
+              </span>
+              <h2 id="report-delete-dialog-title">보고서 삭제</h2>
+            </div>
+            <p id="report-delete-dialog-description">삭제하면 이 목록에서 사라집니다.</p>
+            <strong className="report-delete-target">{deleteCandidate.title}</strong>
+            <div className="report-delete-dialog-actions">
+              <button
+                className="report-delete-cancel"
+                type="button"
+                onClick={cancelDeleteReport}
+                disabled={deleteCandidateBusy}
+              >
+                취소
+              </button>
+              <button
+                className="report-delete-confirm"
+                type="button"
+                onClick={deleteReport}
+                disabled={deleteCandidateBusy}
+              >
+                {deleteCandidateBusy ? (
+                  <>
+                    <LoaderCircle size={15} strokeWidth={2.2} />
+                    <span>삭제 중</span>
+                  </>
+                ) : (
+                  <span>삭제</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

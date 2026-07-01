@@ -2173,6 +2173,133 @@ button {
   animation: spin 1.1s linear infinite;
 }
 
+.report-delete-overlay {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(19, 29, 26, 0.34);
+}
+
+.report-delete-dialog {
+  display: grid;
+  width: min(420px, calc(100vw - 32px));
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid #e1d6d3;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(23, 35, 32, 0.22);
+  color: #222726;
+}
+
+.report-delete-dialog-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.report-delete-dialog-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #efd7d3;
+  border-radius: 8px;
+  background: #fff6f4;
+  color: #b54a3e;
+}
+
+.report-delete-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 820;
+  letter-spacing: 0;
+}
+
+.report-delete-dialog p {
+  margin: 0;
+  color: #606b68;
+  font-size: 13px;
+  font-weight: 640;
+  line-height: 1.45;
+}
+
+.report-delete-target {
+  display: block;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid #edf1ef;
+  border-radius: 8px;
+  background: #fbfcfb;
+  color: #2b3331;
+  font-size: 13px;
+  font-weight: 760;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.report-delete-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.report-delete-cancel,
+.report-delete-confirm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 72px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 760;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.report-delete-cancel {
+  border: 1px solid #d8e0dd;
+  background: #ffffff;
+  color: #3d4744;
+}
+
+.report-delete-confirm {
+  border: 1px solid #cf5e51;
+  background: #b94f43;
+  color: #ffffff;
+}
+
+.report-delete-cancel:hover:not(:disabled),
+.report-delete-cancel:focus-visible {
+  border-color: #b8c7c1;
+  background: #f8fbfa;
+}
+
+.report-delete-confirm:hover:not(:disabled),
+.report-delete-confirm:focus-visible {
+  border-color: #a94439;
+  background: #a94439;
+}
+
+.report-delete-cancel:disabled,
+.report-delete-confirm:disabled {
+  cursor: default;
+  opacity: 0.64;
+}
+
+.report-delete-confirm:disabled svg {
+  animation: spin 1.1s linear infinite;
+}
+
 .reports-list-alert {
   display: flex;
   align-items: center;

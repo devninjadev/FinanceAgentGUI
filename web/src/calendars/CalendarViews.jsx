@@ -718,14 +718,12 @@ export function EarningCalendarView({
   }, [contextSnapshot, onContextChange]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let active = true;
     const force = refreshSequence > 0;
 
     setEarningLoadState({ status: "loading", error: "" });
 
-    fetch(buildEarningsApiUrl({ startDate: requestStartKey, endDate: requestEndKey, force }), {
-      signal: controller.signal,
-    })
+    fetch(buildEarningsApiUrl({ startDate: requestStartKey, endDate: requestEndKey, force }))
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload.ok) {
@@ -734,6 +732,7 @@ export function EarningCalendarView({
         return payload;
       })
       .then((payload) => {
+        if (!active) return;
         const nextEvents = Array.isArray(payload.events) ? payload.events : [];
         setEarningEvents(nextEvents);
         setEarningMeta({
@@ -754,7 +753,7 @@ export function EarningCalendarView({
         setEarningLoadState({ status: "ready", error: "" });
       })
       .catch((error) => {
-        if (error.name === "AbortError") return;
+        if (!active) return;
         setEarningEvents([]);
         setEarningLoadState({
           status: "error",
@@ -762,7 +761,9 @@ export function EarningCalendarView({
         });
       });
 
-    return () => controller.abort();
+    return () => {
+      active = false;
+    };
   }, [refreshSequence, requestStartKey, requestEndKey]);
 
   useEffect(() => {
@@ -1213,11 +1214,11 @@ export function EconomicCalendarView({ onContextChange }) {
   }, [countryFilterOpen]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let active = true;
     const force = refreshSequence > 0;
     setLoadState({ status: "loading", error: "" });
 
-    fetch(buildEconomicCalendarApiUrl({ weekStart, force }), { signal: controller.signal, cache: "no-store" })
+    fetch(buildEconomicCalendarApiUrl({ weekStart, force }), { cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload.ok) {
@@ -1226,6 +1227,7 @@ export function EconomicCalendarView({ onContextChange }) {
         return payload;
       })
       .then((payload) => {
+        if (!active) return;
         const nextEvents = Array.isArray(payload.events) ? payload.events : [];
         setEvents(nextEvents);
         setMeta({
@@ -1240,7 +1242,7 @@ export function EconomicCalendarView({ onContextChange }) {
         setLoadState({ status: "ready", error: "" });
       })
       .catch((error) => {
-        if (error.name === "AbortError") return;
+        if (!active) return;
         setEvents([]);
         setLoadState({
           status: "error",
@@ -1248,7 +1250,9 @@ export function EconomicCalendarView({ onContextChange }) {
         });
       });
 
-    return () => controller.abort();
+    return () => {
+      active = false;
+    };
   }, [refreshSequence, weekStart]);
 
   useEffect(() => {
