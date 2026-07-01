@@ -26,6 +26,7 @@ Recommended baseline:
 - npm matching the installed Node.js runtime
 - Python 3.11 or newer for optional finance helper scripts
 - A Chromium-family browser for browser-login handoff flows: ChatGPT Atlas, Chrome, Edge, Chromium, or Brave
+- Antigravity CLI (`agy`) for Antigravity/Gemini provider features. This is a standalone CLI dependency, not an SDK package.
 
 Node 22 is recommended because browser-login handoff code uses the built-in `WebSocket` client to talk to the browser DevTools Protocol. If a user is on an older Node runtime, either upgrade Node or patch the handoff implementation to use a project dependency with equivalent WebSocket support.
 
@@ -168,7 +169,10 @@ Common environment variables:
 - `ANTIGRAVITY_CLI_PRINT_TIMEOUT`: optional `agy -p` timeout, default `5m`.
 
 Keep user-specific config files and generated runtime data gitignored.
-Install Antigravity CLI with `curl -fsSL https://antigravity.google/cli/install.sh | bash` on macOS/Linux, then run `agy` in a terminal to complete Google OAuth. Missing CLI or OAuth readiness should surface as a provider readiness failure, with no alternate authentication or provider path.
+
+## Antigravity CLI Install
+
+Install Antigravity CLI with `curl -fsSL https://antigravity.google/cli/install.sh | bash` on macOS/Linux, then run `agy` in a terminal to complete Google OAuth. Do not install or document a separate SDK package for FinanceAgentGUI's Antigravity provider; the app checks and calls the standalone `agy` CLI. Missing CLI or OAuth readiness should surface as a provider readiness failure, with no alternate authentication or provider path.
 
 ## Private Runtime Data
 
