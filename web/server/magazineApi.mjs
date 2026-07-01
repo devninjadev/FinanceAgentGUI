@@ -57,6 +57,7 @@ const MAGAZINE_SCHEDULER_MAX_PER_CYCLE = clampInteger(
   3,
   3
 );
+const MAGAZINE_ARTICLE_TOPIC_LIMIT = 3;
 const MAGAZINE_SCHEDULER_MAX_MANUAL_DELAY_MS = 24 * 60 * 60 * 1000;
 
 const magazineSchedulerRuntime = {
@@ -193,10 +194,23 @@ function sortByCoverOrder(a, b) {
   return sortByLatest(a, b);
 }
 
-function normalizeTopicList(value, fallback = ["매거진"]) {
+function normalizeTopicList(value, fallback = [], { max = MAGAZINE_ARTICLE_TOPIC_LIMIT } = {}) {
   const topics = Array.isArray(value) ? value : [value].filter(Boolean);
   const normalized = topics.map((item) => cleanText(item)).filter(Boolean);
-  return normalized.length ? normalized : fallback;
+  if (normalized.length) return normalized.slice(0, max);
+  const fallbackTopics = Array.isArray(fallback) ? fallback : [fallback].filter(Boolean);
+  return fallbackTopics.map((item) => cleanText(item)).filter(Boolean).slice(0, max);
+}
+
+function articleTopicSource(metadata = {}) {
+  if (Array.isArray(metadata.topics)) return metadata.topics;
+  if (metadata.topics) return [metadata.topics];
+  if (metadata.topic) return [metadata.topic];
+  return [];
+}
+
+function normalizeArticleTopics(metadata = {}) {
+  return normalizeTopicList(articleTopicSource(metadata));
 }
 
 function normalizeTopicCatalog(value) {
@@ -235,14 +249,14 @@ function normalizeFollowupOption(value, index, articleTopics = []) {
     id: normalizePreferenceId(source.id || `followup-${index + 1}`),
     label,
     prompt: cleanText(source.prompt || label),
-    topics: normalizeTopicList(source.topics || articleTopics, articleTopics.length ? articleTopics : ["매거진"]),
+    topics: normalizeTopicList(source.topics || articleTopics, articleTopics),
     tone: cleanText(source.tone || ""),
   };
 }
 
 function defaultFollowupOptionsForArticle(metadata) {
-  const topics = normalizeTopicList(metadata.topics || metadata.topic);
-  const topicText = topics.join("·");
+  const topics = normalizeArticleTopics(metadata);
+  const topicText = topics.length ? topics.join("·") : "매거진";
   return [
     {
       id: "deeper-data",
@@ -1309,14 +1323,15 @@ async function readArticle(articleId) {
   const issues = worldMemoryIssues(metadata, worldMemory);
   const summary = cleanText(metadata.summary || metadata.deck || "");
   const title = cleanText(metadata.title || id);
+  const articleTopics = normalizeArticleTopics(metadata);
   const followupOptions = Array.isArray(metadata.followupOptions) && metadata.followupOptions.length
     ? metadata.followupOptions
     : defaultFollowupOptionsForArticle(metadata);
   return {
     id,
     articleType: cleanText(metadata.articleType || "analysis"),
-    topic: cleanText(metadata.topic || normalizeTopicList(metadata.topics)[0]),
-    topics: normalizeTopicList(metadata.topics || metadata.topic),
+    topic: cleanText(articleTopics[0] || (!Array.isArray(metadata.topics) ? metadata.topic : "")),
+    topics: articleTopics,
     title,
     deck: cleanText(metadata.deck || summary),
     summary,
@@ -1337,7 +1352,7 @@ async function readArticle(articleId) {
       ? metadata.chartBlocks.map(normalizeChartBlock).filter(Boolean).slice(0, 8)
       : [],
     followupOptions: followupOptions
-      .map((option, index) => normalizeFollowupOption(option, index, normalizeTopicList(metadata.topics || metadata.topic)))
+      .map((option, index) => normalizeFollowupOption(option, index, articleTopics))
       .filter(Boolean)
       .slice(0, 6),
     issues,
@@ -1556,7 +1571,7 @@ function compactNewsFeedItemForDecision(item = {}) {
   const time = newsFeedItemTimestamp(item);
   return {
     id: truncateSchedulerText(item.id || item.sourceFingerprint || "", 80),
-    feed: truncateSchedulerText(item.feedTitle || item.feedId || "", 80),
+    source: truncateSchedulerText(item.feedTitle || item.feedId || "", 80),
     title: truncateSchedulerText(item.translatedTitle || item.title || item.translatedText || item.originalText, 220),
     original: truncateSchedulerText(
       item.originalText && item.originalText !== item.translatedTitle ? item.originalText : "",
@@ -1634,7 +1649,7 @@ async function compactRecentArticlesForDecision(limit = 8) {
       id: entry.name,
       title: truncateSchedulerText(metadata.title || entry.name, 160),
       publishedAt: truncateSchedulerText(metadata.publishedAt || metadata.createdAt || metadata.updatedAt || "", 80),
-      topics: normalizeTopicList(metadata.topics || metadata.topic).slice(0, 4),
+      topics: normalizeArticleTopics(metadata),
       storyFamily: truncateSchedulerText(metadata.storyFamily || "", 120),
       editorialAngle: truncateSchedulerText(metadata.editorialAngle || "", 140),
       noveltyNote: truncateSchedulerText(metadata.noveltyNote || "", 180),
@@ -1684,7 +1699,7 @@ async function buildMagazineArticleCountDecisionContext() {
       postCutoffItems: postCutoffNewsItems,
       cutoffPolicy: cutoffMs
         ? "use only items after worldMemory.collector.lastSuccessfulAt"
-        : "world memory cutoff missing; do not count News Feed as fresh input",
+        : "world memory eligibility boundary missing; do not count local evidence items as fresh input",
     },
     recentArticles,
     editorialPreferences: {
@@ -1692,7 +1707,7 @@ async function buildMagazineArticleCountDecisionContext() {
         ? preferenceSnapshot.effectiveSignals.slice(0, 8).map((item) => ({
             label: truncateSchedulerText(item.label || "", 100),
             prompt: truncateSchedulerText(item.prompt || "", 220),
-            topics: Array.isArray(item.topics) ? item.topics.slice(0, 4) : [],
+            topics: normalizeTopicList(item.topics || []),
             effectiveWeight: Number(item.effectiveWeight || 0),
           }))
         : [],
@@ -1700,7 +1715,7 @@ async function buildMagazineArticleCountDecisionContext() {
         ? biasSnapshot.effectiveBiasSignals.slice(0, 8).map((item) => ({
             label: truncateSchedulerText(item.label || "", 100),
             prompt: truncateSchedulerText(item.prompt || "", 220),
-            topics: Array.isArray(item.topics) ? item.topics.slice(0, 4) : [],
+            topics: normalizeTopicList(item.topics || []),
             effectiveWeight: Number(item.effectiveWeight || 0),
             increaseCount: Number(item.increaseCount || 0),
             decreaseCount: Number(item.decreaseCount || 0),
@@ -1720,8 +1735,9 @@ function buildMagazineArticleCountDecisionPrompt(context) {
     "2건은 서로 다른 storyFamily/editorialAngle로 쓸 수 있는 신호가 두 개 이상 있을 때 선택한다.",
     "3건은 강한 신규 신호가 세 개 이상이고 최근 기사와 충분히 다른 각도를 만들 수 있을 때 선택한다.",
     "최근 기사와 제목 구도, storyFamily, editorialAngle이 겹치면 후보 수를 줄인다. 독자 선호와 bias 신호는 신선한 시장 신호보다 우선하지 말고 보조 가중치로만 쓴다.",
-    "최근 기사와 같은 News Feed id를 재사용하는 후보는 같은 뉴스로 본다. primary World Memory eventId가 같다는 사실만으로는 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
-    "같은 사건을 다른 제목으로 다시 쓰는 후보는 targetCount에 세지 않는다. 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다: 새 post-cutoff News Feed id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했을 때만 follow-up 후보로 남긴다.",
+    "최근 기사와 같은 metadata.newsFeed.items[].id를 재사용하는 후보는 같은 뉴스로 본다. primary continuity eventId가 같다는 사실만으로는 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
+    "같은 사건을 다른 제목으로 다시 쓰는 후보는 targetCount에 세지 않는다. 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다: 새 보도 id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했을 때만 follow-up 후보로 남긴다.",
+    "candidateAngles.reason에는 내부 출처명을 그대로 쓰지 말고 기사 문장처럼 자연스럽게 풀어 쓴다. 예: 'Bloomberg가 전한 장중 보도', '같은 날 나온 ISNA 인용 발언', '새 가격 반응', '새 기업 공시'.",
     "비슷한 후보는 same_event / independent_followup / unrelated로 의미 판정한다. same_event이면 제외하고, independent_followup이면 어떤 새 근거 앵커와 메커니즘이 생겼는지 candidateAngles.reason에 적는다. 제목, 사진, storyFamily 변경만으로 independent_followup이라고 보지 않는다.",
     "출력은 JSON 객체 하나만 반환한다. 마크다운 코드펜스, 설명 문장, 추가 텍스트는 금지한다.",
     "반환 스키마:",

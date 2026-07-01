@@ -13,7 +13,7 @@ data/magazine/editorial-preferences.json
 data/magazine/editorial-bias.json
 ```
 
-The canonical topic catalog lives in `config/magazine-topics.json`. Each article must set `metadata.topics` to one or more `topics[].label` values from that file. Do not store ad-hoc tags, companies, industries, or subtopics in `metadata.topics`; use `storyFamily`, `editorialAngle`, `noveltyNote`, body copy, or source fields for those details instead.
+The canonical topic catalog lives in `config/magazine-topics.json`. Each article must set `metadata.topics` to 1-3 `topics[].label` values from that file. One primary topic is required; up to two secondary topics are optional. Three topics is a maximum, not a target, so do not fill weak secondary topics just to use all slots. Do not store ad-hoc tags, companies, industries, or subtopics in `metadata.topics`; use `storyFamily`, `editorialAngle`, `noveltyNote`, body copy, or source fields for those details instead. If a generator returns more than three topics, the runtime keeps only the first three registered topics.
 
 `metadata.json` owns the catalog fields used by the UI:
 
@@ -85,11 +85,11 @@ When an article uses World Memory, vector search evidence is mandatory. Store it
 
 The magazine API returns `worldMemoryIssues` for any World Memory based article missing the query, engine/model, or semantic-search hits.
 
-World Memory is an article source and continuity layer, not a veto gate. If semantic hits are sparse, noisy, or outside the requested field, do not skip the article automatically. Use external research and declare the source mix with `researchMode: "external-research"`, `"external-first"`, or `"mixed-research"` in `metadata.json`.
+Treat local context, recent items, continuity search, and external research as one evidence bundle for article judgment. Internal storage fields can still record where evidence came from, but article prose should not explain those layers to the reader. If semantic hits are sparse, noisy, or outside the requested field, do not skip the article automatically. Use external research and declare the source mix with `researchMode: "external-research"`, `"external-first"`, or `"mixed-research"` in `metadata.json`.
 
-News Feed is the fresh tape layer. The magazine generator may use it for urgent or unusually article-worthy subjects, but only for items after the latest successful World Memory update. The cutoff is `data/world-memory/collector-state.json` `collector.lastSuccessfulAt`; if that timestamp is missing, News Feed must not be used as a subject source for that generation run.
+The local `data/news-feed.json` items may be used for urgent or unusually article-worthy subjects, but only for items after the latest successful internal update. The internal eligibility boundary is `data/world-memory/collector-state.json` `collector.lastSuccessfulAt`; if that timestamp is missing, those items must not be used as a subject source for that generation run.
 
-When an article uses News Feed, store the specific post-cutoff evidence:
+When an article uses this local evidence, store the specific eligible evidence:
 
 ```json
 {
@@ -112,13 +112,13 @@ When an article uses News Feed, store the specific post-cutoff evidence:
 }
 ```
 
-Use `researchMode: "news-feed-first"` when News Feed is the main source and World Memory is unavailable or weak; prefer `"news-feed-with-world-memory-backup"` when semantic search adds continuity context. Do not use keyword or regex matching to decide whether a feed item is article-worthy; the generator should make an editorial LLM judgment from the post-cutoff feed item, timing, market mechanism, source, and World Memory context.
+Use `researchMode: "news-feed-first"` when the local item is the main source and continuity search is unavailable or weak; prefer `"news-feed-with-world-memory-backup"` when continuity search adds useful context. Do not use keyword or regex matching to decide whether an item is article-worthy; the generator should make an editorial LLM judgment from the eligible item, timing, market mechanism, source, and context.
 
 Before generating a new magazine issue, create an editorial slate. A normal five-article issue should not be five versions of the highest-ranked story family. Mix major trend follow-ups, lower-level signals, company or sector mechanics, and at least occasional external-research stories. For recurring mega-trends, write from the latest delta rather than reintroducing the issue from scratch. Use `editorialAngle`, `storyFamily`, and `noveltyNote` in metadata to make that decision auditable.
 
 Store `metadata.eventSignature` for new articles as a primary event-card claimlet, not a prose summary: `role:"primary"`, `actor`, `action`, `object[]`, `time`, `marketMechanism`, and `sourceIds[]`. For articles that intentionally connect several facts, `metadata.eventSignatures[]` may contain exactly one `role:"primary"` card plus zero or more `role:"supporting"` cards. The primary event signature is the text that should be embedded for duplicate discovery; do not embed the whole article body for novelty checks.
 
-Novelty is enforced before publish, not only by prompt wording. Scheduled/staged generation runs the strict checker against the staged article plus the latest uploaded production article baseline. A candidate is rejected when it reuses a recent article's exact `newsFeed.items[].id`, reuses the same non-image external/source URL anchor, or leans on the same primary `worldMemory.vectorSearch.hits[0].eventId` plus the same `storyFamily` without any fresh News Feed or source URL anchor. Independent delta is not whole-article embedding distance and not hero-image difference; it must be a fresh evidence anchor such as a new post-cutoff News Feed item, official/external source URL, number, policy execution, price reaction, or company action that happened after the previous article. Primary World Memory event overlap is treated as continuity context, not a standalone veto. Ambiguous cases should be judged as `same_event`, `independent_followup`, or `unrelated` by LLM editorial judgment, not by text matching or a fixed day-count embargo.
+Novelty is enforced before publish, not only by prompt wording. Scheduled/staged generation runs the strict checker against the staged article plus the latest uploaded production article baseline. A candidate is rejected when it reuses a recent article's exact `newsFeed.items[].id`, reuses the same non-image external/source URL anchor, or leans on the same primary `worldMemory.vectorSearch.hits[0].eventId` plus the same `storyFamily` without any fresh local item or source URL anchor. Independent delta is not whole-article embedding distance and not hero-image difference; it must be a fresh evidence anchor such as a new eligible local item, official/external source URL, number, policy execution, price reaction, or company action that happened after the previous article. Primary continuity event overlap is treated as context, not a standalone veto. Ambiguous cases should be judged as `same_event`, `independent_followup`, or `unrelated` by LLM editorial judgment, not by text matching or a fixed day-count embargo.
 
 `scripts/magazine_event_signature_index.py` uses the same `sentence-transformers` model as World Memory (`ibm-granite/granite-embedding-97m-multilingual-r2` by default) to embed the primary `eventSignature + source titles + noveltyNote` into `data/magazine/event-signature-index.sqlite3`. Exact primary-signature/source reuse is a hard failure. High embedding similarity without source reuse is a near-duplicate candidate for LLM novelty judgment; set `MAGAZINE_EVENT_SIGNATURE_STRICT=1` to fail those warnings during stricter runs. Article deletion removes the matching event-signature index row when present.
 
@@ -126,7 +126,8 @@ Novelty is enforced before publish, not only by prompt wording. Scheduled/staged
 
 Magazine article prose should feel edited, not templated.
 
-- Do not expose internal retrieval language in reader-facing copy. Avoid phrases like "World Memory", "월드 메모리", "월드메모리", "World Memory vector search results", or "월드 메모리 벡터 검색 결과" in `title`, `deck`, `summary`, and `article.html`. Translate evidence into reader-facing subjects such as "시장", "미디어", "해운업계", "에너지 트레이더", "정책 당국", or "투자자".
+- Do not expose internal retrieval language in reader-facing copy. Avoid phrases like "World Memory", "월드 메모리", "월드메모리", "World Memory vector search results", "월드 메모리 벡터 검색 결과", "News Feed", "post-cutoff", "post-World-Memory-update", "컷오프", "수집 기사", or source-pipeline words like "피드" in `title`, `deck`, `summary`, and `article.html`.
+- Do not mechanically replace those internal labels with one fixed substitute. Write the sentence as a newspaper article would. Examples: `Bloomberg가 전한 장중 보도`, `같은 날 나온 ISNA 인용 발언`, `새 가격 반응`, `새 기업 공시`, `최근 현지 매체 보도`, or another source-specific phrase that fits the paragraph. Never write source labels as `계열 피드`, `새 피드`, or similar data-pipeline language.
 - `metadata.title` should read as a trustworthy finance/news headline before it reads as a clever magazine line. It must show at least two of actor/asset/sector, event/action, and market mechanism/number. Keep object metaphors such as `청구서`, `계산서`, `스티커`, `손가락`, `장바구니`, `책상`, and `가격표` out of the title unless the concrete news anchor is already unmistakable; put literary turns in the deck or body instead.
 - Do not include editorial-process placeholders such as "편집회의 체크리스트" in the article body. Store future production notes in metadata or a separate editorial feature when that UI exists.
 - Do not use a fixed `H2 + two paragraphs` rhythm. Assign each section a job and vary paragraph counts naturally. A short lead section may use two paragraphs, a data section may need three to five, a mechanism section may need two or three, and a conclusion may be brief.
@@ -134,6 +135,8 @@ Magazine article prose should feel edited, not templated.
 - Avoid generic repeated explainers. If an issue has already been covered recently, the new article should be a follow-up about what changed, what assumption moved, what price reacted differently, or what new data point now matters.
 - For deep analysis articles, include concrete numbers, source-backed comparisons, and chart blocks. The article should explain what moves, why it moves, who pays, and which indicators confirm or falsify the thesis.
 - When research contains attributable comments from executives, analysts, policymakers, traders, agencies, or other named stakeholders, use them as evidence instead of flattening everything into summary prose. In running prose, write attribution naturally, such as `Morgan Stanley(모건스탠리)의 Michael Wilson(마이클 윌슨)은 "..."라고 말했습니다` or `U.S. Energy Information Administration(EIA·미국 에너지정보청)에 따르면 ...입니다`. If the exact wording is not verified, do not use quotation marks; paraphrase with `...라고 설명했습니다`, `...라고 전했습니다`, or `...라고 봤습니다`.
+- Quotes and attributions are not decorative proof stamps. Do not explain the whole point in body prose and then repeat it in a quote. A quoted or attributed moment should do one clear job: introduce a new fact, sharpen disagreement, explain the implication of a number, reveal who benefits or pays, or set up the next paragraph's mechanism.
+- Make the prose around a quote do real work. The sentence before the quote should create the need for that source voice, and the sentence after it should use the quote to move the article forward. If the quote does not change what the reader understands, convert it to a tighter indirect attribution or remove it.
 - Media names, organizations, and people names should be written as `original name(Korean name)` on first mention in reader-facing article copy. For well-known acronyms, use `original name(ACRONYM·Korean name)`, such as `International Energy Agency(IEA·국제에너지기구)`. Subsequent mentions can use the acronym or Korean short form when readability benefits.
 - Hero images must be real article-related images, not generated SVG/vector mockups. Prefer free/open images and official source images when they carry the story well. For local private reading, public news/photos can be used when they are materially more accurate for a person, company, or specific event; record a clear `usageNote` such as `editorial-private-use; local personal reading only`.
 - Store local hero assets as bitmap files under `assets/` and record `credit`, `sourceUrl` or `pageUrl`, and license/rights/usage notes in `metadata.heroImage`. Wikimedia Commons files can be downloaded with `Special:FilePath`; official or news photos should use the original/representative image URL when available. Verify local assets with `file`, `ls -lh`, and the strict checker instead of creating placeholders.
@@ -148,7 +151,7 @@ Magazine article prose should feel edited, not templated.
 ```
 
 - Direct quote text itself should be Korean in reader-facing magazine articles, even when the source quote is in English. Translate faithfully, preserve the meaning and level of certainty, and keep the original speaker/source attribution in the label. Do not invent quotes, speaker names, titles, dates, or source labels. If the source only supports an indirect summary, use indirect attribution rather than a direct quote block.
-- A production-like generated article should usually include at least five `sourceBasis` entries and at least four body-level direct or indirect attribution moments. This tends to raise article length by adding reporting detail rather than filler.
+- A production-like generated article should usually include at least five `sourceBasis` entries, but there is no fixed number of body-level quotes or attributions. An article can stand without direct quotes when the reporting evidence is clear. Weak, repetitive, or disconnected quotes should be rewritten as useful attribution or removed.
 - Humor can be present as a light edge in most articles, but reduce the dose for war, casualties, disasters, sanctions, or other sensitive subjects. The joke should sharpen the market point, not distract from the risk.
 - Use polite Korean endings such as `~합니다` and `~입니다`; avoid dry encyclopedia endings like `~한다`.
 
@@ -215,7 +218,7 @@ Default behavior:
 - retry window: if a cycle still cannot complete before its next regular update slot, that cycle is closed and no longer carries work forward
 - deadline policy: if a cycle reaches the next regular update slot before its planned article count is filled, the article already being generated may finish, but any not-yet-started articles are canceled; the next new writing attempt waits 15 minutes after the slot or after the in-flight article is sent
 
-The scheduler asks the selected local agent provider for an `articleCountDecision` JSON object before a new regular cycle starts. The decision must include `targetCount`, `confidence`, `reason`, and optional `candidateAngles`. `targetCount=0` is valid only when the model judges that there is no clearly article-worthy new angle after checking the World Memory report, post-cutoff News Feed items, recent magazine articles, and reader preference/bias signals. If the count-decision model call fails, the scheduler records a fallback decision and conservatively attempts one article rather than silently skipping the cycle.
+The scheduler asks the selected local agent provider for an `articleCountDecision` JSON object before a new regular cycle starts. The decision must include `targetCount`, `confidence`, `reason`, and optional `candidateAngles`. `targetCount=0` is valid only when the model judges that there is no clearly article-worthy new angle after checking the evidence bundle, recent magazine articles, and reader preference/bias signals. If the count-decision model call fails, the scheduler records a fallback decision and conservatively attempts one article rather than silently skipping the cycle.
 
 Runtime scheduler state is stored in:
 
@@ -258,7 +261,7 @@ Reader follow-up preference options can be added per article:
       "id": "shipping-insurance",
       "label": "보험료와 운임 추적",
       "prompt": "선박 보험료와 운임으로 번지는 후속 기사",
-      "topics": ["금융", "에너지", "해운"],
+      "topics": ["금융", "산업"],
       "tone": "finance"
     }
   ]
@@ -309,7 +312,7 @@ Bias events support positive and negative direction:
   "direction": "increase",
   "label": "보험료와 운임 추적",
   "prompt": "선박 보험료, VLCC 운임, 항로 선택을 더 자주 다루기",
-  "topics": ["금융", "에너지", "해운"],
+  "topics": ["금융", "산업"],
   "reason": "사용자가 후속 기사 방향으로 요청함",
   "weight": 1
 }

@@ -29,6 +29,11 @@ FinanceAgentGUI uses a file-based report system. The local app does not need a r
 - Report-generating procedures should write user-facing artifacts under `data/reports/` unless a future workflow documents a different runtime folder under `data/`.
 - Clear report-writing requests on the Reports screen use an LLM-controlled `report_artifact` action. The GUI hides the action block, validates the schema, saves the Markdown artifact, then refreshes the visible list.
 - Ordinary chat, catalog questions, and ambiguous draft/planning requests should not emit `report_artifact`; they remain sidebar chat only.
+- Generated reports should preserve the original finance-agent writing process, not necessarily its file/folder mechanics: gather and cross-check market data, FEED/News Feed, World Memory, web research, and official sources internally, then write a reader-facing judgment.
+- Reports should start with a reader-facing summary, quick judgment, thesis, table, scenario, or conclusion path. Do not front-load separate `World Memory evidence`, `News Feed evidence`, or `web verification evidence` sections.
+- Evidence should support the body, not consume the opening. Attribute key facts naturally in prose, and collect external URLs or source links in a short footnote/reference section near the bottom when links are useful.
+- The report body should not explain save paths, Markdown artifacts, or GUI storage mechanics unless the user specifically asks about implementation.
+- The catalog carries the main original finance-agent report families: company/stock analysis, earnings analysis, market situation analysis, market risk analysis, macro/policy outlook, sector/industry analysis, portfolio diagnosis, ETF/fund comparison, World Memory driver reports, recent-industry newsletters, and long-form research dossiers.
 
 ## UI Contract
 

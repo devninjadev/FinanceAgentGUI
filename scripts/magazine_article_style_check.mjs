@@ -13,6 +13,8 @@ const ARTICLES_DIR = process.env.MAGAZINE_ARTICLES_DIR
 const MAGAZINE_TOPICS_PATH = process.env.MAGAZINE_TOPICS_PATH
   ? resolve(process.env.MAGAZINE_TOPICS_PATH)
   : join(GUIBUILD_ROOT, "config", "magazine-topics.json");
+const MAX_ARTICLE_TOPICS = 3;
+const ISSUE_SLATE_MAX_ARTICLES = 12;
 const BASELINE_ARTICLES_DIR = process.env.MAGAZINE_BASELINE_ARTICLES_DIR
   ? resolve(process.env.MAGAZINE_BASELINE_ARTICLES_DIR)
   : "";
@@ -42,6 +44,12 @@ const INTERNAL_PHRASES = [
   /World Memory vector/i,
   /semantic-search/i,
   /월드\s*메모리\s*벡터/,
+  /\bNews\s*Feed\b/i,
+  /post-?cutoff/i,
+  /post-World-Memory-update/i,
+  /컷오프/,
+  /수집\s*기사/,
+  /(^|[^가-힣A-Za-z])피드(?!백)/,
   /시장\s*메모리/,
   /편집회의\s*체크리스트/,
   /하네스/,
@@ -291,6 +299,7 @@ function articleReference(record) {
 function duplicateNoveltyIssues(candidates, baselineRecords = []) {
   const issues = [];
   const previous = [...baselineRecords];
+  const issueSizedCandidateSet = candidates.length <= ISSUE_SLATE_MAX_ARTICLES;
 
   for (const candidate of candidates) {
     for (const other of previous) {
@@ -302,7 +311,7 @@ function duplicateNoveltyIssues(candidates, baselineRecords = []) {
           articleId: candidate.articleId,
           level: "error",
           code: "duplicate-news-feed-anchor",
-          message: `article reuses News Feed item(s) ${sharedNewsFeedIds.join(", ")} from ${articleReference(other)}`,
+          message: `article reuses local evidence item(s) ${sharedNewsFeedIds.join(", ")} from ${articleReference(other)}`,
         });
       }
 
@@ -337,11 +346,12 @@ function duplicateNoveltyIssues(candidates, baselineRecords = []) {
           articleId: candidate.articleId,
           level: "error",
           code: "duplicate-world-memory-anchor",
-          message: `article reuses primary World Memory event ${candidate.primaryWorldMemoryEventId} and storyFamily "${candidate.storyFamily}" from ${articleReference(other)} without a fresh News Feed id or source URL anchor`,
+          message: `article reuses primary continuity event ${candidate.primaryWorldMemoryEventId} and storyFamily "${candidate.storyFamily}" from ${articleReference(other)} without a fresh local evidence id or source URL anchor`,
         });
       }
 
       if (
+        issueSizedCandidateSet &&
         candidate.storyFamily &&
         candidate.editorialAngle &&
         candidate.storyFamily === other.storyFamily &&
@@ -561,6 +571,14 @@ function checkArticleTopics(metadata, topicCatalog) {
       message: `metadata.topics must include at least one configured topic: ${topicCatalog.labels.join(", ")}`,
     });
     return issues;
+  }
+
+  if (topics.length > MAX_ARTICLE_TOPICS) {
+    issues.push({
+      level: "error",
+      code: "topics-too-many",
+      message: `metadata.topics must include at most ${MAX_ARTICLE_TOPICS} configured topic(s); got ${topics.length}`,
+    });
   }
 
   const seen = new Set();
@@ -806,7 +824,7 @@ function checkNewsFeedEvidence(metadata) {
     issues.push({
       level: "error",
       code: "news-feed-evidence-missing",
-      message: "News Feed based articles must include metadata.newsFeed evidence",
+      message: "local evidence based articles must include metadata.newsFeed evidence",
     });
     return issues;
   }
@@ -824,7 +842,7 @@ function checkNewsFeedEvidence(metadata) {
     issues.push({
       level: "error",
       code: "news-feed-world-memory-cutoff-missing",
-      message: "metadata.newsFeed.worldMemoryLastSuccessfulAt must record the World Memory update cutoff",
+      message: "metadata.newsFeed.worldMemoryLastSuccessfulAt must record the internal eligibility boundary",
     });
   }
 
@@ -833,7 +851,7 @@ function checkNewsFeedEvidence(metadata) {
     issues.push({
       level: "error",
       code: "news-feed-items-missing",
-      message: "metadata.newsFeed.items must include the post-World-Memory-update News Feed item(s) used",
+      message: "metadata.newsFeed.items must include the eligible local evidence item(s) used",
     });
     return issues;
   }
@@ -845,13 +863,13 @@ function checkNewsFeedEvidence(metadata) {
       issues.push({
         level: "error",
         code: "news-feed-item-time-missing",
-        message: `News Feed item ${item?.id || "(missing id)"} needs publishedAt, fetchedAt, or translatedAt`,
+        message: `local evidence item ${item?.id || "(missing id)"} needs publishedAt, fetchedAt, or translatedAt`,
       });
     } else if (itemTime.timestamp <= cutoff) {
       issues.push({
         level: "error",
         code: "news-feed-before-world-memory-cutoff",
-        message: `News Feed item ${item?.id || "(missing id)"} uses ${itemTime.field} at or before worldMemoryLastSuccessfulAt`,
+        message: `local evidence item ${item?.id || "(missing id)"} uses ${itemTime.field} at or before worldMemoryLastSuccessfulAt`,
       });
     }
   }
@@ -896,10 +914,6 @@ function checkArticle({ articleId, metadata, html }, topicCatalog) {
 
   if (sourceCount < 5) {
     issues.push({ level: "warn", code: "source-basis-density-low", message: `sourceBasis has ${sourceCount} entries; magazine generation should usually use 5+ evidence entries` });
-  }
-
-  if (attributionCount < 4) {
-    issues.push({ level: "warn", code: "attribution-density-low", message: `article has ${attributionCount} quote/attribution marker(s); target is 4+` });
   }
 
   for (const pattern of INTERNAL_PHRASES) {
@@ -1041,7 +1055,7 @@ async function main() {
     if (result.editorialAngle) angleCounts.set(result.editorialAngle, (angleCounts.get(result.editorialAngle) || 0) + 1);
   }
   const slateIssues = [];
-  if (results.length >= 5) {
+  if (results.length >= 5 && results.length <= ISSUE_SLATE_MAX_ARTICLES) {
     for (const [storyFamily, count] of storyFamilyCounts.entries()) {
       if (count > 2) {
         slateIssues.push({

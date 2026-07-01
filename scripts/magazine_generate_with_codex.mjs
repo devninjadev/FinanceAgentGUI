@@ -14,6 +14,7 @@ const WORLD_MEMORY_STATE_PATH = join(GUIBUILD_ROOT, "data", "world-memory", "col
 const LOCK_PATH = join(GUIBUILD_ROOT, "data", "magazine", ".generation.lock");
 const CODEX_PROVIDER_ID = "codex-cli";
 const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
+const MAX_ARTICLE_TOPICS = 3;
 
 function argValue(name, fallback = "") {
   const index = process.argv.indexOf(name);
@@ -132,8 +133,8 @@ function postWorldMemoryNewsFeedSummary(limit = 24) {
   const cutoff = worldMemoryLastSuccessfulAt();
   if (!cutoff.timestamp) {
     return [
-      "- 월드 메모리 마지막 성공 업데이트 시각을 찾지 못했다.",
-      "- News Feed는 월드 메모리 업데이트 이후 항목만 사용할 수 있으므로 이번 생성에서는 News Feed를 기사 소재 후보로 쓰지 않는다.",
+      "- 기준 업데이트 시각을 찾지 못했다.",
+      "- 최근 확인된 보도 후보는 기준 업데이트 이후 항목만 사용할 수 있으므로 이번 생성에서는 기사 소재 후보로 쓰지 않는다.",
     ].join("\n");
   }
 
@@ -142,7 +143,7 @@ function postWorldMemoryNewsFeedSummary(limit = 24) {
   if (!items.length) {
     return [
       `- worldMemoryLastSuccessfulAt=${cutoff.iso}`,
-      "- data/news-feed.json에 News Feed 항목이 없다.",
+      "- data/news-feed.json에 최근 확인된 보도 항목이 없다.",
     ].join("\n");
   }
 
@@ -155,22 +156,22 @@ function postWorldMemoryNewsFeedSummary(limit = 24) {
   if (!windowItems.length) {
     return [
       `- worldMemoryLastSuccessfulAt=${cutoff.iso}`,
-      `- News Feed ${items.length}개 중 월드 메모리 업데이트 이후 항목이 없다.`,
-      "- 이 경우 News Feed를 기사 소재 후보로 쓰지 말고 World Memory와 외부 리서치로 소재를 고른다.",
+      `- 확인된 보도 ${items.length}개 중 기준 업데이트 이후 항목이 없다.`,
+      "- 이 경우 로컬 보도 데이터를 기사 소재 후보로 쓰지 말고 World Memory와 외부 리서치로 소재를 고른다.",
     ].join("\n");
   }
 
   return [
     `- policy=post-world-memory-update-only / worldMemoryLastSuccessfulAt=${cutoff.iso} / availableAfterCutoff=${candidates.length} / showing=${windowItems.length}`,
-    "- 아래 목록 밖의 News Feed 항목은 기사 소재 후보로 쓰지 않는다.",
+    "- 아래 목록 밖의 최근 확인된 보도는 기사 소재 후보로 쓰지 않는다.",
     ...windowItems.map(({ item, itemTime }) => {
       const title = compactPromptText(item.translatedTitle || item.translatedText || item.title || item.originalText, 220);
       const original = compactPromptText(item.originalText && item.originalText !== title ? item.originalText : "", 160);
       return [
-        `- ${item.id || item.sourceFingerprint || "news-feed-item"}`,
+        `- ${item.id || item.sourceFingerprint || "collected-news-item"}`,
         `time=${itemTime.iso}`,
         `timeField=${itemTime.field}`,
-        `feed=${item.feedTitle || item.feedId || ""}`,
+        `source=${item.feedTitle || item.feedId || ""}`,
         `title=${title}`,
         original ? `original=${original}` : "",
       ]
@@ -182,7 +183,7 @@ function postWorldMemoryNewsFeedSummary(limit = 24) {
 
 function worldMemoryCurrentSignalSummary(limit = 8) {
   const python = findPythonCommand();
-  if (!python) return "- python runtime not found; current World Memory signals unavailable.";
+  if (!python) return "- python runtime not found; current market context unavailable.";
   const result = spawnSync(
     python.command,
     [
@@ -207,7 +208,7 @@ function worldMemoryCurrentSignalSummary(limit = 8) {
   );
   const output = (result.stdout || result.stderr || "").trim();
   if (result.status !== 0 || !output || output === "(no rows)") {
-    return output ? `- World Memory current signal read failed: ${compactPromptText(output, 800)}` : "- current World Memory signals unavailable.";
+    return output ? `- current market context read failed: ${compactPromptText(output, 800)}` : "- current market context unavailable.";
   }
   return output;
 }
@@ -324,6 +325,18 @@ function normalizeGenerationAgent(agent = {}) {
   return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value));
 }
 
+function normalizeGeneratedTopicList(metadata = {}) {
+  const rawTopics = Array.isArray(metadata.topics)
+    ? metadata.topics
+    : metadata.topic
+      ? [metadata.topic]
+      : [];
+  return rawTopics
+    .map((topic) => String(topic || "").trim())
+    .filter(Boolean)
+    .slice(0, MAX_ARTICLE_TOPICS);
+}
+
 function normalizeGeneratedArticleMetadata(articleDirectory, timestampIso, { existingArticleCount = articleCountIn(ARTICLES_DIR), previousArticleIds = recentArticleIds(5), generationAgent = {} } = {}) {
   const generatedArticleIds = articleIdsIn(articleDirectory);
   const normalizedGenerationAgent = normalizeGenerationAgent(generationAgent);
@@ -344,6 +357,7 @@ function normalizeGeneratedArticleMetadata(articleDirectory, timestampIso, { exi
         : metadata.coverDecision;
     const nextMetadata = {
       ...metadata,
+      topics: normalizeGeneratedTopicList(metadata),
       isCoverStory,
       publishedAt: timestampIso,
       createdAt: timestampIso,
@@ -388,29 +402,32 @@ function buildPrompt({ count, replace, articleDirectory, staged, agentLabel = "C
     "- config/magazine-topics.json",
     "",
     "기사 생성 원칙:",
-    "- 아래 '현재 월드 메모리 대표 신호'는 커버스토리 판단에 사용할 고정 입력이다. coverDecision.worldMemorySignals는 이 목록과 직접 검색 결과에서만 고르고, 없는 중요/최신 이슈를 지어내지 않는다.",
-    "- 소재를 고르기 전에 아래 '월드 메모리 이후 News Feed 후보'를 먼저 검토한다.",
-    "- News Feed는 data/world-memory/collector-state.json의 collector.lastSuccessfulAt 이후 항목만 사용할 수 있다. 그 이전 항목은 기사 소재로 쓰지 않는다.",
-    "- News Feed 후보 중 속보성, 시장 충격, 정책/기업/거시 메커니즘이 강한 항목이 있으면 그쪽을 기사 주제로 삼을 수 있다. 이 판단은 LLM 편집 판단으로 하며 키워드 매칭 규칙을 만들지 않는다.",
-    "- News Feed를 주근거로 쓰는 경우에도 월드메모리 벡터 검색을 백업 맥락으로 실행한다. World Memory가 약하면 외부 리서치로 보강한다.",
-    "- News Feed를 근거로 사용했다면 metadata.newsFeed={\"selectionPolicy\":\"post-world-memory-update-only\",\"worldMemoryLastSuccessfulAt\":\"ISO timestamp\",\"items\":[{\"id\":\"...\",\"feedId\":\"...\",\"feedTitle\":\"...\",\"title\":\"...\",\"publishedAt\":\"...\",\"fetchedAt\":\"...\",\"translatedAt\":\"...\"}]}를 저장한다.",
-    "- 같은 News Feed id를 이미 최근 업로드 기사가 사용했다면 같은 뉴스다. 제목·표현·storyFamily를 바꿔도 새 기사로 쓰지 않는다.",
+    "- 아래 '참고 근거 묶음'은 기사 소재와 커버스토리 판단에 사용할 고정 입력이다. 없는 중요/최신 이슈를 지어내지 않는다.",
+    "- 소재를 고르기 전에 참고 근거 묶음을 먼저 검토한다.",
+    "- 내부 근거의 저장 위치나 검색 경로를 기사 문장 안에서 구분하지 않는다. 독자에게는 출처 계층이 아니라 사건, 수치, 발언, 가격 반응, 공식/외부 출처만 보이게 쓴다.",
+    "- 보도 후보는 data/world-memory/collector-state.json의 collector.lastSuccessfulAt 이후 항목만 사용할 수 있다. 그 이전 항목은 기사 소재로 쓰지 않는다.",
+    "- 최근 확인된 보도 중 속보성, 시장 충격, 정책/기업/거시 메커니즘이 강한 항목이 있으면 그쪽을 기사 주제로 삼을 수 있다. 이 판단은 LLM 편집 판단으로 하며 키워드 매칭 규칙을 만들지 않는다.",
+    "- 최근 보도를 주근거로 쓰는 경우에도 연속성 검색을 실행한다. 내부 근거가 약하면 외부 리서치로 보강한다.",
+    "- 감사용 메타데이터에는 metadata.newsFeed={\"selectionPolicy\":\"post-world-memory-update-only\",\"worldMemoryLastSuccessfulAt\":\"ISO timestamp\",\"items\":[{\"id\":\"...\",\"feedId\":\"...\",\"feedTitle\":\"...\",\"title\":\"...\",\"publishedAt\":\"...\",\"fetchedAt\":\"...\",\"translatedAt\":\"...\"}]}를 저장한다. 단, 이 필드명과 레이어 구분을 title, deck, summary, article.html, noveltyNote, coverDecision.rationale, sourceBasis prose에 쓰지 않는다.",
+    "- 같은 metadata.newsFeed.items[].id를 이미 최근 업로드 기사가 사용했다면 같은 뉴스다. 제목·표현·storyFamily를 바꿔도 새 기사로 쓰지 않는다.",
     "- metadata.eventSignature를 반드시 저장한다. 형식: {\"role\":\"primary\",\"actor\":\"주체\",\"action\":\"무엇을 했다\",\"object\":[\"대상/수치\"],\"time\":\"대표 발생/보도 시각\",\"marketMechanism\":\"시장에 작동하는 메커니즘\",\"sourceIds\":[\"nf_...\"]}. 이것은 기사 전체 요약이 아니라 사건 claimlet이다.",
     "- 복수 사건을 엮는 기사라면 metadata.eventSignatures[]를 사용할 수 있다. 단, role='primary' 카드는 정확히 하나여야 하고, supporting 카드는 배경·비교·연쇄 효과만 담는다.",
-    "- 직접 월드메모리 벡터 검색을 실행한다: python3 scripts/world_memory_cli.py semantic-search \"질의\" --limit 8 --format json",
-    "- World Memory가 강하면 metadata.worldMemory.retrievalPolicy='mandatory-vector-search'와 query, engine, model, hits를 저장한다.",
-    "- World Memory가 약하거나 주제 밖이면 스킵하지 말고 external-first/external-research로 보강한다.",
-    "- 최근 업로드 기사와 primary World Memory eventId가 같다는 사실만으로 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
-    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 post-cutoff News Feed id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했음을 metadata.noveltyNote와 metadata.eventSignature에 명시하고 그 근거를 metadata.newsFeed.items 또는 sourceBasis/worldMemory.hits에 남긴다.",
+    "- 직접 연속성 검색을 실행한다: python3 scripts/world_memory_cli.py semantic-search \"질의\" --limit 8 --format json",
+    "- 검색 결과가 강하면 감사용 metadata.worldMemory.retrievalPolicy='mandatory-vector-search'와 query, engine, model, hits를 저장한다.",
+    "- 검색 결과가 약하거나 주제 밖이면 스킵하지 말고 external-first/external-research로 보강한다.",
+    "- 최근 업로드 기사와 primary worldMemory eventId가 같다는 사실만으로 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
+    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 보도 id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했음을 metadata.noveltyNote와 metadata.eventSignature에 명시하고 그 근거를 metadata.newsFeed.items 또는 sourceBasis/worldMemory.hits에 남긴다.",
     "- 최근 기사와 같은 이슈처럼 보이면 내부적으로 LLM novelty judge를 수행한다: same_event이면 쓰지 않고, independent_followup이면 새 근거 앵커와 달라진 메커니즘을 metadata에 남기며, unrelated이면 별도 기사로 둔다. 사진, 제목, storyFamily 변경만으로 independent_followup이라고 판단하지 않는다.",
     "- 최근 업로드 기사와 storyFamily 및 editorialAngle이 모두 같으면 중복 위험이 높다. follow-up이라도 noveltyNote에 무엇이 새로 생겼는지 명시할 수 없으면 생성하지 않는다.",
-    "- metadata.topics는 config/magazine-topics.json의 topics[].label 중 1개 이상만 사용한다. 그 밖의 태그나 세부 키워드는 topics에 넣지 않는다.",
-    "- 기사마다 sourceBasis를 5개 이상 채우고, 본문에는 직접 인용 또는 간접 인용을 최소 4회 넣는다.",
+    "- metadata.topics는 config/magazine-topics.json의 topics[].label 중 1~3개만 사용한다. 1개 주 토픽은 반드시 고르고, 보조 토픽은 정말 강할 때만 최대 2개까지 붙인다. 3개는 목표가 아니라 상한이다.",
+    "- 기사마다 sourceBasis를 5개 이상 채운다. 본문 직접 인용 또는 간접 귀속에는 고정 횟수 목표가 없다.",
+    "- 인용·귀속은 본문이 이미 설명한 내용을 반복하는 장식으로 넣지 않는다. 새 사실, 이해관계자 관점, 수치의 의미, 반론, 비용 부담자, 다음 문단의 전환 중 하나를 반드시 제공해야 한다.",
+    "- 인용 앞 문장은 왜 그 목소리가 필요한지 만들어 주고, 인용 뒤 문장은 그 발언을 받아 다음 분석으로 넘어가야 한다. 흐름을 바꾸지 못하는 인용은 짧은 간접 귀속으로 줄이거나 빼고 더 좋은 근거를 찾는다.",
     `- 송고 시각은 기사 소재 시각이 아니라 매거진 생성기가 지정한 현재 송고 시각을 사용한다. metadata.publishedAt, createdAt, updatedAt, uploadedAt, generatedAt을 임의 과거 시각으로 쓰지 않는다.`,
     `- 현재 production 기사 수는 ${existingArticleCount}개이고, 이번 첫 기사까지 포함하면 총 ${firstGeneratedTotalCount}개다.`,
     "- 커버스토리 초기 채우기 정책: 이번 기사까지 포함한 총 기사 수가 5개 이하인 개별 기사는 채점하지 말고 바로 metadata.isCoverStory=true로 둔다. 이때 coverDecision.mode='bootstrap-cover-fill', scorePolicy='not-scored-total-articles-lte-5', candidateScore=null, bestPreviousScore=null로 둔다.",
-    "- 총 기사 수가 6개 이상이 되는 기사부터 커버스토리 승격은 별도 판단이다. 새 기사를 최근 업로드 기사 비교창의 지난 최대 5개 기사와 비교해, 현재 월드메모리의 가장 중요한 이슈 또는 가장 최근의 이슈에 새 기사가 가장 가깝다고 판단될 때만 metadata.isCoverStory=true로 둔다.",
-    "- 커버로 올릴 때는 metadata.coverRegisteredAt을 현재 생성 시각으로 저장하고 metadata.coverDecision을 남긴다. 채점 모드 coverDecision 형식: {\"policy\":\"world-memory-cover-v1\",\"result\":\"promote\",\"evaluatedAt\":\"ISO timestamp\",\"comparisonWindow\":{\"basis\":\"upload-time\",\"articleLimit\":5,\"articleIds\":[\"...\"]},\"worldMemorySignals\":{\"mostImportantIssue\":\"...\",\"mostRecentIssue\":\"...\",\"query\":\"...\",\"hitIds\":[\"...\"]},\"candidateScore\":0-100,\"bestPreviousScore\":0-100 또는 null,\"rationale\":\"왜 새 기사가 비교창 안에서 가장 커버에 가까운지\"}.",
+    "- 총 기사 수가 6개 이상이 되는 기사부터 커버스토리 승격은 별도 판단이다. 새 기사를 최근 업로드 기사 비교창의 지난 최대 5개 기사와 비교해, 현재 시장에서 가장 중요한 이슈 또는 가장 최근의 이슈에 새 기사가 가장 가깝다고 판단될 때만 metadata.isCoverStory=true로 둔다.",
+    "- 커버로 올릴 때는 metadata.coverRegisteredAt을 현재 생성 시각으로 저장하고 metadata.coverDecision을 남긴다. 채점 모드 coverDecision 형식: {\"policy\":\"world-memory-cover-v1\",\"result\":\"promote\",\"evaluatedAt\":\"ISO timestamp\",\"comparisonWindow\":{\"basis\":\"upload-time\",\"articleLimit\":5,\"articleIds\":[\"...\"]},\"worldMemorySignals\":{\"mostImportantIssue\":\"...\",\"mostRecentIssue\":\"...\",\"query\":\"...\",\"hitIds\":[\"...\"]},\"candidateScore\":0-100,\"bestPreviousScore\":0-100 또는 null,\"rationale\":\"왜 새 기사가 비교창 안에서 가장 커버에 가까운지\"}. worldMemorySignals는 감사용 필드명일 뿐이며 rationale 문장에는 내부 레이어명을 쓰지 않는다.",
     "- 커버가 아니면 metadata.isCoverStory=false, coverRegisteredAt=null로 둔다. coverDecision을 남긴다면 result는 do-not-promote여야 한다.",
     "- 히어로 이미지는 기사와 직접 관련 있는 실제 무료/오픈 이미지, 공식 이미지, 또는 개인 열람용 보도사진을 사용한다. SVG, 생성 벡터, 목업 이미지는 금지한다.",
     "- metadata.heroImage에는 src, alt, credit, sourceUrl 또는 pageUrl, license/rights/usagePolicy/usageNote 중 하나를 반드시 저장한다.",
@@ -420,19 +437,18 @@ function buildPrompt({ count, replace, articleDirectory, staged, agentLabel = "C
     "- 이미지 파일 확보 절차: Wikimedia Commons는 Special:FilePath 또는 upload.wikimedia.org 직접 URL을 쓰고, 공식/보도사진은 원본 이미지 URL이나 페이지에서 확인되는 대표 이미지를 curl -L --fail --show-error -A 'FinanceAgentGUI/1.0' -o assets/<name>.<ext> 형태로 저장한다.",
     "- 개인 열람용 보도사진을 쓰면 metadata.heroImage.usageNote에 'editorial-private-use; local personal reading only'와 원출처를 남긴다. 오픈/공식 이미지면 license/rights를 남긴다.",
     "- 다운로드 뒤에는 file, ls -lh, strict check로 실제 비트맵인지 확인한다. 다운로드가 실패하면 1px placeholder나 빈 파일을 만들지 말고 실패 원인과 실행한 명령을 보고한다.",
-    "- 기사마다 본문 텍스트는 공백 제외 한국어 3,000자 이상을 목표로 한다. 인용, 수치, 이해관계자 발언, 반론, 다음 데이터 포인트로 분량을 늘리고 filler는 쓰지 않는다.",
+    "- 기사마다 본문 텍스트는 공백 제외 한국어 3,000자 이상을 목표로 한다. 수치, 이해관계자 발언, 반론, 다음 데이터 포인트로 분량을 늘리되 filler는 쓰지 않는다.",
     "- 직접 인용은 검증된 출처일 때만 쓴다. 확실하지 않으면 따옴표를 쓰지 말고 간접 인용한다.",
     "- 매체명/소속기관/사람 이름은 첫 등장에 original name(Korean name) 형태를 쓴다.",
     "- 존대말로 쓰되 독자를 가르치거나 훈계하지 않는다.",
-    "- 인용과 근거를 늘려 자연스럽게 분량을 늘린다. padding 금지.",
+    "- 인용은 본문과 유기적으로 연결될 때만 쓴다. 본문과 인용이 같은 말을 반복하면 padding으로 간주하고, 인용 대신 더 구체적인 수치·반론·현장 맥락을 넣는다.",
     count > 1
       ? `- 이번 생성 묶음 ${count}개가 같은 storyFamily에 몰리지 않도록 issue slate를 내부적으로 잡는다.`
       : "- 이미 같은 issue 안에 생성된 기사와 storyFamily, editorialAngle, 제목 구도가 겹치지 않게 한다.",
     "",
-    "월드 메모리 이후 News Feed 후보:",
+    "참고 근거 묶음:",
     newsFeedCandidates,
     "",
-    "현재 월드 메모리 대표 신호:",
     worldMemorySignals,
     "",
     "최근 업로드 기사 비교창:",
@@ -443,7 +459,8 @@ function buildPrompt({ count, replace, articleDirectory, staged, agentLabel = "C
     "",
     "출력:",
     "- 최종 답변은 생성한 article-id, 제목, 검증 결과만 짧게 한국어로 보고한다.",
-    "- 독자-facing 본문에는 'World Memory', '월드 메모리', '월드메모리', '월드 메모리 벡터 검색 결과', 'semantic-search', '하네스' 같은 내부 표현을 쓰지 않는다.",
+    "- 독자-facing title, deck, summary, article.html과 metadata의 prose 필드에서는 내부 출처명을 한 단어로 기계 치환하지 말고 신문 기사 문장으로 풀어 쓴다. 예: 'Bloomberg가 전한 장중 보도', '같은 날 나온 ISNA 인용 발언', '새 가격 반응', '새 기업 공시', '최근 현지 매체 보도'.",
+    "- 독자-facing title, deck, summary, article.html과 metadata의 prose 필드에는 'World Memory', '월드 메모리', '월드메모리', '월드 메모리 벡터 검색 결과', 'News Feed', 'post-cutoff', 'post-World-Memory-update', '컷오프', '수집 기사', '피드', 'semantic-search', '하네스' 같은 내부 표현을 쓰지 않는다.",
     extraPrompt ? `\n추가 사용자 지시:\n${extraPrompt}` : "",
   ].join("\n");
 }
@@ -476,14 +493,15 @@ function buildRepairPrompt({ count, checkOutput, articleDirectory, staged, agent
     "",
     "보강 원칙:",
     "- 본문 공백 제외 3,000자 미만인 기사는 실제 근거, 이해관계자 발언, 수치, 반론, 다음 데이터 포인트로 확장한다.",
-    "- 직접/간접 인용이 4회 미만인 기사는 확인 가능한 출처에 기반한 인용 또는 간접 귀속 문장을 추가한다.",
-    "- 토픽 하네스가 실패했다면 metadata.topics를 config/magazine-topics.json의 topics[].label 중 1개 이상으로만 고친다.",
-    "- News Feed 근거를 보강하거나 새로 붙일 때는 월드 메모리 마지막 성공 업데이트 이후 항목만 사용한다. 과거 News Feed 항목을 근거로 쓰지 않는다.",
-    "- News Feed를 근거로 사용했다면 metadata.newsFeed.selectionPolicy='post-world-memory-update-only', worldMemoryLastSuccessfulAt, items[]를 남긴다.",
+    "- 직접/간접 인용은 고정 횟수를 채우기 위해 추가하지 않는다. 출처 목소리가 기사 흐름을 실제로 앞으로 밀 때만 직접 인용 또는 간접 귀속 문장을 추가한다.",
+    "- 인용·귀속을 보강할 때는 앞 문장이 그 목소리의 필요성을 만들고, 뒤 문장이 그 발언을 받아 다음 분석으로 넘어가게 고친다. 인용마다 새 사실, 반론, 이해관계자 관점, 수치 해석, 비용 부담자 중 하나를 추가해야 한다.",
+    "- 토픽 하네스가 실패했다면 metadata.topics를 config/magazine-topics.json의 topics[].label 중 1~3개로만 고친다. 1개 주 토픽은 반드시 남기고, 4개 이상 반환했다면 앞의 3개만 남긴다.",
+    "- 최근 보도 근거를 보강하거나 새로 붙일 때는 기준 업데이트 이후 항목만 사용한다. 과거 보도 항목을 근거로 쓰지 않는다.",
+    "- 감사용 메타데이터에는 metadata.newsFeed.selectionPolicy='post-world-memory-update-only', worldMemoryLastSuccessfulAt, items[]를 남긴다. 단, 이 필드명과 레이어 구분을 title, deck, summary, article.html, noveltyNote, coverDecision.rationale, sourceBasis prose에 쓰지 않는다.",
     "- metadata.eventSignature가 없거나 기사 전체 요약처럼 길게 쓰였으면 claimlet 형식으로 보강한다: role, actor, action, object[], time, marketMechanism, sourceIds[]. 복수 카드가 필요하면 eventSignatures[]에 primary 1개와 supporting 0개 이상을 둔다.",
     "- duplicate-news-feed-anchor, duplicate-world-memory-anchor, duplicate-story-angle이 나오면 기사 제목만 바꾸지 말고 실제로 다른 사건/다른 메커니즘으로 바꾼다. 독립 델타가 없으면 해당 기사 폴더를 새 비중복 주제로 다시 작성한다.",
-    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 post-cutoff News Feed id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생해야 한다.",
-    "- primary World Memory eventId가 겹친다는 이유만으로 정상 follow-up을 버리지 않는다. 대신 same_event / independent_followup / unrelated로 의미 판정하고, same_event이면 새 비중복 주제로 다시 작성한다.",
+    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 보도 id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생해야 한다.",
+    "- primary worldMemory eventId가 겹친다는 이유만으로 정상 follow-up을 버리지 않는다. 대신 same_event / independent_followup / unrelated로 의미 판정하고, same_event이면 새 비중복 주제로 다시 작성한다.",
     "- 커버스토리 하네스가 실패했다면 docs/magazine.md와 config/magazine-article-style.prompt.md의 Cover Story Promotion Policy를 따른다. isCoverStory=true인 기사는 coverRegisteredAt과 metadata.coverDecision을 보강하고, 커버가 아니면 isCoverStory=false 및 coverRegisteredAt=null로 정리한다.",
     "- 총 기사 수가 5개 이하인 초기 구간에서는 커버스토리 채점을 하지 않는다. bootstrap-cover-fill이면 candidateScore와 bestPreviousScore를 null로 둔다.",
     "- 히어로 이미지가 SVG, 생성 벡터, 목업, 앱 자체 크레딧, 출처/권리 메타데이터 누락으로 실패했다면 기사와 직접 관련 있는 실제 무료/오픈 이미지, 공식 이미지, 또는 개인 열람용 보도사진으로 교체한다.",
@@ -491,14 +509,14 @@ function buildRepairPrompt({ count, checkOutput, articleDirectory, staged, agent
     "- 이미지 수리 절차: 무료/오픈 이미지, 공식 이미지, 공개 보도사진 후보를 모두 검토한다. search_web는 최대 3회까지만 사용하고, 후보 페이지를 찾으면 더 검색하지 말고 이미지 URL 확보와 다운로드 검증으로 넘어간다. Wikimedia Commons는 Special:FilePath 또는 upload.wikimedia.org 직접 URL을 쓰고, 공식/보도사진은 원본 이미지 URL이나 페이지에서 확인되는 대표 이미지를 curl -L --fail --show-error -A 'FinanceAgentGUI/1.0' -o assets/<name>.<ext> 형태로 저장한다. 저장 후 file, ls -lh, strict check를 실행한다.",
     "- 개인 열람용 보도사진을 쓰면 metadata.heroImage.usageNote에 'editorial-private-use; local personal reading only'와 원출처를 남긴다. 오픈/공식 이미지면 license/rights를 남긴다.",
     "- 이미지 다운로드가 실패하면 1px placeholder나 빈 JPEG를 만들지 말고, 실패한 URL/명령/오류를 최종 답변에 남긴다.",
-    "- 독자-facing 본문에는 'World Memory', '월드 메모리', '월드메모리', '월드 메모리 벡터 검색 결과', 'semantic-search', '하네스' 같은 내부 표현을 쓰지 않는다.",
+    "- 독자-facing title, deck, summary, article.html과 metadata의 prose 필드에서는 내부 출처명을 한 단어로 기계 치환하지 말고 신문 기사 문장으로 풀어 쓴다. 예: 'Bloomberg가 전한 장중 보도', '같은 날 나온 ISNA 인용 발언', '새 가격 반응', '새 기업 공시', '최근 현지 매체 보도'.",
+    "- 독자-facing title, deck, summary, article.html과 metadata의 prose 필드에는 'World Memory', '월드 메모리', '월드메모리', '월드 메모리 벡터 검색 결과', 'News Feed', 'post-cutoff', 'post-World-Memory-update', '컷오프', '수집 기사', '피드', 'semantic-search', '하네스' 같은 내부 표현을 쓰지 않는다.",
     "- 존대말을 유지하되 독자를 가르치거나 훈계하는 문장을 줄인다.",
     "- 생성 뒤 node scripts/magazine_article_style_check.mjs --strict 를 실행하고 warning 0개가 될 때까지 수정한다.",
     "",
-    "월드 메모리 이후 News Feed 후보:",
+    "참고 근거 묶음:",
     newsFeedCandidates,
     "",
-    "현재 월드 메모리 대표 신호:",
     worldMemorySignals,
     "",
     "최근 업로드 기사 비교창:",

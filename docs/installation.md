@@ -60,6 +60,45 @@ Then run the development server:
 npm run dev -- --host 127.0.0.1
 ```
 
+### Durable Local Server
+
+For daily local use, the development server can be registered as a user-level
+service so it is not tied to an open terminal window.
+
+From `web`:
+
+```bash
+npm run server:service:install
+npm run server:service:status
+```
+
+This command uses the native per-user service manager for the current OS:
+
+| OS | Service backend | Installed outside the repo |
+| --- | --- | --- |
+| macOS | LaunchAgent (`launchd`) | `~/Library/LaunchAgents/com.financeagentgui.devserver.plist` |
+| Linux | systemd user service | `~/.config/systemd/user/finance-agent-gui-devserver.service` |
+| Windows | Task Scheduler | `FinanceAgentGUI Dev Server` scheduled task |
+
+The service still runs the app from this project folder and writes runtime logs
+under `logs/`:
+
+- `logs/service-5173.out.log`
+- `logs/service-5173.err.log`
+
+Useful commands from `web`:
+
+```bash
+npm run server:service:start
+npm run server:service:stop
+npm run server:service:restart
+npm run server:service:status
+npm run server:service:uninstall
+```
+
+If port `5173` is already held by a terminal-started server, stop that server
+first and then run `npm run server:service:restart`.
+
 For a production-style local build:
 
 ```bash
@@ -159,6 +198,10 @@ Common environment variables:
 
 - `FINANCE_AGENT_GUI_HOST`: local bind host, default `127.0.0.1`
 - `FINANCE_AGENT_GUI_PORT` or `PORT`: local server port
+- `FINANCE_AGENT_GUI_SERVICE_LABEL`: macOS LaunchAgent label override, default `com.financeagentgui.devserver`
+- `FINANCE_AGENT_GUI_SERVICE_NAME`: Linux systemd user service name override, default `finance-agent-gui-devserver.service`
+- `FINANCE_AGENT_GUI_SERVICE_TASK_NAME`: Windows scheduled task name override, default `FinanceAgentGUI Dev Server`
+- `NODE_BIN`: explicit Node.js executable for the durable service when the detected path is not correct
 - `ARCA_BASE_URL`: default `https://arca.live`
 - `ARCA_CHANNEL`: default `stock`
 - `ARCA_LOGIN_URL`: override for the Arca.live login URL

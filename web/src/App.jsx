@@ -5840,6 +5840,12 @@ function App() {
                     aria-modal="true"
                     aria-labelledby="magazine-delete-dialog-title"
                     aria-describedby="magazine-delete-dialog-description"
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" || event.nativeEvent?.isComposing || magazineDeleting) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void confirmMagazineArticleDelete();
+                    }}
                   >
                     <h2 id="magazine-delete-dialog-title">정말 삭제하시겠습니까?</h2>
                     <p id="magazine-delete-dialog-description">삭제한 기사는 되돌릴 수 없습니다.</p>
@@ -5862,6 +5868,7 @@ function App() {
                         type="button"
                         onClick={confirmMagazineArticleDelete}
                         disabled={magazineDeleting}
+                        autoFocus
                       >
                         {magazineDeleting ? (
                           <LoaderCircle size={15} strokeWidth={2.2} className="is-spinning" aria-hidden="true" />

@@ -1,13 +1,19 @@
 {
   "name": "finance-agent-gui-web",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "node server/server.mjs",
-    "serve": "node server/server.mjs"
+    "serve": "node server/server.mjs",
+    "server:service:install": "node ../scripts/local-server-service.mjs install",
+    "server:service:start": "node ../scripts/local-server-service.mjs start",
+    "server:service:stop": "node ../scripts/local-server-service.mjs stop",
+    "server:service:restart": "node ../scripts/local-server-service.mjs restart",
+    "server:service:status": "node ../scripts/local-server-service.mjs status",
+    "server:service:uninstall": "node ../scripts/local-server-service.mjs uninstall"
   },
   "dependencies": {
     "echarts": "^6.1.0",

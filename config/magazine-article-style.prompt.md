@@ -2,19 +2,19 @@
 
 This prompt is the project-local magazine writing harness. Use it whenever drafting, rewriting, or QA-checking `data/magazine/articles/<article-id>/article.html` and the reader-facing fields in `metadata.json`.
 
-Use `config/magazine-topics.json` as the only topic catalog. `metadata.topics` must contain at least one `topics[].label` value from that file and must not contain any other tags, subtopics, industries, companies, or keywords.
+Use `config/magazine-topics.json` as the only topic catalog. `metadata.topics` must contain 1-3 `topics[].label` values from that file and must not contain any other tags, subtopics, industries, companies, or keywords. One primary topic is required; up to two secondary topics are optional. Three topics is a maximum, not a target, so do not fill weak secondary topics just to use all slots. If more than three topics are returned, only the first three are registered.
 
 ## Source Policy
 
-- World Memory is an editorial signal, not a veto gate.
-- Before choosing an article subject, inspect the local News Feed window that starts after the latest successful World Memory update. Use `data/world-memory/collector-state.json` `collector.lastSuccessfulAt` as the cutoff. News Feed items at or before that timestamp must not be used as article subjects.
-- If a post-World-Memory-update News Feed item is urgent or unusually article-worthy, it can drive the article. In that case, use World Memory as a backup context layer with semantic search, not as the primary veto.
-- Do not classify News Feed importance with keyword or regex matching. Make an editorial LLM judgment from the post-cutoff feed item, market mechanism, source, timing, and available World Memory context.
-- If an article uses News Feed evidence, store `metadata.newsFeed.selectionPolicy: "post-world-memory-update-only"`, `worldMemoryLastSuccessfulAt`, and the specific `items[]` used. Each item timestamp must be after the World Memory cutoff.
-- If World Memory has strong semantic hits, use it as the local continuity anchor and store `worldMemory.retrievalPolicy: "mandatory-vector-search"` with query, engine, model, and hits in `metadata.json`.
-- If World Memory is sparse, noisy, or off-topic, do not skip the article. Switch to external research, official data, primary sources, earnings releases, filings, central-bank/statistical releases, reputable media, or market data. Set `researchMode: "external-research"` or `researchMode: "external-first"` in metadata and explain the source mix in `sourceBasis`.
-- If the user requested a field that is not well represented in World Memory, treat that absence as an editorial discovery opportunity. The article can still be valid when supported by external sources.
-- Do not generate every issue from only the highest-ranked World Memory story. Mix:
+- Treat all available inputs as one evidence bundle for article judgment. Do not explain internal source layers to readers.
+- Before choosing an article subject, inspect the local `data/news-feed.json` item window that starts after the latest successful internal update. Use `data/world-memory/collector-state.json` `collector.lastSuccessfulAt` as the internal eligibility boundary. Items at or before that timestamp must not be used as article subjects.
+- If an eligible recent item is urgent or unusually article-worthy, it can drive the article. Use continuity search and external research as ordinary supporting evidence, not as a separate reader-facing layer.
+- Do not classify item importance with keyword or regex matching. Make an editorial LLM judgment from the item, market mechanism, source, timing, and available context.
+- For auditability, store local item evidence in `metadata.newsFeed.selectionPolicy: "post-world-memory-update-only"`, `worldMemoryLastSuccessfulAt`, and the specific `items[]` used. Each item timestamp must be after the internal eligibility boundary. Do not mention these field names or layer distinctions in prose fields.
+- If continuity search has strong semantic hits, store `worldMemory.retrievalPolicy: "mandatory-vector-search"` with query, engine, model, and hits in `metadata.json`. This is an audit record, not a reader-facing source layer.
+- If local context is sparse, noisy, or off-topic, do not skip the article. Switch to external research, official data, primary sources, earnings releases, filings, central-bank/statistical releases, reputable media, or market data. Set `researchMode: "external-research"` or `researchMode: "external-first"` in metadata and explain the source mix through actual source names.
+- If the user requested a field that is not well represented in local context, treat that absence as an editorial discovery opportunity. The article can still be valid when supported by external sources.
+- Do not generate every issue from only the highest-ranked story family. Mix:
   - major regime stories,
   - second-order follow-through stories,
   - under-covered but meaningful low-level signals,
@@ -24,7 +24,7 @@ Use `config/magazine-topics.json` as the only topic catalog. `metadata.topics` m
 
 Before writing articles, create a short issue slate. The slate should prevent the magazine from publishing the same article in different clothes.
 
-- Do not fill an issue only with the top World Memory story family, even when that story dominates markets.
+- Do not fill an issue only with the top story family, even when that story dominates markets.
 - A normal five-article issue should include:
   - one or two mega-trend follow-ups,
   - one under-covered or low-level signal,
@@ -47,7 +47,7 @@ Before writing articles, create a short issue slate. The slate should prevent th
 - A low-ranked issue can be article-worthy when it has a clean mechanism, surprising implication, useful data point, or good scene. Importance rank is not the same as magazine value.
 - If a topic was already covered recently, the new article must name the new angle in metadata `noveltyNote`, not in reader-facing copy.
 - Store `metadata.eventSignature` as a compact primary claimlet for duplicate detection: `role:"primary"`, `actor`, `action`, `object[]`, `time`, `marketMechanism`, and `sourceIds[]`. If the article deliberately connects multiple events, use `metadata.eventSignatures[]` with exactly one primary card and optional supporting cards. Only the primary claimlet is the main novelty embedding unit. Do not use the whole article body as the novelty embedding text.
-- Independent delta is not whole-article embedding distance and not a changed title, image, or `storyFamily`. It is a fresh evidence anchor after the previous article: a new post-cutoff News Feed item, official/external source URL, number, policy execution, price reaction, or company action. Treat primary `worldMemory.vectorSearch.hits[0].eventId` overlap as continuity context, not a standalone veto. For ambiguous overlaps, make an LLM editorial judgment: `same_event`, `independent_followup`, or `unrelated`.
+- Independent delta is not whole-article embedding distance and not a changed title, image, or `storyFamily`. It is a fresh evidence anchor after the previous article: a new eligible local item, official/external source URL, number, policy execution, price reaction, or company action. Treat primary `worldMemory.vectorSearch.hits[0].eventId` overlap as continuity context, not a standalone veto. For ambiguous overlaps, make an LLM editorial judgment: `same_event`, `independent_followup`, or `unrelated`.
 
 ## Cover Story Promotion Policy
 
@@ -56,9 +56,9 @@ Cover story ordering is handled later by `coverRegisteredAt`; this section decid
 - While the total article count including the new article is five or fewer, promote the new article without scoring. The first five articles fill the cover story pool before scored ranking begins.
 - Starting with the sixth article, compare the candidate with the latest uploaded articles by upload time: use the previous five articles.
 - Judge whether the candidate is closer than every article in that comparison window to either:
-  - the most important current World Memory issue, or
-  - the most recent current World Memory issue.
-- This is an editorial LLM judgment, not a keyword match. Use World Memory evidence, semantic-search hits, article title/deck/summary, topics, `storyFamily`, `editorialAngle`, and the actual news mechanism.
+  - the most important current market issue, or
+  - the most recent current market issue.
+- This is an editorial LLM judgment, not a keyword match. Use the evidence bundle, continuity-search hits, article title/deck/summary, topics, `storyFamily`, `editorialAngle`, and the actual news mechanism.
 - Promote only when the candidate is the strongest item in that comparison window. Ties should usually not promote unless the candidate is clearly closer to the most recent issue.
 - If promoted, set `metadata.isCoverStory: true`, `metadata.coverRegisteredAt` to the generation timestamp, and add:
 
@@ -121,7 +121,10 @@ Write like a magazine editor walking through the issue with the reader, not a tu
 - Vary section length. A short section can be one paragraph; a data section may need four or five.
 - Deep analysis should include at least one chart block when useful, but the body must still read on its own.
 - Use direct or indirect attribution when research contains named stakeholders. Direct quote text should be Korean, with original source/person names preserved in the label.
-- A generated magazine article should usually carry at least five source/evidence entries in `sourceBasis` and at least four direct or indirect attribution moments in the body. More evidence should add scene, mechanism, or disagreement rather than padding.
+- A generated magazine article should usually carry at least five source/evidence entries in `sourceBasis`. There is no fixed quota for direct quotes or indirect attributions in the body.
+- Do not drop quotes or attributions after the article has already explained the same point. Each quoted or attributed moment must advance the flow: introduce a fact the prose has not already stated, sharpen a disagreement, explain why a number matters, name who benefits or pays, or set up the next paragraph.
+- Integrate attribution into the article's logic. The sentence before a quote should create a reason to hear that voice, and the sentence after it should use the quote to move the analysis forward. If a quote only repeats the paragraph, replace it with a tighter indirect attribution or remove it.
+- It is better to publish a coherent article with no direct quotes than to insert mechanical quote blocks. Use quotes and attributions only when they change what the reader understands.
 
 ## Hero Image Policy
 
@@ -144,12 +147,20 @@ Do not expose internal production language in `title`, `deck`, `summary`, or `ar
 - `월드 메모리`
 - `월드메모리`
 - `월드 메모리 벡터 검색 결과`
+- `News Feed`
+- `post-cutoff`
+- `post-World-Memory-update`
+- `컷오프`
+- `수집 기사`
+- `피드`
 - `semantic-search`
 - `시장 메모리`
 - `편집회의 체크리스트`
 - `하네스`
 
 Translate process into reader language: `시장`, `미디어`, `정책 당국`, `해운업계`, `에너지 트레이더`, `채권 투자자`, `개발자 커뮤니티`, `소비자 데이터`, or the specific source name.
+
+Do not mechanically replace internal source labels with one fixed phrase. Write the sentence as a newspaper article would: for example, `Bloomberg가 전한 장중 보도`, `같은 날 나온 ISNA 인용 발언`, `새 가격 반응`, `새 기업 공시`, `최근 현지 매체 보도`, or another source-specific phrase that fits the paragraph. Never write source labels as `계열 피드`, `새 피드`, or similar data-pipeline language.
 
 ## Ready Check
 

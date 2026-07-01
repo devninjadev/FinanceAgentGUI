@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AlertTriangle from "lucide-react/dist/esm/icons/alert-triangle.js";
+import Copy from "lucide-react/dist/esm/icons/copy.js";
 import FileText from "lucide-react/dist/esm/icons/file-text.js";
 import LoaderCircle from "lucide-react/dist/esm/icons/loader-circle.js";
 import Search from "lucide-react/dist/esm/icons/search.js";
@@ -19,6 +20,303 @@ function reportSearchText(report = {}) {
   ]
     .join(" ")
     .toLowerCase();
+}
+
+function reportBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("이미지를 읽지 못했습니다."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function reportImageSrcToDataUrl(src) {
+  if (!src) return src;
+  if (src.startsWith("data:")) return src;
+  const response = await fetch(src, { credentials: "same-origin" });
+  if (!response.ok) throw new Error(`이미지를 가져오지 못했습니다. (${response.status})`);
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) throw new Error("이미지 형식이 아닙니다.");
+  return reportBlobToDataUrl(blob);
+}
+
+async function inlineReportClipboardImages(sourceNode, cloneNode) {
+  const sourceImages = Array.from(sourceNode.querySelectorAll("img"));
+  const cloneImages = Array.from(cloneNode.querySelectorAll("img"));
+  await Promise.all(
+    cloneImages.map(async (image, index) => {
+      const sourceImage = sourceImages[index];
+      const source = sourceImage?.currentSrc || sourceImage?.src || image.currentSrc || image.src || image.getAttribute("src");
+      if (!source) return;
+      try {
+        image.setAttribute("src", await reportImageSrcToDataUrl(source));
+      } catch (error) {
+        image.setAttribute("src", new URL(source, window.location.href).href);
+        image.setAttribute("data-copy-image-warning", error.message || "image inline failed");
+      }
+    })
+  );
+}
+
+function inlineReportClipboardCanvases(sourceNode, cloneNode) {
+  const sourceCanvases = Array.from(sourceNode.querySelectorAll("canvas"));
+  const cloneCanvases = Array.from(cloneNode.querySelectorAll("canvas"));
+  cloneCanvases.forEach((canvas, index) => {
+    const sourceCanvas = sourceCanvases[index];
+    if (!sourceCanvas) return;
+    try {
+      const image = document.createElement("img");
+      image.src = sourceCanvas.toDataURL("image/png");
+      image.alt = canvas.getAttribute("aria-label") || sourceCanvas.getAttribute("aria-label") || "보고서 차트";
+      image.width = sourceCanvas.width;
+      image.height = sourceCanvas.height;
+      canvas.replaceWith(image);
+    } catch {
+      canvas.remove();
+    }
+  });
+}
+
+function cleanReportClipboardNode(node) {
+  node
+    .querySelectorAll(".report-document-category, .report-document-header dl, .report-document-summary, .report-document-tags")
+    .forEach((element) => element.remove());
+  node.querySelectorAll("script, style, button, textarea, input").forEach((element) => element.remove());
+  node.querySelectorAll("a[href]").forEach((anchor) => {
+    anchor.setAttribute("href", new URL(anchor.getAttribute("href"), window.location.href).href);
+  });
+  node.querySelectorAll("[contenteditable]").forEach((element) => element.removeAttribute("contenteditable"));
+}
+
+function trimReportClipboardTrailingWhitespace(element) {
+  if (element.classList?.contains("report-copy-heading-spacer")) return;
+  let current = element.lastChild;
+  while (current && current.nodeType === Node.TEXT_NODE && !current.nodeValue.trim()) {
+    const previous = current.previousSibling;
+    current.remove();
+    current = previous;
+  }
+  if (current?.nodeType === Node.TEXT_NODE) {
+    current.nodeValue = current.nodeValue.replace(/[ \t\u00a0]+$/g, "");
+  }
+}
+
+const reportClipboardBlockLikeSelector = [
+  "article",
+  "section",
+  "div",
+  "p",
+  "blockquote",
+  "figure",
+  "figcaption",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "time",
+  "ul",
+  "ol",
+  "li",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+  "th",
+  "td",
+].join(", ");
+
+const reportClipboardWhitespaceContainerSelector = [
+  "article",
+  "section",
+  "div",
+  "blockquote",
+  "figure",
+  "figcaption",
+  "ul",
+  "ol",
+  "table",
+  "thead",
+  "tbody",
+  "tr",
+].join(", ");
+
+function isReportClipboardBlockLikeNode(node) {
+  return node?.nodeType === Node.ELEMENT_NODE && node.matches(reportClipboardBlockLikeSelector);
+}
+
+function shouldRemoveReportClipboardWhitespaceTextNode(textNode) {
+  if (textNode.nodeValue.trim()) return false;
+  const parent = textNode.parentElement;
+  if (!parent || parent.closest("pre, code, textarea")) return false;
+  if (isReportClipboardBlockLikeNode(textNode.previousSibling)) return true;
+  if (isReportClipboardBlockLikeNode(textNode.nextSibling)) return true;
+  return parent.matches(reportClipboardWhitespaceContainerSelector);
+}
+
+function normalizeReportClipboardTextWhitespace(node) {
+  const textNodes = [];
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+  textNodes.forEach((textNode) => {
+    if (textNode.parentElement?.closest(".report-copy-heading-spacer")) return;
+    textNode.nodeValue = textNode.nodeValue.replace(/\u00a0/g, " ");
+    if (shouldRemoveReportClipboardWhitespaceTextNode(textNode)) {
+      textNode.remove();
+    }
+  });
+  node
+    .querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote, figcaption, time")
+    .forEach(trimReportClipboardTrailingWhitespace);
+}
+
+function stripReportClipboardInternalMarkers(node) {
+  node.querySelectorAll(".report-copy-heading-spacer").forEach((element) => {
+    element.classList.remove("report-copy-heading-spacer");
+    if (!element.getAttribute("class")) {
+      element.removeAttribute("class");
+    }
+  });
+}
+
+function createReportClipboardSpacer() {
+  const spacer = document.createElement("p");
+  spacer.className = "report-copy-spacer";
+  spacer.appendChild(document.createElement("br"));
+  return spacer;
+}
+
+function createReportClipboardHeadingSpacer({ trailingNbsp = false, withLineBreak = false } = {}) {
+  const spacer = document.createElement("p");
+  spacer.className = "report-copy-heading-spacer";
+  spacer.appendChild(document.createTextNode("\u00a0"));
+  if (withLineBreak) {
+    spacer.appendChild(document.createElement("br"));
+    if (trailingNbsp) {
+      spacer.appendChild(document.createTextNode("\u00a0"));
+    }
+  }
+  return spacer;
+}
+
+function nextReportClipboardElement(element) {
+  let next = element.nextSibling;
+  while (next && next.nodeType === Node.TEXT_NODE && !next.textContent.trim()) {
+    next = next.nextSibling;
+  }
+  return next?.nodeType === Node.ELEMENT_NODE ? next : null;
+}
+
+function addReportClipboardBlockquoteLeadBreak(container) {
+  const lead = container.firstElementChild;
+  if (!lead?.matches("strong, b")) return false;
+  const firstBreak = nextReportClipboardElement(lead);
+  if (!firstBreak?.matches("br")) return false;
+  const secondBreak = nextReportClipboardElement(firstBreak);
+  if (secondBreak?.matches("br")) return true;
+  firstBreak.insertAdjacentElement("afterend", document.createElement("br"));
+  return true;
+}
+
+function insertReportClipboardBlockquoteBreaks(node) {
+  node.querySelectorAll(".report-document-body blockquote").forEach((quote) => {
+    if (addReportClipboardBlockquoteLeadBreak(quote)) return;
+    const firstParagraph = quote.firstElementChild;
+    if (firstParagraph?.matches("p")) {
+      addReportClipboardBlockquoteLeadBreak(firstParagraph);
+    }
+  });
+}
+
+function insertReportClipboardBreaks(node) {
+  node.querySelectorAll(".report-document-body h2, .report-document-body .markdown-heading").forEach((heading) => {
+    heading.insertAdjacentElement("beforebegin", createReportClipboardHeadingSpacer({ trailingNbsp: true, withLineBreak: true }));
+    heading.insertAdjacentElement("afterend", createReportClipboardHeadingSpacer());
+  });
+  insertReportClipboardBlockquoteBreaks(node);
+  node
+    .querySelectorAll(".report-document-body p, .report-document-body .markdown-paragraph")
+    .forEach((paragraph) => {
+      if (
+        paragraph.classList.contains("report-copy-spacer") ||
+        paragraph.classList.contains("report-copy-heading-spacer") ||
+        paragraph.closest("blockquote, figure, figcaption")
+      ) {
+        return;
+      }
+      const nextElement = nextReportClipboardElement(paragraph);
+      if (!nextElement || !nextElement.matches("p, blockquote, ul, ol, .chat-table-wrap, table")) return;
+      paragraph.insertAdjacentElement("afterend", createReportClipboardSpacer());
+    });
+  node.querySelectorAll(".report-document-body blockquote").forEach((quote) => {
+    const nextElement = nextReportClipboardElement(quote);
+    if (nextElement?.classList?.contains("report-copy-spacer")) return;
+    quote.insertAdjacentElement("afterend", createReportClipboardSpacer());
+  });
+}
+
+function reportPlainTextFromNode(node) {
+  const holder = document.createElement("div");
+  holder.style.position = "fixed";
+  holder.style.left = "-10000px";
+  holder.style.top = "0";
+  holder.style.whiteSpace = "pre-wrap";
+  holder.appendChild(node.cloneNode(true));
+  document.body.appendChild(holder);
+  const text = holder.innerText
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  holder.remove();
+  return text;
+}
+
+async function buildReportClipboardPayload(sourceNode) {
+  if (!sourceNode) throw new Error("복사할 보고서 본문을 찾지 못했습니다.");
+  const cloneNode = sourceNode.cloneNode(true);
+  cleanReportClipboardNode(cloneNode);
+  insertReportClipboardBreaks(cloneNode);
+  inlineReportClipboardCanvases(sourceNode, cloneNode);
+  await inlineReportClipboardImages(sourceNode, cloneNode);
+  normalizeReportClipboardTextWhitespace(cloneNode);
+  stripReportClipboardInternalMarkers(cloneNode);
+  const plainText = reportPlainTextFromNode(cloneNode);
+  const html = [
+    "<!doctype html>",
+    "<html>",
+    "<head><meta charset=\"utf-8\"></head>",
+    "<body>",
+    cloneNode.outerHTML,
+    "</body>",
+    "</html>",
+  ].join("");
+  return { html, plainText };
+}
+
+async function writeReportToClipboard(sourceNode) {
+  const payloadPromise = buildReportClipboardPayload(sourceNode);
+  if (navigator.clipboard?.write && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": payloadPromise.then(({ html }) => new Blob([html], { type: "text/html" })),
+          "text/plain": payloadPromise.then(({ plainText }) => new Blob([plainText], { type: "text/plain" })),
+        }),
+      ]);
+      return { mode: "html" };
+    } catch (error) {
+      const { plainText } = await payloadPromise;
+      await navigator.clipboard.writeText(plainText);
+      return { mode: "text", warning: error.message || "HTML 복사 실패" };
+    }
+  }
+  const { plainText } = await payloadPromise;
+  await navigator.clipboard.writeText(plainText);
+  return { mode: "text" };
 }
 
 function ReportListItem({ report, selected, onSelect, onDelete, deleting = false }) {
@@ -167,7 +465,7 @@ function normalizeScoutPayload(payload) {
 function buildScoutPrompt() {
   return [
     "FinanceAgentGUI의 '심심해요' 패널에 띄울 숨은 시장 이슈 후보를 생성하세요.",
-    "주어진 World Memory 검색 컨텍스트와 News Feed 검색 컨텍스트를 근거로, 메인 뉴스에 가려져 아직 조용하지만 점차 중요해질 수 있는 분야/이슈 3~4개를 고르세요.",
+    "주어진 참고 근거를 바탕으로, 메인 뉴스에 가려져 아직 조용하지만 점차 중요해질 수 있는 분야/이슈 3~4개를 고르세요.",
     "선정은 의미 기반으로 하며 단순 키워드 매칭이나 제목 나열로 처리하지 마세요.",
     "첫 문장은 오늘 시장 분위기에 맞는 짧은 인사로 시작하세요. 예: '오늘 주식시장은 ... 때문에 별로였지만' 또는 '오늘 주식시장은 ... 이슈로 들떠 있지만'. 단, 실제 컨텍스트에 맞게 자연스럽게 쓰세요.",
     "그 다음 '하지만 아직 사람들이 크게 관심을 갖지 않는 조용한 분야도 있다'는 전환 문장을 만드세요.",
@@ -178,7 +476,7 @@ function buildScoutPrompt() {
       {
         greeting: "시장 분위기 인사 한 문장",
         bridge: "숨은 이슈를 찾아보자는 전환 문장",
-        sourceNote: "World Memory와 News Feed를 함께 본 근거에 대한 짧은 설명",
+        sourceNote: "참고 근거에서 어떤 신호를 읽었는지에 대한 짧은 설명",
         issues: [
           {
             id: "short-id",
@@ -214,10 +512,12 @@ function buildResearchPrompt(issue, angle) {
     angle.promptFocus || angle.label,
     "",
     "작성 방향:",
-    "- World Memory와 News Feed 검색 컨텍스트를 함께 참고해, 메인 뉴스에 가려졌지만 조용히 소리가 커지는 이슈인지 검토해 주세요.",
+    "- 제공된 참고 근거를 바탕으로, 메인 뉴스에 가려졌지만 조용히 소리가 커지는 이슈인지 검토해 주세요.",
+    "- 작성 과정에서는 로컬 컨텍스트, World Memory, News Feed, 웹 확인, 공식 자료를 내부적으로 대조하되, 최종 보고서는 조사 로그가 아니라 판단과 서사로 읽히게 써 주세요.",
     "- 현재 시장 분위기 속에서 이 주제가 왜 아직 덜 주목받는지, 어떤 신호가 쌓이면 주류 테마가 될 수 있는지 분석해 주세요.",
     "- 관련 산업, 가치사슬, 수혜/피해 기업 유형, 확인할 지표, 반대 시나리오를 분리해 주세요.",
-    "- 근거가 로컬 컨텍스트에 한정되면 그 한계를 명시하고, 가능한 경우 최신 웹 확인과 로컬 컨텍스트를 구분해 주세요.",
+    "- 보고서 서두에는 근거 묶음부터 나열하지 말고 핵심 요약이나 빠른 판단으로 바로 들어가세요.",
+    "- 근거가 로컬 컨텍스트에 한정되면 본문에서 필요한 만큼 한계를 짧게 밝히고, 외부 URL이나 원출처 링크는 하단 각주/참고 링크로 모아 주세요.",
     "- 마지막에는 '계속 관찰할지 / 지금은 보류할지 / 추가 확인 후 진입할지' 형태의 명확한 결론을 주세요.",
     "",
     "저장:",
@@ -253,7 +553,7 @@ function BoredScoutPanel({
   isSending = false,
 }) {
   if (stage === "warming") {
-    return <BoredPulseLoader agentIcon={agentIcon} label="World Memory와 News Feed 사이에서 조용한 신호를 찾는 중" />;
+    return <BoredPulseLoader agentIcon={agentIcon} label="참고 근거에서 조용한 신호를 찾는 중" />;
   }
 
   if (stage === "researching") {
@@ -364,6 +664,10 @@ export default function ReportsView({
   const [scout, setScout] = useState(null);
   const [scoutError, setScoutError] = useState("");
   const [selectedScoutIssue, setSelectedScoutIssue] = useState(null);
+  const [reportCopyStatus, setReportCopyStatus] = useState("idle");
+  const [reportCopyError, setReportCopyError] = useState("");
+  const reportDocumentRef = useRef(null);
+  const reportCopyResetTimerRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -395,6 +699,12 @@ export default function ReportsView({
     };
   }, [refreshSignal]);
 
+  useEffect(() => () => {
+    if (reportCopyResetTimerRef.current) {
+      window.clearTimeout(reportCopyResetTimerRef.current);
+    }
+  }, []);
+
   useEffect(() => {
     if (worldMemoryEnabled) return;
     setScoutStage("idle");
@@ -410,6 +720,15 @@ export default function ReportsView({
   }, [normalizedQuery, reports]);
   const activeReport = filteredReports.find((report) => report.id === selectedReportId) || filteredReports[0] || null;
 
+  useEffect(() => {
+    if (reportCopyResetTimerRef.current) {
+      window.clearTimeout(reportCopyResetTimerRef.current);
+      reportCopyResetTimerRef.current = null;
+    }
+    setReportCopyStatus("idle");
+    setReportCopyError("");
+  }, [activeReport?.id]);
+
   function submitSearch(event) {
     event.preventDefault();
     setSelectedReportId(filteredReports[0]?.id || "");
@@ -420,6 +739,29 @@ export default function ReportsView({
     setSelectedReportId(reportId);
     setScoutStage("idle");
   }, []);
+
+  const copyActiveReport = useCallback(async () => {
+    if (reportCopyStatus === "copying") return;
+    if (reportCopyResetTimerRef.current) {
+      window.clearTimeout(reportCopyResetTimerRef.current);
+      reportCopyResetTimerRef.current = null;
+    }
+    setReportCopyStatus("copying");
+    setReportCopyError("");
+    try {
+      const result = await writeReportToClipboard(reportDocumentRef.current);
+      setReportCopyStatus(result.mode === "text" ? "text" : "copied");
+      setReportCopyError(result.warning || "");
+      reportCopyResetTimerRef.current = window.setTimeout(() => {
+        setReportCopyStatus("idle");
+        setReportCopyError("");
+        reportCopyResetTimerRef.current = null;
+      }, 2200);
+    } catch (error) {
+      setReportCopyStatus("error");
+      setReportCopyError(error.message || "보고서를 복사하지 못했습니다.");
+    }
+  }, [reportCopyStatus]);
 
   const startBoredScout = useCallback(async () => {
     if (!worldMemoryEnabled || !agentOptionsReady) return;
@@ -544,6 +886,16 @@ export default function ReportsView({
   }, [deleteCandidate, deletingReportId]);
 
   const deleteCandidateBusy = Boolean(deleteCandidate?.id && deletingReportId === deleteCandidate.id);
+  const reportCopyLabel =
+    reportCopyStatus === "copying"
+      ? "복사 중"
+      : reportCopyStatus === "copied"
+        ? "복사됨"
+        : reportCopyStatus === "text"
+          ? "텍스트 복사됨"
+          : reportCopyStatus === "error"
+            ? "복사 실패"
+            : "복사하기";
 
   return (
     <div className="reports-layout">
@@ -611,11 +963,33 @@ export default function ReportsView({
             isSending={isSending}
           />
         ) : activeReport ? (
-          <article className="report-document">
+          <article className="report-document" ref={reportDocumentRef}>
             <header className="report-document-header">
               <div>
-                <span>{activeReport.category}</span>
-                <h1>{activeReport.title}</h1>
+                <span className="report-document-category">{activeReport.category}</span>
+                <h1 className="report-document-title" aria-label={activeReport.title}>
+                  <span className="report-document-title-text">{activeReport.title}</span>
+                  <button
+                    className={[
+                      "report-title-copy-button",
+                      reportCopyStatus !== "idle" ? `is-${reportCopyStatus}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    type="button"
+                    onClick={copyActiveReport}
+                    disabled={reportCopyStatus === "copying"}
+                    aria-label={`${activeReport.title} 보고서 복사`}
+                    title={reportCopyError || reportCopyLabel}
+                  >
+                    {reportCopyStatus === "copying" ? (
+                      <LoaderCircle size={15} strokeWidth={2.2} aria-hidden="true" />
+                    ) : (
+                      <Copy size={15} strokeWidth={2.2} aria-hidden="true" />
+                    )}
+                    <span className="sr-only report-document-copy-status" aria-live="polite">{reportCopyLabel}</span>
+                  </button>
+                </h1>
               </div>
               <dl>
                 <div>

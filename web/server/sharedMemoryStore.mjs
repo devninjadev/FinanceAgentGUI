@@ -525,7 +525,7 @@ export function buildExternalNewsBriefing({ worldReport = null, newsStore = null
   const newsLines = filtered.map((item) => {
     const title = cleanText(item.translatedTitle || item.title || "", 220);
     const body = cleanText(item.translatedText || item.originalText || "", 420);
-    const source = cleanText(item.feedTitle || item.feedId || "News Feed", 80);
+    const source = cleanText(item.feedTitle || item.feedId || "최근 보도", 80);
     const time = item.publishedAt || item.fetchedAt || "";
     return `- ${time} · ${source}: ${title}${body && body !== title ? ` — ${body}` : ""}`;
   });
@@ -540,13 +540,13 @@ export function buildExternalNewsBriefing({ worldReport = null, newsStore = null
         `브리핑 갱신: ${builtAt}`,
         reportAt ? `기준 월드 메모리 보고서: ${reportAt}` : "기준 월드 메모리 보고서: 아직 없음",
         "",
-        "## 월드 메모리 최신 요약",
-        worldText || "아직 사용할 수 있는 월드 메모리 보고서 요약이 없습니다.",
+        "## 참고 근거 요약",
+        worldText || "아직 사용할 수 있는 기준 요약이 없습니다.",
         "",
-        "## 월드 메모리 이후 News Feed 현재 브리핑",
+        "## 참고 근거 브리핑",
         filtered.length
-          ? `아래 항목은 최신 월드 메모리 보고서 이후 수집/번역된 현재 브리핑 후보입니다. 15분마다 이 파일을 갱신하며 누적 저장소로 쓰지 않습니다.\n\n${newsLines.join("\n")}`
-          : "최신 월드 메모리 보고서 이후 새 News Feed 브리핑 후보가 없습니다.",
+          ? `아래 항목은 기준 보고서 이후 확인된 현재 브리핑 후보입니다. 15분마다 이 파일을 갱신하며 누적 저장소로 쓰지 않습니다.\n\n${newsLines.join("\n")}`
+          : "기준 보고서 이후 새 보도 브리핑 후보가 없습니다.",
       ].join("\n"),
       EXTERNAL_MEMORY_LAYER_LIMIT
     ),

@@ -179,6 +179,42 @@ test("magazine style check rejects topics outside the configured catalog", () =>
   );
 });
 
+test("magazine style check rejects articles without selected topics", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-topic-empty-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    topics: [],
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "topics-missing"));
+      return true;
+    },
+  );
+});
+
+test("magazine style check rejects more than three article topics", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-topic-many-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    topics: ["시장", "금융", "경제", "산업"],
+  });
+
+  assert.throws(
+    () => runCheck(articleRoot),
+    (error) => {
+      const output = JSON.parse(error.stdout);
+      assert.equal(output.ok, false);
+      assert.ok(output.errors.some((issue) => issue.code === "topics-too-many"));
+      return true;
+    },
+  );
+});
+
 test("magazine style check follows a custom topic catalog", () => {
   const articleRoot = mkdtempSync(join(tmpdir(), "magazine-style-topic-custom-"));
   const topicConfigPath = join(articleRoot, "magazine-topics.json");

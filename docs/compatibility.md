@@ -68,6 +68,42 @@ If detection fails, the recovery path should tell the user to set `ARCA_BROWSER_
 
 ## Known Compatibility Risks
 
+### Durable local server service
+
+The durable server command is cross-platform but intentionally uses each OS's
+native user-level service manager:
+
+- macOS: `launchd` LaunchAgent
+- Linux: `systemd --user`
+- Windows: Task Scheduler
+
+Run from `web`:
+
+```bash
+npm run server:service:install
+npm run server:service:status
+```
+
+The service keeps the local GUI server independent from a terminal window. It
+does not make the app a public network service; the default bind remains
+`127.0.0.1`.
+
+Common repair checks:
+
+- If install succeeds but the page is down, run `npm run server:service:status`
+  and inspect `logs/service-5173.err.log`.
+- If port `5173` is already occupied by a terminal-started server, stop the old
+  process and run `npm run server:service:restart`.
+- If Node was installed through a version manager and the service cannot find
+  it, set `NODE_BIN` to the absolute Node executable path and reinstall the
+  service.
+- On Linux, `systemd --user` must be available in the current desktop/session
+  environment. Without user systemd, use the foreground `npm run dev` path or
+  add a platform-specific supervisor.
+- On Windows, the scheduled task runs in the current user's context at logon. It
+  should be installed from native PowerShell or another native Windows shell,
+  not WSL.
+
 ### Antigravity CLI OAuth
 
 Antigravity provider calls use the standalone `agy` CLI and its Google OAuth
