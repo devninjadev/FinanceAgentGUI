@@ -9,7 +9,6 @@ const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const GUIBUILD_ROOT = resolve(WEB_ROOT, "..");
 const DATA_REPORTS_DIR = join(GUIBUILD_ROOT, "data", "reports");
 const GUIBUILD_REPORTS_DIR = join(GUIBUILD_ROOT, "reports");
-const WORLD_MEMORY_LOG_DIR = join(GUIBUILD_ROOT, "logs", "world-memory");
 const MAX_REPORT_BYTES = 1024 * 1024;
 const MAX_REPORT_WRITE_BYTES = 1024 * 1024;
 const MAX_REPORTS = 500;
@@ -27,7 +26,7 @@ function configuredReportDirs() {
     .map((item) => item.trim())
     .filter(Boolean)
     .map((item) => resolve(GUIBUILD_ROOT, item));
-  return [...new Set([DATA_REPORTS_DIR, GUIBUILD_REPORTS_DIR, WORLD_MEMORY_LOG_DIR, ...envDirs])];
+  return [...new Set([DATA_REPORTS_DIR, GUIBUILD_REPORTS_DIR, ...envDirs])];
 }
 
 function hashText(value) {
@@ -311,11 +310,7 @@ function shouldSkipDir(name) {
 
 function isReportCandidate(filePath, root) {
   const ext = extname(filePath).toLowerCase();
-  if (!REPORT_EXTENSIONS.has(ext)) return false;
-  if (resolve(root) === resolve(WORLD_MEMORY_LOG_DIR)) {
-    return /^world_memory_market_situation_/.test(basename(filePath));
-  }
-  return true;
+  return REPORT_EXTENSIONS.has(ext);
 }
 
 function reportPriority(path) {

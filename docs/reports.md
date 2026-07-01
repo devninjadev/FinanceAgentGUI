@@ -5,7 +5,9 @@ FinanceAgentGUI uses a file-based report system. The local app does not need a r
 ## Storage
 
 - Generated user-facing reports should be written under `data/reports/`.
-- Existing World Memory market reports are also discoverable from `logs/world-memory/`.
+- The Reports page does not automatically accumulate World Memory artifacts from
+  `logs/world-memory/`. Keep World Memory review output on the World Memory
+  surface unless a user explicitly saves a user-facing report.
 - A standalone checkout or copied app folder should still work with these paths.
 - Runtime report files are local user state and should stay gitignored.
 

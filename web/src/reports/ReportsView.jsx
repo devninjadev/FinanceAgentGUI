@@ -656,6 +656,12 @@ export default function ReportsView({
             aria-modal="true"
             aria-labelledby="report-delete-dialog-title"
             aria-describedby="report-delete-dialog-description"
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.nativeEvent?.isComposing || deleteCandidateBusy) return;
+              event.preventDefault();
+              event.stopPropagation();
+              void deleteReport();
+            }}
           >
             <div className="report-delete-dialog-header">
               <span className="report-delete-dialog-icon" aria-hidden="true">
@@ -679,6 +685,7 @@ export default function ReportsView({
                 type="button"
                 onClick={deleteReport}
                 disabled={deleteCandidateBusy}
+                autoFocus
               >
                 {deleteCandidateBusy ? (
                   <>

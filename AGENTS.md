@@ -80,7 +80,7 @@ instructions should be written relative to this project folder.
 ## Report Files
 
 - Reports are file-based local artifacts, not a database-backed content system.
-- Generated user-facing reports should live under `data/reports/`; existing World Memory report artifacts are also discoverable from `logs/world-memory/`.
+- Generated user-facing reports should live under `data/reports/`. World Memory artifacts under `logs/world-memory/` stay on the World Memory surface and are not accumulated into the Reports page by default.
 - Contract docs: `docs/reports.md`; GUI endpoint: `/api/reports`.
 - Delete actions should require confirmation, then refresh the visible report list.
 - Markdown `echarts` blocks and JSON `charts` entries should render as reader objects, not raw code or JSON.
