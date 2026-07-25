@@ -121,9 +121,9 @@ export function AppNavigation({
                   const isPortfolioItem = item.view === "portfolio";
                   const isPortfolioSurface = activeView === "portfolio" || activeView === "portfolio-canvas";
                   const isActiveItem = isPortfolioItem ? isPortfolioSurface : item.view === activeView;
-                  const showReportsUrgentUpdateBadge =
-                    item.view === "reports" && notificationStatus?.reportsUrgentUpdate?.showBadge;
-                  const reportsUrgentUpdateSummary = notificationStatus?.reportsUrgentUpdate?.summary || "";
+                  const showNewsFeedUrgentUpdateBadge =
+                    item.view === "news-feed" && notificationStatus?.newsFeedUrgentUpdate?.showBadge;
+                  const newsFeedUrgentUpdateSummary = notificationStatus?.newsFeedUrgentUpdate?.summary || "";
                   const arcaNotificationCount =
                     item.statusKey === "arcaNotifications"
                       ? Math.max(0, Math.trunc(Number(itemStatusHealth?.count || 0)))
@@ -147,7 +147,7 @@ export function AppNavigation({
                         className={[
                           "nav-item",
                           isActiveItem ? "is-active" : "",
-                          showReportsUrgentUpdateBadge ? "is-critical-alert" : "",
+                          showNewsFeedUrgentUpdateBadge ? "is-critical-alert" : "",
                           isPortfolioItem ? "has-children" : "",
                         ]
                           .filter(Boolean)
@@ -155,8 +155,8 @@ export function AppNavigation({
                         type="button"
                         onClick={() => onSelectItem(item)}
                         title={
-                          showReportsUrgentUpdateBadge
-                            ? `긴급 업데이트${reportsUrgentUpdateSummary ? `: ${reportsUrgentUpdateSummary}` : ""}`
+                          showNewsFeedUrgentUpdateBadge
+                            ? `긴급 업데이트${newsFeedUrgentUpdateSummary ? `: ${newsFeedUrgentUpdateSummary}` : ""}`
                             : itemStatusHealth
                               ? itemStatusHealth.title
                               : item.label
@@ -190,10 +190,10 @@ export function AppNavigation({
                               {magazineUnreadText}
                             </span>
                           ) : null}
-                          {showReportsUrgentUpdateBadge ? (
+                          {showNewsFeedUrgentUpdateBadge ? (
                             <span
                               className="nav-unread-count nav-critical-update-badge"
-                              aria-label="보고서 긴급 업데이트"
+                              aria-label="News Feed 긴급 업데이트"
                             >
                               긴급 업데이트
                             </span>

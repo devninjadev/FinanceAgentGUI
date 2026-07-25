@@ -6,10 +6,12 @@ import {
   accessSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  rmSync,
   statSync,
   renameSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureAstopObserverStatus } from "./astopObserver.mjs";
@@ -26,7 +28,7 @@ const WAIT_FOR_OBSERVER_GATE = 'IFS= read -r _ <&3 || exit 125; exec "$@"';
 const REGISTER_SELF_AND_EXEC = [
   '"$ASTOP_LLM_COMMAND" watch start --name "$ASTOP_LLM_JOB" --pid "$$" || exit 125',
   '"$ASTOP_LLM_COMMAND" wait "$ASTOP_LLM_JOB" --until start --timeout 30s --json >/dev/null 2>&1 || exit 125',
-  '"$ASTOP_LLM_COMMAND" wait "$ASTOP_LLM_JOB" --until exit --timeout "$ASTOP_LLM_TIMEOUT" --json >/dev/null 2>&1 &',
+  '"$ASTOP_LLM_COMMAND" wait "$ASTOP_LLM_JOB" --until exit --timeout "$ASTOP_LLM_TIMEOUT" --json >"$ASTOP_LLM_EVENT_PATH" 2>"$ASTOP_LLM_EVENT_ERROR_PATH" &',
   'exec "$@"',
 ].join("\n");
 const OBSERVATION_SYMBOL = Symbol.for("finance-agent-gui.llmObservation");
@@ -192,33 +194,88 @@ function createWaitPromise(child) {
   });
 }
 
-function registerPidWatch({ astopCommand, jobName, pid }) {
-  const registration = runObserverSync(astopCommand, [
-    "watch",
-    "start",
-    "--name",
-    jobName,
-    "--pid",
-    String(pid),
-  ]);
+export function registerPidWatch({
+  astopCommand,
+  jobName,
+  pid,
+  runObserver = runObserverSync,
+  maxAttempts = 3,
+}) {
+  const attempts = Math.max(1, Math.min(3, Number.parseInt(maxAttempts, 10) || 1));
+  let registration = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    registration = runObserver(astopCommand, [
+      "watch",
+      "start",
+      "--name",
+      jobName,
+      "--pid",
+      String(pid),
+    ], { timeout: 15_000 });
+    if (observerResultOk(registration)) return;
+    if (!isTransientAstopTransportFailure(registration)) break;
+  }
   if (!observerResultOk(registration)) {
-    throw commandError("astop LLM watch 등록 실패", registration);
+    throw commandError("astop LLM watch 등록 실패", registration || {});
   }
 }
 
-function confirmPidObserved({ astopCommand, jobName }) {
-  const started = runObserverSync(astopCommand, [
-    "wait",
-    jobName,
-    "--until",
-    "start",
-    "--timeout",
-    "30s",
-    "--json",
-  ], { timeout: 35_000 });
-  if (!observerResultOk(started)) {
-    throw commandError("astop LLM PID 관찰 확인 실패", started);
+export function isTransientAstopTransportFailure(result = {}) {
+  const detail = String(
+    result.stderr || result.stdout || result.error?.message || "",
+  );
+  return /connection reset by peer|resource temporarily unavailable|temporarily unavailable|broken pipe|etimedout|timed out|os error (?:35|54)/i.test(detail);
+}
+
+export function confirmPidObserved({
+  astopCommand,
+  jobName,
+  runObserver = runObserverSync,
+  maxAttempts = 3,
+}) {
+  const attempts = Math.max(1, Math.min(3, Number.parseInt(maxAttempts, 10) || 1));
+  let started = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    started = runObserver(astopCommand, [
+      "wait",
+      jobName,
+      "--until",
+      "start",
+      "--timeout",
+      "30s",
+      "--json",
+    ], { timeout: 35_000 });
+    if (observerResultOk(started)) return;
+    if (!isTransientAstopTransportFailure(started)) break;
   }
+  if (!observerResultOk(started)) {
+    throw commandError("astop LLM PID 관찰 확인 실패", started || {});
+  }
+}
+
+export function waitForTerminalEventWithRetry({
+  astopCommand,
+  jobName,
+  runObserver = runObserverSync,
+  maxAttempts = 3,
+}) {
+  const attempts = Math.max(1, Math.min(3, Number.parseInt(maxAttempts, 10) || 1));
+  let waited = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    waited = runObserver(astopCommand, [
+      "wait",
+      jobName,
+      "--until",
+      "exit",
+      "--timeout",
+      "15s",
+      "--json",
+    ], { timeout: 20_000 });
+    const event = parseEvent(waited?.stdout);
+    if (event) return event;
+    if (!isTransientAstopTransportFailure(waited || {})) break;
+  }
+  throw commandError("astop LLM 종료 이벤트 재조회 실패", waited || {});
 }
 
 function startWaitClient({ astopCommand, jobName, timeoutMs, stdio = ["ignore", "pipe", "pipe"] }) {
@@ -237,21 +294,58 @@ function startWaitClient({ astopCommand, jobName, timeoutMs, stdio = ["ignore", 
   });
 }
 
-function ackAndStop({ astopCommand, jobName, eventId }) {
+function runObserverMutationWithRetry({
+  astopCommand,
+  args,
+  errorLabel,
+  alreadyAppliedPattern,
+  runObserver = runObserverSync,
+  maxAttempts = 3,
+}) {
+  const attempts = Math.max(1, Math.min(3, Number.parseInt(maxAttempts, 10) || 1));
+  let result = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    result = runObserver(astopCommand, args, { timeout: 15_000 });
+    if (observerResultOk(result)) return;
+    const detail = String(result?.stderr || result?.stdout || result?.error?.message || "");
+    if (alreadyAppliedPattern?.test(detail)) return;
+    if (!isTransientAstopTransportFailure(result)) break;
+  }
+  throw commandError(errorLabel, result || {});
+}
+
+export function ackAndStop({
+  astopCommand,
+  jobName,
+  eventId,
+  consumer = DEFAULT_CONSUMER,
+  runObserver = runObserverSync,
+  maxAttempts = 3,
+}) {
   let ackError = null;
   try {
-    const ack = runObserverSync(astopCommand, [
-      "event",
-      "ack",
-      eventId,
-      "--consumer",
-      DEFAULT_CONSUMER,
-    ]);
-    if (!observerResultOk(ack)) ackError = commandError("astop LLM 종료 이벤트 ack 실패", ack);
+    runObserverMutationWithRetry({
+      astopCommand,
+      args: ["event", "ack", eventId, "--consumer", consumer],
+      errorLabel: "astop LLM 종료 이벤트 ack 실패",
+      alreadyAppliedPattern: /unknown terminal event/i,
+      runObserver,
+      maxAttempts,
+    });
+  } catch (error) {
+    ackError = error;
   } finally {
-    const stop = runObserverSync(astopCommand, ["watch", "stop", jobName]);
-    if (!observerResultOk(stop) && !ackError) {
-      ackError = commandError("astop LLM watch 정리 실패", stop);
+    try {
+      runObserverMutationWithRetry({
+        astopCommand,
+        args: ["watch", "stop", jobName],
+        errorLabel: "astop LLM watch 정리 실패",
+        alreadyAppliedPattern: /unknown (?:job|watch)|(?:job|watch).*(?:not found|does not exist)/i,
+        runObserver,
+        maxAttempts,
+      });
+    } catch (error) {
+      if (!ackError) ackError = error;
     }
   }
   if (ackError) throw ackError;
@@ -279,8 +373,24 @@ function observationIdentity(metadata = {}) {
   return {
     feature,
     provider,
-    jobName: `${readablePrefix}-${suffix}`,
+    jobName: `${readablePrefix}-o${process.pid}-${suffix}`,
   };
+}
+
+function observationOwnerPid(jobName = "") {
+  const match = String(jobName).match(/-o(\d+)-[a-f0-9]{12}$/i);
+  const pid = Number.parseInt(match?.[1] || "", 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
 }
 
 function gatedStdio(stdio) {
@@ -337,7 +447,12 @@ export function recoverPendingLlmObservations({
   }
 
   const pending = parseEventList(pendingResult.stdout);
-  const owned = pending.filter((event) => String(event.job || event.watch_name || "").startsWith(OWNED_JOB_PREFIX));
+  const owned = pending.filter((event) => {
+    const jobName = String(event.job || event.watch_name || "");
+    if (!jobName.startsWith(OWNED_JOB_PREFIX)) return false;
+    const ownerPid = observationOwnerPid(jobName);
+    return !ownerPid || !processIsAlive(ownerPid);
+  });
   const result = {
     active: true,
     recovered: 0,
@@ -362,16 +477,13 @@ export function recoverPendingLlmObservations({
       terminalState: event.terminal_state || "",
     });
     try {
-      const ack = runObserver(astopCommand, [
-        "event",
-        "ack",
+      ackAndStop({
+        astopCommand,
+        jobName,
         eventId,
-        "--consumer",
-        `${DEFAULT_CONSUMER}-recovery`,
-      ]);
-      if (!observerResultOk(ack)) throw commandError("astop LLM pending ack 실패", ack);
-      const stop = runObserver(astopCommand, ["watch", "stop", jobName]);
-      if (!observerResultOk(stop)) throw commandError("astop LLM pending watch 정리 실패", stop);
+        consumer: `${DEFAULT_CONSUMER}-recovery`,
+        runObserver,
+      });
       appendAudit(auditLogPath, {
         type: "llm_observation_recovered",
         at: new Date().toISOString(),
@@ -455,16 +567,25 @@ export function spawnObservedLlm(command, args = [], options = {}, metadata = {}
       runObserverSync(astopCommand, ["watch", "stop", identity.jobName]);
       rejectDone(error);
     });
-    child.once("close", async (exitCode, signal) => {
+    // Observe the exact process exit without waiting for descendant-held stdio
+    // pipes to close. Callers can still use the child's later `close` event
+    // when they need all buffered provider output.
+    child.once("exit", async (exitCode, signal) => {
       if (finished) return;
       finished = true;
       try {
         const waited = await waitPromise;
-        const event = verifyEvent(parseEvent(waited.stdout), {
+        const event = verifyEvent(
+          parseEvent(waited.stdout) || waitForTerminalEventWithRetry({
+            astopCommand,
+            jobName: identity.jobName,
+          }),
+          {
           jobName: identity.jobName,
           pid: child.pid,
           exitCode,
-        });
+          },
+        );
         ackAndStop({ astopCommand, jobName: identity.jobName, eventId: event.event_id });
         const result = {
           active: true,
@@ -529,6 +650,8 @@ export function spawnSyncObservedLlm(command, args = [], options = {}, metadata 
   const astopCommand = resolveAstopCommand(status);
   const identity = observationIdentity(metadata);
   const registeredAt = new Date().toISOString();
+  const eventPath = join(tmpdir(), `${identity.jobName}-${randomUUID()}.event.json`);
+  const eventErrorPath = `${eventPath}.stderr`;
   const result = spawnSync(
     "/bin/bash",
     ["-c", REGISTER_SELF_AND_EXEC, "finance-agent-llm-gate", command, ...args],
@@ -539,6 +662,8 @@ export function spawnSyncObservedLlm(command, args = [], options = {}, metadata 
         ASTOP_LLM_COMMAND: astopCommand,
         ASTOP_LLM_JOB: identity.jobName,
         ASTOP_LLM_TIMEOUT: waitDuration(metadata.timeoutMs),
+        ASTOP_LLM_EVENT_PATH: eventPath,
+        ASTOP_LLM_EVENT_ERROR_PATH: eventErrorPath,
       },
     },
   );
@@ -553,19 +678,18 @@ export function spawnSyncObservedLlm(command, args = [], options = {}, metadata 
       model: cleanAuditText(metadata.model),
       synchronous: true,
     });
-    const replay = runObserverSync(astopCommand, [
-      "wait",
-      identity.jobName,
-      "--until",
-      "exit",
-      "--timeout", "30s",
-      "--json",
-    ], { timeout: 35_000 });
-    const event = verifyEvent(parseEvent(replay.stdout), {
-      jobName: identity.jobName,
-      pid: result.pid,
-      exitCode: result.status,
-    });
+    const event = verifyEvent(
+      (existsSync(eventPath) ? parseEvent(readFileSync(eventPath, "utf8")) : null) ||
+        waitForTerminalEventWithRetry({
+          astopCommand,
+          jobName: identity.jobName,
+        }),
+      {
+        jobName: identity.jobName,
+        pid: result.pid,
+        exitCode: result.status,
+      },
+    );
     ackAndStop({ astopCommand, jobName: identity.jobName, eventId: event.event_id });
     appendAudit(metadata.auditLogPath || DEFAULT_AUDIT_LOG, {
       type: "llm_observation_completed",
@@ -619,6 +743,9 @@ export function spawnSyncObservedLlm(command, args = [], options = {}, metadata 
       synchronous: true,
     });
     throw error;
+  } finally {
+    rmSync(eventPath, { force: true });
+    rmSync(eventErrorPath, { force: true });
   }
 }
 

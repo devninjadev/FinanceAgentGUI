@@ -23,6 +23,7 @@ import {
   selectAntigravityModelForReasoning,
 } from "../src/agent/antigravityModelSelection.js";
 import { selectCodexTranslationModel } from "../src/agent/codexTranslationModelSelection.js";
+import { inspectCodexJsonlTelemetry } from "./codexJsonlTelemetry.mjs";
 import { spawnObservedLlm, waitForLlmObservation } from "./llmProcessObserver.mjs";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -37,15 +38,18 @@ const READ_STATE_PATH = join(DATA_DIR, "news-feed-read-state.json");
 const VIEW_STATE_PATH = join(DATA_DIR, "news-feed-view-state.json");
 const DEFAULT_POLL_INTERVAL_SECONDS = 180;
 const DEFAULT_RETENTION_HOURS = 24;
-const DEFAULT_TRANSLATION_BATCH_SIZE = 2;
+const DEFAULT_TRANSLATION_BATCH_SIZE = 12;
+const MAX_TRANSLATION_BATCH_SIZE = 24;
+const CHATGPT_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const DEFAULT_MAX_ITEMS_PER_FEED = 500;
-const TRANSLATION_TIMEOUT_MS = 60000;
+const TRANSLATION_TIMEOUT_MS = 120000;
 const FETCH_TIMEOUT_MS = 20000;
 const FEED_FETCH_STAGGER_WINDOW_MS = 60000;
 const TRANSLATION_TEXT_MAX_CHARS = 1200;
 const ANTIGRAVITY_PROVIDER_ID = "antigravity-cli";
 const UNICODE_REPLACEMENT_CHARACTER = "\uFFFD";
 const UNTRANSLATED_COPY_LATIN_WORDS = 2;
+const GLOBAL_STOCK_MARKET_IMPACTS = new Set(["positive", "negative", "neutral"]);
 const runtimeKey = Symbol.for("financeAgentGui.newsFeedCollector");
 const defaultFeedHeaders = {
   accept: "application/rss+xml,application/atom+xml,application/xml,text/xml;q=0.9,*/*;q=0.5",
@@ -315,6 +319,7 @@ function normalizeRssItem(feed, item, channelTitle) {
     translationError: "",
     translationModel: "",
     translationReasoning: "",
+    globalStockMarketImpact: "",
   };
 }
 
@@ -389,7 +394,7 @@ function normalizeNewsFeedConfig(config = {}) {
     maxItemsPerFeed: Math.max(50, Number(raw.maxItemsPerFeed || DEFAULT_MAX_ITEMS_PER_FEED)),
     translationBatchSize: Math.max(
       1,
-      Math.min(3, Number(raw.translationBatchSize || DEFAULT_TRANSLATION_BATCH_SIZE))
+      Math.min(MAX_TRANSLATION_BATCH_SIZE, Number(raw.translationBatchSize || DEFAULT_TRANSLATION_BATCH_SIZE))
     ),
     feeds: feeds.length ? feeds : fallbackConfig.feeds,
   };
@@ -536,6 +541,7 @@ export function applyNewsFeedContentModes(store = {}, config = {}) {
         translatedAt: "",
         translationStatus: item.title ? "pending" : "translated",
         translationError: "",
+        globalStockMarketImpact: "",
         itemContentMode: desiredMode,
         translationSourceField: sourceField,
       };
@@ -669,6 +675,7 @@ function sanitizeStoredTranslationIntegrity(store) {
       translationStatus: "pending",
       translationError:
         "저장된 번역에 유니코드 대체 문자가 있어 재번역 대기열로 이동했습니다.",
+      globalStockMarketImpact: "",
     };
   });
   if (!sanitizedCount) return store;
@@ -1021,7 +1028,7 @@ function chooseTranslationModel() {
   return codexTranslationModel(options);
 }
 
-function translationPrompt(items) {
+export function translationPrompt(items) {
   const truncateForTranslation = (value, limit) => {
     const text = String(value || "").trim();
     if (text.length <= limit) return text;
@@ -1035,17 +1042,34 @@ function translationPrompt(items) {
 
   return [
     "금융 뉴스 RSS 항목의 지정된 텍스트를 한국어로 번역한다.",
+    "도구 호출, 웹 검색, 파일 읽기, 셸 실행, 추가 조사를 하지 말고 제공된 입력만 처리한다.",
     "sourceField가 title이면 트윗 제목만, body이면 본문만 번역한다.",
     "출력은 JSON 객체 하나만 반환한다. 링크, URL, 출처 링크 문구는 절대 넣지 않는다.",
     "원문 의미를 보존하고, 시장/기업/중앙은행 용어는 한국 투자자가 읽기 자연스럽게 옮긴다.",
     "요약하거나 작성자·계정·게시일을 덧붙이지 말고 입력 text만 번역한다.",
     "입력 text가 비어 있으면 textKo는 빈 문자열로 둔다.",
+    "번역과 동시에 각 항목이 글로벌 주식시장 전체에 미치는 방향을 globalStockMarketImpact로 분류한다.",
+    "globalStockMarketImpact는 positive, negative, neutral 중 하나만 사용한다.",
+    "판정 기준은 영향의 규모나 지속시간이 아니라, 공개 직후 수 분 동안 글로벌 주요 주가지수·지수선물 또는 전반적 위험선호를 어느 방향으로 움직일 개연성이 있는지다.",
+    "작은 분봉이라도 빨갛게 만들 개연성이 있으면 negative, 녹색으로 만들 개연성이 있으면 positive로 둔다. 영향이 단기적이거나 작아도 방향이 뚜렷하면 neutral로 낮추지 않는다.",
+    "각 항목은 내부적으로 '뉴스 충격 → 전이되는 가격·비용·자산 → 주요 주가지수의 예상 방향' 순서로 검토하되, 출력에는 요구된 필드만 넣는다.",
+    "대표 전이경로 1: 전쟁·공격 고조나 중동의 핵심 발전·담수화·원유·해운 인프라 화재·피격·폐쇄 → 공급·복구·운임·보험료 위험 → 유가·물가·금리 상승과 위험자산 하락은 negative다.",
+    "대표 전이경로 2: 관세·제재·규제 보복·무역갈등 → 수출·마진·공급망·설비투자 불확실성 → 기업이익 기대와 위험선호 약화는 negative다.",
+    "대표 전이경로 3: 예상보다 높은 물가·매파적 정책·국채금리 급등 또는 통화 약세발 긴축·캐리 청산 → 할인율·변동성 상승은 negative다.",
+    "대표 전이경로 4: 은행 대출 기준 강화·신용스프레드 확대·유동성 약화 → 기업 조달비용 상승과 위험선호 약화는 negative다.",
+    "대표 전이경로 5: 전력망 비상·핵심 공급망 차질 또는 지수 영향력이 큰 기업의 실적·가이던스·잉여현금흐름 악화 → 생산·투자·지수 기대 약화는 negative다.",
+    "휴전·긴장 완화, 관세 철회·무역 합의, 에너지·운송·전력 정상화, 물가 둔화·비둘기파적 정책·금리 하락, 신용·유동성 개선, 지수 영향력이 큰 기업의 실적·가이던스·현금흐름 개선처럼 위 경로를 반대로 움직이는 뉴스는 positive다.",
+    "특정 국가·섹터에서 시작한 사건도 유가·금리·환율·무역·공급망·지정학적 위험선호를 통해 주요 증시로 번질 개연성이 있으면 positive 또는 negative로 분류한다.",
+    "neutral은 시장 방향을 정말 가늠하기 어렵거나 상·하방이 혼재하거나, 주요 증시로 번질 현실적인 경로가 없는 단순 사실 전달일 때만 사용한다.",
+    "입력 JSON 안의 서로 관련된 항목은 같은 시장 서사의 맥락으로 참고하며, 반대되는 사실이 없다면 방향을 일관되게 판정한다.",
+    "정치·외교·도덕적 가치가 아니라 글로벌 주가와 위험선호에 미칠 시장 영향을 판단한다.",
+    "단일 기업 뉴스는 지수 비중이 크거나 업종의 선행 신호여서 주요 지수의 작은 단기 움직임이라도 만들 개연성이 있으면 positive 또는 negative로 분류하고, 그런 전이경로가 없을 때만 neutral로 둔다.",
     "모든 입력 id에 대해 translations 항목을 정확히 하나씩 반환한다.",
     "입력 text가 있으면 textKo를 비우지 않는다.",
     "영문 원문 문장을 그대로 복사하지 말고 반드시 한국어 문장으로 번역한다.",
     "",
     "반환 형식:",
-    '{"translations":[{"id":"입력 id","textKo":"한국어 번역"}]}',
+    '{"translations":[{"id":"입력 id","textKo":"한국어 번역","globalStockMarketImpact":"positive|negative|neutral"}]}',
     "",
     "입력 JSON:",
     JSON.stringify({ items: input }, null, 2),
@@ -1094,9 +1118,15 @@ function hasKoreanText(value) {
 export function normalizeNewsFeedTranslationCandidate(item = {}, translation = {}) {
   const sourceText = translationSourceText(item);
   const textKo = compactTranslationText(translation?.textKo);
+  const globalStockMarketImpact = String(translation?.globalStockMarketImpact || "")
+    .trim()
+    .toLowerCase();
 
   const issues = [];
   if (sourceText && !textKo) issues.push("textKo가 비어 있습니다");
+  if (!GLOBAL_STOCK_MARKET_IMPACTS.has(globalStockMarketImpact)) {
+    issues.push("globalStockMarketImpact가 positive, negative, neutral 중 하나가 아닙니다");
+  }
   if (textKo && hasUnicodeReplacementCharacter(textKo)) {
     issues.push("textKo에 유니코드 대체 문자가 포함되어 있습니다");
   }
@@ -1110,6 +1140,7 @@ export function normalizeNewsFeedTranslationCandidate(item = {}, translation = {
   return {
     ok: issues.length === 0,
     textKo,
+    globalStockMarketImpact,
     error: issues.length ? `번역 검증 보류: ${issues.join(", ")}` : "",
   };
 }
@@ -1131,8 +1162,12 @@ function runCodexTranslationBatch(items, modelInfo) {
             properties: {
               id: { type: "string" },
               textKo: { type: "string" },
+              globalStockMarketImpact: {
+                type: "string",
+                enum: ["positive", "negative", "neutral"],
+              },
             },
-            required: ["id", "textKo"],
+            required: ["id", "textKo", "globalStockMarketImpact"],
           },
         },
       },
@@ -1144,6 +1179,7 @@ function runCodexTranslationBatch(items, modelInfo) {
       "--ask-for-approval",
       "never",
       "exec",
+      "--json",
       "--skip-git-repo-check",
       "--ephemeral",
       "--ignore-rules",
@@ -1165,7 +1201,7 @@ function runCodexTranslationBatch(items, modelInfo) {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    const child = spawnObservedLlm("codex", args, {
+    const child = spawnObservedLlm(existsSync(CHATGPT_BUNDLED_CODEX) ? CHATGPT_BUNDLED_CODEX : "codex", args, {
       cwd: WEB_ROOT,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -1206,7 +1242,11 @@ function runCodexTranslationBatch(items, modelInfo) {
       reject(error);
     });
 
-    child.on("close", async (code) => {
+    // Codex can leave descendant-held stdio pipes open after its own process
+    // has already finished and written the structured output file. Commit on
+    // the exact process exit so a completed translation is not discarded by
+    // the timeout while waiting for the later `close` event.
+    child.on("exit", async (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -1216,7 +1256,16 @@ function runCodexTranslationBatch(items, modelInfo) {
         if (code !== 0) {
           throw new Error((stderr || output || `codex exited ${code}`).trim());
         }
-        resolveBatch(parseJsonPayload(output));
+        const payload = parseJsonPayload(output);
+        Object.defineProperty(payload, "__llmTelemetry", {
+          value: {
+            ...inspectCodexJsonlTelemetry(stdout),
+            promptChars: translationPrompt(items).length,
+            itemCount: items.length,
+          },
+          enumerable: false,
+        });
+        resolveBatch(payload);
       } catch (error) {
         reject(error);
       } finally {
@@ -1247,6 +1296,14 @@ async function translateBatch(items, modelInfo) {
     translations: toArray(payload.translations),
     model: modelInfo.modelLabel || modelInfo.model,
     reasoning: modelInfo.reasoning,
+    telemetry: payload.__llmTelemetry || {
+      threadId: "",
+      turnCount: 0,
+      toolCallCount: null,
+      tokenUsage: null,
+      promptChars: translationPrompt(items).length,
+      itemCount: items.length,
+    },
   };
 }
 
@@ -1272,6 +1329,7 @@ export function applyNewsFeedTranslationBatch(store, pendingItems, translated) {
         translationError: "번역 응답에 이 항목이 없어 재시도 대기열에 유지합니다.",
         translationModel: translated?.model || "",
         translationReasoning: translated?.reasoning || "",
+        globalStockMarketImpact: "",
       };
     }
 
@@ -1287,6 +1345,7 @@ export function applyNewsFeedTranslationBatch(store, pendingItems, translated) {
         translationError: candidate.error,
         translationModel: translated?.model || "",
         translationReasoning: translated?.reasoning || "",
+        globalStockMarketImpact: "",
       };
     }
 
@@ -1301,6 +1360,7 @@ export function applyNewsFeedTranslationBatch(store, pendingItems, translated) {
       translationError: "",
       translationModel: translated?.model || "",
       translationReasoning: translated?.reasoning || "",
+      globalStockMarketImpact: candidate.globalStockMarketImpact,
     };
   });
 
@@ -1363,16 +1423,32 @@ function pendingTranslationItems(store) {
   return selectPendingNewsFeedTranslationBatch(store.items, Number.POSITIVE_INFINITY);
 }
 
-export function selectPendingNewsFeedTranslationBatch(items, batchSize) {
+export function selectPendingNewsFeedTranslationBatch(items, batchSize, excludedIds = new Set()) {
   const limit = Number.isFinite(Number(batchSize))
     ? Math.max(1, Math.floor(Number(batchSize)))
     : Number.POSITIVE_INFINITY;
+  const excluded = excludedIds instanceof Set
+    ? excludedIds
+    : new Set(toArray(excludedIds).map((id) => String(id || "")));
   return toArray(items)
-    .filter((item) => item.translationStatus === "pending")
+    .filter((item) =>
+      item.translationStatus === "pending" &&
+      !excluded.has(String(item.id || ""))
+    )
     .sort((a, b) =>
       String(b.publishedAt || b.fetchedAt).localeCompare(String(a.publishedAt || a.fetchedAt))
     )
     .slice(0, limit);
+}
+
+export function adaptiveNewsFeedTranslationBatchSize(pendingCount, configuredBatchSize = DEFAULT_TRANSLATION_BATCH_SIZE) {
+  const configured = Math.max(
+    1,
+    Math.min(MAX_TRANSLATION_BATCH_SIZE, Math.floor(Number(configuredBatchSize) || DEFAULT_TRANSLATION_BATCH_SIZE)),
+  );
+  const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
+  if (pending >= configured * 3) return Math.min(MAX_TRANSLATION_BATCH_SIZE, configured * 2);
+  return configured;
 }
 
 function startPendingNewsFeedTranslation(batchSize) {
@@ -1382,16 +1458,28 @@ function startPendingNewsFeedTranslation(batchSize) {
   runtime.translationInFlight = (async () => {
     let translatedTotal = 0;
     let modelInfo = null;
+    const deferredIds = new Set();
 
     while (true) {
       let store = readStore();
-      const pendingItems = pendingTranslationItems(store);
+      const pendingItems = selectPendingNewsFeedTranslationBatch(
+        store.items,
+        Number.POSITIVE_INFINITY,
+        deferredIds,
+      );
       if (!pendingItems.length) break;
-      const batch = selectPendingNewsFeedTranslationBatch(store.items, batchSize);
+      const effectiveBatchSize = adaptiveNewsFeedTranslationBatchSize(pendingItems.length, batchSize);
+      const batch = selectPendingNewsFeedTranslationBatch(
+        store.items,
+        effectiveBatchSize,
+        deferredIds,
+      );
 
       store.collector = {
         ...store.collector,
-        lastAction: `${translatedTotal}개 번역 저장 완료 · ${pendingItems.length}개 대기 · ${batch.length}개 처리 중`,
+        lastAction: `${translatedTotal}개 번역 저장 완료 · ${pendingItems.length}개 대기 · ${batch.length}개 처리 중${
+          deferredIds.size ? ` · ${deferredIds.size}개 재시도 이월` : ""
+        }`,
         lastTranslatedCount: translatedTotal,
       };
       store = writeStore(store);
@@ -1412,13 +1500,22 @@ function startPendingNewsFeedTranslation(batchSize) {
           lastTranslatedCount: translatedTotal,
           translationModel: translated.model,
           translationReasoning: translated.reasoning,
+          translationLastBatchSize: batch.length,
+          translationLastTelemetry: translated.telemetry,
           translationLastError: applied.retryCount
             ? `${applied.retryCount}개 항목 번역 검증 보류`
             : "",
           lastPollFinishedAt: nowIso(),
         };
         store = writeStore(store);
-        if (applied.retryCount) break;
+        if (applied.retryCount) {
+          const currentById = new Map(store.items.map((item) => [String(item.id || ""), item]));
+          for (const item of batch) {
+            if (currentById.get(String(item.id || ""))?.translationStatus === "pending") {
+              deferredIds.add(String(item.id || ""));
+            }
+          }
+        }
       } catch (error) {
         store = readStore();
         store.collector = {
@@ -1432,6 +1529,18 @@ function startPendingNewsFeedTranslation(batchSize) {
         writeStore(store);
         break;
       }
+    }
+
+    if (deferredIds.size) {
+      let store = readStore();
+      store.collector = {
+        ...store.collector,
+        lastAction: `${translatedTotal}개 번역 저장 완료 · ${deferredIds.size}개 재시도 대기`,
+        lastTranslatedCount: translatedTotal,
+        translationLastError: `${deferredIds.size}개 항목 번역 검증 보류`,
+        lastPollFinishedAt: nowIso(),
+      };
+      store = writeStore(store);
     }
 
     return publicSnapshot({ limit: 0 });

@@ -6,15 +6,28 @@ import {
   applyNewsFeedContentModes,
   applyNewsFeedPublishedAtOffsets,
   applyNewsFeedTranslationBatch,
+  adaptiveNewsFeedTranslationBatchSize,
   mergeNewsFeedItemsPreservingLatest,
   normalizeNewsFeedTranslationCandidate,
   parseFeedXml,
   selectPendingNewsFeedTranslationBatch,
+  translationPrompt,
 } from "../server/newsFeedApi.mjs";
 
 const defaultNewsFeedConfig = JSON.parse(
   readFileSync(new URL("../../config/news-feeds.defaults.json", import.meta.url), "utf8"),
 );
+
+test("news feed Codex translation commits on process exit instead of delayed stdio close", () => {
+  const source = readFileSync(new URL("../server/newsFeedApi.mjs", import.meta.url), "utf8");
+  const batchRunner = source.match(
+    /function runCodexTranslationBatch\(items, modelInfo\) \{[\s\S]*?\n\}\n\nasync function runAntigravityTranslationBatch/,
+  )?.[0] || "";
+
+  assert.match(source, /const TRANSLATION_TIMEOUT_MS = 120000;/);
+  assert.match(batchRunner, /child\.on\("exit", async \(code\) =>/);
+  assert.doesNotMatch(batchRunner, /child\.on\("close"/);
+});
 
 test("news feed parser applies a source-specific published-time offset", () => {
   const parsed = parseFeedXml(
@@ -135,6 +148,7 @@ test("news feed content migration is one-time and requeues title-only translatio
       translatedText: "주가가 상승했다. — 계정 2026년 7월 19일",
       translatedAt: "2026-07-19T07:40:00.000Z",
       translationStatus: "translated",
+      globalStockMarketImpact: "positive",
     }],
   };
   const config = { feeds: [{ id: "x-feed", itemContentMode: "title-only" }] };
@@ -146,6 +160,7 @@ test("news feed content migration is one-time and requeues title-only translatio
   assert.equal(migrated.items[0].translatedTitle, "");
   assert.equal(migrated.items[0].translationStatus, "pending");
   assert.equal(migrated.items[0].translationSourceField, "title");
+  assert.equal(migrated.items[0].globalStockMarketImpact, "");
   assert.deepEqual(migratedAgain, migrated);
 });
 
@@ -158,11 +173,13 @@ test("news feed translation harness accepts a Korean title translation", () => {
     },
     {
       textKo: "ECB 운슈: 추가 인상이 필요할 수 있다.",
+      globalStockMarketImpact: "negative",
     },
   );
 
   assert.equal(candidate.ok, true);
   assert.equal(candidate.textKo, "ECB 운슈: 추가 인상이 필요할 수 있다.");
+  assert.equal(candidate.globalStockMarketImpact, "negative");
 });
 
 test("news feed translation harness keeps blank Gemini output in retry queue", () => {
@@ -173,6 +190,7 @@ test("news feed translation harness keeps blank Gemini output in retry queue", (
     },
     {
       textKo: "",
+      globalStockMarketImpact: "neutral",
     },
   );
 
@@ -190,6 +208,7 @@ test("news feed translation harness rejects untranslated English copies", () => 
     },
     {
       textKo: source,
+      globalStockMarketImpact: "neutral",
     },
   );
 
@@ -205,6 +224,7 @@ test("news feed translation harness rejects English-only paraphrases", () => {
     },
     {
       textKo: "German Defence Minister Pistorius says NATO headquarters show resolve",
+      globalStockMarketImpact: "neutral",
     },
   );
 
@@ -220,11 +240,75 @@ test("news feed translation harness rejects Unicode replacement characters", () 
     },
     {
       textKo: "프랑스가 2027년 4월 18일에 대통령 선거 1차 투표를 실시\uFFFD\uFFFD 예정이다.",
+      globalStockMarketImpact: "neutral",
     },
   );
 
   assert.equal(candidate.ok, false);
   assert.match(candidate.error, /유니코드 대체 문자/);
+});
+
+test("news feed translation harness rejects a missing global stock-market impact", () => {
+  const candidate = normalizeNewsFeedTranslationCandidate(
+    {
+      title: "Global equities rose after inflation cooled.",
+      itemContentMode: "title-only",
+    },
+    {
+      textKo: "물가 둔화 이후 글로벌 증시가 상승했다.",
+    },
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /globalStockMarketImpact/);
+});
+
+test("news feed translation harness preserves neutral for ambiguous market impact", () => {
+  const candidate = normalizeNewsFeedTranslationCandidate(
+    {
+      title: "Officials will meet again next week.",
+      itemContentMode: "title-only",
+    },
+    {
+      textKo: "관계자들은 다음 주 다시 회동할 예정이다.",
+      globalStockMarketImpact: "neutral",
+    },
+  );
+
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.globalStockMarketImpact, "neutral");
+});
+
+test("news feed translation prompt classifies even small short-lived market moves directionally", () => {
+  const prompt = translationPrompt([
+    {
+      id: "trade-risk",
+      title: "EU actions are driving massive uncertainty for US exports.",
+      itemContentMode: "title-only",
+    },
+    {
+      id: "energy-risk",
+      title: "Fire reported at Kuwait's largest power plant.",
+      itemContentMode: "title-only",
+    },
+  ]);
+
+  assert.match(prompt, /작은 분봉이라도 빨갛게 만들 개연성이 있으면 negative/);
+  assert.match(prompt, /영향이 단기적이거나 작아도 방향이 뚜렷하면 neutral로 낮추지 않는다/);
+  assert.match(prompt, /중동의 핵심 발전·담수화·원유·해운 인프라 화재·피격·폐쇄/);
+  assert.match(prompt, /관세·제재·규제 보복·무역갈등/);
+  assert.match(prompt, /통화 약세발 긴축·캐리 청산/);
+  assert.match(prompt, /은행 대출 기준 강화·신용스프레드 확대·유동성 약화/);
+  assert.match(prompt, /실적·가이던스·잉여현금흐름 악화/);
+  assert.match(prompt, /주요 지수의 작은 단기 움직임이라도 만들 개연성이 있으면/);
+  assert.match(prompt, /서로 관련된 항목은 같은 시장 서사의 맥락으로 참고/);
+  assert.match(prompt, /도구 호출, 웹 검색, 파일 읽기, 셸 실행, 추가 조사를 하지 말고/);
+});
+
+test("news feed translation batching uses 12 normally and expands to 24 for a large backlog", () => {
+  assert.equal(adaptiveNewsFeedTranslationBatchSize(11, 12), 12);
+  assert.equal(adaptiveNewsFeedTranslationBatchSize(36, 12), 24);
+  assert.equal(adaptiveNewsFeedTranslationBatchSize(200, 24), 24);
 });
 
 test("news feed parser preserves RSS item URLs as sourceUrl", () => {
@@ -337,8 +421,16 @@ test("news feed translation commits each completed batch without touching the re
     [first, second],
     {
       translations: [
-        { id: "nf_first", textKo: "물가 보고서 발표 후 주가가 상승했다." },
-        { id: "nf_second", textKo: "장중 채권 금리가 하락했다." },
+        {
+          id: "nf_first",
+          textKo: "물가 보고서 발표 후 주가가 상승했다.",
+          globalStockMarketImpact: "positive",
+        },
+        {
+          id: "nf_second",
+          textKo: "장중 채권 금리가 하락했다.",
+          globalStockMarketImpact: "neutral",
+        },
       ],
       model: "gpt-5.6-luna",
       reasoning: "low",
@@ -348,7 +440,9 @@ test("news feed translation commits each completed batch without touching the re
   assert.equal(applied.translatedCount, 2);
   assert.equal(applied.retryCount, 0);
   assert.equal(applied.store.items[0].translationStatus, "translated");
+  assert.equal(applied.store.items[0].globalStockMarketImpact, "positive");
   assert.equal(applied.store.items[1].translationStatus, "translated");
+  assert.equal(applied.store.items[1].globalStockMarketImpact, "neutral");
   assert.equal(applied.store.items[2].translationStatus, "pending");
   assert.equal(applied.store.items[2].translatedText, "");
 });
@@ -370,7 +464,11 @@ test("title-only translation is stored in translatedTitle, not translatedText", 
     { collector: {}, items: [item] },
     [item],
     {
-      translations: [{ id: "nf_title", textKo: "물가 보고서 발표 후 주가가 상승했다." }],
+      translations: [{
+        id: "nf_title",
+        textKo: "물가 보고서 발표 후 주가가 상승했다.",
+        globalStockMarketImpact: "positive",
+      }],
       model: "gpt-5.6-luna",
       reasoning: "low",
     },
@@ -379,6 +477,7 @@ test("title-only translation is stored in translatedTitle, not translatedText", 
   assert.equal(applied.translatedCount, 1);
   assert.equal(applied.store.items[0].translatedTitle, "물가 보고서 발표 후 주가가 상승했다.");
   assert.equal(applied.store.items[0].translatedText, "");
+  assert.equal(applied.store.items[0].globalStockMarketImpact, "positive");
 });
 
 test("news feed translation keeps only a missing batch result pending", () => {
@@ -401,7 +500,11 @@ test("news feed translation keeps only a missing batch result pending", () => {
     { collector: {}, items: [first, second] },
     [first, second],
     {
-      translations: [{ id: "nf_first", textKo: "물가 보고서 발표 후 주가가 상승했다." }],
+      translations: [{
+        id: "nf_first",
+        textKo: "물가 보고서 발표 후 주가가 상승했다.",
+        globalStockMarketImpact: "positive",
+      }],
       model: "gpt-5.6-luna",
       reasoning: "low",
     },
@@ -411,6 +514,7 @@ test("news feed translation keeps only a missing batch result pending", () => {
   assert.equal(applied.retryCount, 1);
   assert.equal(applied.store.items[0].translationStatus, "translated");
   assert.equal(applied.store.items[1].translationStatus, "pending");
+  assert.equal(applied.store.items[1].globalStockMarketImpact, "");
   assert.match(applied.store.items[1].translationError, /재시도 대기열/);
 });
 
@@ -437,4 +541,16 @@ test("news feed translation fills a batch from the newest pending items while sk
     batch.map((entry) => entry.id),
     ["nf_newest", "nf_second", "nf_third"],
   );
+});
+
+test("news feed translation skips deferred retry ids while continuing untouched pending rows", () => {
+  const items = [
+    { id: "retry-newest", translationStatus: "pending", publishedAt: "2026-07-24T13:00:00.000Z" },
+    { id: "next-newest", translationStatus: "pending", publishedAt: "2026-07-24T12:59:00.000Z" },
+    { id: "older", translationStatus: "pending", publishedAt: "2026-07-24T12:58:00.000Z" },
+  ];
+
+  const batch = selectPendingNewsFeedTranslationBatch(items, 2, new Set(["retry-newest"]));
+
+  assert.deepEqual(batch.map((item) => item.id), ["next-newest", "older"]);
 });

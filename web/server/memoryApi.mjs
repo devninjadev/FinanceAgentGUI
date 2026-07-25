@@ -6,7 +6,7 @@ import {
   deleteSharedMemoryRecord,
   sharedMemoryStatus,
 } from "./sharedMemoryStore.mjs";
-import { runEmergencyProcedureForMarketSummary } from "./notificationsApi.mjs";
+import { runMarketSummaryNotificationProcedure } from "./notificationsApi.mjs";
 
 const SHARED_MEMORY_MAINTENANCE_INTERVAL_MS = 15 * 60 * 1000;
 const SHARED_MEMORY_MAINTENANCE_RUNTIME_KEY = Symbol.for(
@@ -74,21 +74,21 @@ export function stopSharedMemoryMaintenanceScheduler({ terminateWorker = false }
   return wasStarted;
 }
 
-async function sharedMemoryStatusWithEmergencyProcedure(options = {}) {
-  const { runEmergencyProcedure = true, ...statusOptions } = options;
+async function sharedMemoryStatusWithNotificationProcedure(options = {}) {
+  const { runNotificationProcedure = true, ...statusOptions } = options;
   const status = sharedMemoryStatus(statusOptions);
-  if (!runEmergencyProcedure) return status;
+  if (!runNotificationProcedure) return status;
   const marketSummary = status.contextMemory?.marketSummary || null;
   if (!marketSummary || typeof marketSummary !== "object") return status;
   try {
-    const emergencyProcedure = await runEmergencyProcedureForMarketSummary(marketSummary);
+    const notificationProcedure = await runMarketSummaryNotificationProcedure(marketSummary);
     return {
       ...status,
       contextMemory: {
         ...status.contextMemory,
         marketSummary: {
           ...marketSummary,
-          emergencyProcedure,
+          notificationProcedure,
         },
       },
     };
@@ -99,10 +99,10 @@ async function sharedMemoryStatusWithEmergencyProcedure(options = {}) {
         ...status.contextMemory,
         marketSummary: {
           ...marketSummary,
-          emergencyProcedure: {
+          notificationProcedure: {
             ok: false,
             skipped: true,
-            reason: "emergency-procedure-error",
+            reason: "notification-procedure-error",
             error: error.message,
           },
         },
@@ -128,11 +128,11 @@ export async function handleMemoryEndpoint(kind, req, res) {
       }
       const payload = await readJsonBody(req);
       const packet = buildSharedMemoryContextPacket(payload);
-      const status = await sharedMemoryStatusWithEmergencyProcedure();
+      const status = await sharedMemoryStatusWithNotificationProcedure();
       sendJson(res, {
         ok: true,
         ...packet,
-        emergencyProcedure: status.contextMemory?.marketSummary?.emergencyProcedure || null,
+        notificationProcedure: status.contextMemory?.marketSummary?.notificationProcedure || null,
       });
       return;
     }
@@ -140,11 +140,11 @@ export async function handleMemoryEndpoint(kind, req, res) {
     if (req.method === "GET") {
       sendJson(
         res,
-        await sharedMemoryStatusWithEmergencyProcedure({
+        await sharedMemoryStatusWithNotificationProcedure({
           limit,
           offset,
           refresh: false,
-          runEmergencyProcedure: false,
+          runNotificationProcedure: false,
         })
       );
       return;
@@ -156,7 +156,7 @@ export async function handleMemoryEndpoint(kind, req, res) {
       sendJson(res, {
         ok: true,
         record,
-        status: await sharedMemoryStatusWithEmergencyProcedure(),
+        status: await sharedMemoryStatusWithNotificationProcedure(),
       });
       return;
     }
@@ -172,7 +172,7 @@ export async function handleMemoryEndpoint(kind, req, res) {
         ok: true,
         deleted: true,
         id: result.id,
-        status: await sharedMemoryStatusWithEmergencyProcedure({ limit, offset }),
+        status: await sharedMemoryStatusWithNotificationProcedure({ limit, offset }),
       });
       return;
     }

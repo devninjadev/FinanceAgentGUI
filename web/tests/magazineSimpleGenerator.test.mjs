@@ -98,6 +98,45 @@ test("all-candidate discovery includes every item after the World Memory cutoff 
   for (const candidate of eligible.candidates) assert.match(prompt, new RegExp(`"${candidate.id}"`));
 });
 
+test("all-candidate discovery removes exact News Feed ids and source URLs used by recent articles", () => {
+  const newsFeed = {
+    items: [
+      {
+        id: "nf_new",
+        feedTitle: "Test Wire",
+        translatedTitle: "새 후보",
+        sourceUrl: "https://example.com/new",
+        sourcePublishedAt: "2026-07-23T01:03:00.000Z",
+      },
+      {
+        id: "nf_used_id",
+        feedTitle: "Test Wire",
+        translatedTitle: "이미 사용한 id",
+        sourceUrl: "https://example.com/other",
+        sourcePublishedAt: "2026-07-23T01:02:00.000Z",
+      },
+      {
+        id: "nf_other_id",
+        feedTitle: "Test Wire",
+        translatedTitle: "이미 사용한 URL",
+        sourceUrl: "https://example.com/used/",
+        sourcePublishedAt: "2026-07-23T01:01:00.000Z",
+      },
+    ],
+  };
+  const eligible = allEligibleNewsEvidence(
+    newsFeed,
+    { collector: { lastSuccessfulAt: "2026-07-23T01:00:00.000Z" } },
+    {
+      excludedNewsFeedIds: ["nf_used_id"],
+      excludedSourceUrls: ["https://example.com/used"],
+    },
+  );
+
+  assert.deepEqual(eligible.candidates.map((item) => item.id), ["nf_new"]);
+  assert.equal(eligible.excludedCount, 2);
+});
+
 test("semantic topic result may select any valid ids from the uncapped candidate pool", () => {
   const candidates = Array.from({ length: 40 }, (_, index) => ({
     id: `nf_${index}`,

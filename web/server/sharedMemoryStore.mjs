@@ -20,6 +20,7 @@ import {
 } from "../src/agent/antigravityModelSelection.js";
 import { selectCodexTranslationModel } from "../src/agent/codexTranslationModelSelection.js";
 import { antigravityPrintInvocation } from "./antigravityCliCompatibility.mjs";
+import { inspectCodexJsonlTelemetry } from "./codexJsonlTelemetry.mjs";
 import { spawnSyncObservedLlm } from "./llmProcessObserver.mjs";
 import { acquireRuntimeFileLease } from "./runtimeFileLease.mjs";
 
@@ -45,11 +46,16 @@ const INDEX_RECORD_LIMIT = 200;
 const USER_MEMORY_RETRY_INTERVAL_MS = 60 * 60 * 1000;
 const EXTERNAL_BRIEFING_INTERVAL_MS = 15 * 60 * 1000;
 const EXTERNAL_BRIEFING_MIN_NEWS_ITEM_COUNT = 30;
-const EXTERNAL_BRIEFING_SELECTION_POLICY = "post-world-memory-update-all-then-minimum-30-recent-backfill";
+const EXTERNAL_BRIEFING_BASELINE_ITEM_LIMIT = 60;
+const EXTERNAL_BRIEFING_DELTA_ITEM_LIMIT = 60;
+const EXTERNAL_BRIEFING_DELTA_MIN_ITEM_COUNT = 6;
+const EXTERNAL_BRIEFING_DELTA_MAX_WAIT_MS = 30 * 60 * 1000;
+const EXTERNAL_BRIEFING_SELECTION_POLICY = "world-memory-baseline-60-then-prior-summary-plus-batched-delta";
 const EXTERNAL_BRIEFING_MODEL_TIMEOUT_MS = 60 * 1000;
 const EXTERNAL_MARKET_SUMMARY_SINGLE_FLIGHT_STALE_MS = EXTERNAL_BRIEFING_MODEL_TIMEOUT_MS + 30 * 1000;
 const EXTERNAL_MARKET_SUMMARY_SINGLE_FLIGHT_WAIT_MS = EXTERNAL_BRIEFING_MODEL_TIMEOUT_MS + 45 * 1000;
-const EXTERNAL_MARKET_SUMMARY_PROMPT_VERSION = "finance-agent-gui.external-market-summary.v2";
+const EXTERNAL_MARKET_SUMMARY_PROMPT_VERSION = "finance-agent-gui.external-market-summary.v3";
+const CHATGPT_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const MEMORY_TIME_ZONE = process.env.FINANCE_AGENT_GUI_MEMORY_TZ || "Asia/Seoul";
 const MEMORY_SUMMARY_TEXT_LIMIT = 16000;
 const USER_MEMORY_LAYER_LIMIT = 7000;
@@ -73,17 +79,18 @@ function normalizeMarketAlertLevel(value) {
 function defaultSeverityText(level) {
   if (level === "critical") return "급격한 시장 레짐 전환 가능성이 있어 즉시 확인이 필요합니다.";
   if (level === "urgent") return "시장이 이미 상당히 부정적으로 해석하거나 가격에 반영하는 신호가 있어 긴급 확인이 필요합니다.";
-  if (level === "watch") return "관찰할 만한 신호는 있지만 아직 긴급 절차를 실행할 정도의 충격은 아닙니다.";
+  if (level === "watch") return "관찰할 만한 신호는 있지만 아직 브라우저 알림을 보낼 정도의 충격은 아닙니다.";
   return "별도 긴급 신호는 확인되지 않았습니다.";
 }
 
 function marketSummaryDetection(candidate = {}) {
   const alertLevel = normalizeMarketAlertLevel(candidate.alertLevel);
-  const shouldCreateReport = MARKET_REPORT_ALERT_LEVELS.has(alertLevel);
+  const shouldNotify = MARKET_REPORT_ALERT_LEVELS.has(alertLevel);
   const rationaleKo = cleanText(candidate.severityKo || defaultSeverityText(alertLevel), 600);
   return {
     alertLevel,
-    shouldCreateReport,
+    shouldNotify,
+    shouldCreateReport: shouldNotify,
     rationaleKo,
     signals: [rationaleKo].filter(Boolean),
   };
@@ -413,11 +420,12 @@ export function runCodexJsonModel(prompt, schema, modelInfo, timeoutMs = EXTERNA
   try {
     writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`);
     const result = spawnSyncObservedLlm(
-      "codex",
+      existsSync(CHATGPT_BUNDLED_CODEX) ? CHATGPT_BUNDLED_CODEX : "codex",
       [
         "--ask-for-approval",
         "never",
         "exec",
+        "--json",
         "--skip-git-repo-check",
         "--ephemeral",
         "--ignore-rules",
@@ -452,7 +460,15 @@ export function runCodexJsonModel(prompt, schema, modelInfo, timeoutMs = EXTERNA
     if (result.error) throw result.error;
     const output = existsSync(outputPath) ? readFileSync(outputPath, "utf8") : result.stdout;
     if (result.status !== 0) throw new Error((result.stderr || output || `codex exited ${result.status}`).trim());
-    return parseJsonPayload(output);
+    const payload = parseJsonPayload(output);
+    Object.defineProperty(payload, "__llmTelemetry", {
+      value: {
+        ...inspectCodexJsonlTelemetry(result.stdout),
+        promptChars: String(prompt || "").length,
+      },
+      enumerable: false,
+    });
+    return payload;
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -567,6 +583,7 @@ function defaultExternalMemoryState() {
       alertLevel: "none",
       severityKo: "",
       shouldCreateReport: false,
+      shouldNotify: false,
       pushSummary: "",
       note: "This volatile bridge refreshes every 15 minutes when the local server/context path is active.",
     },
@@ -577,10 +594,15 @@ function readExternalMemoryState() {
   const raw = readJsonFile(EXTERNAL_MEMORY_STATE_PATH);
   const base = defaultExternalMemoryState();
   if (!raw || typeof raw !== "object") return base;
+  const rawBriefing = raw.briefing && typeof raw.briefing === "object" ? raw.briefing : {};
   return {
     ...base,
     ...raw,
-    briefing: { ...base.briefing, ...(raw.briefing || {}) },
+    briefing: {
+      ...base.briefing,
+      ...rawBriefing,
+      shouldNotify: Boolean(rawBriefing.shouldNotify ?? rawBriefing.shouldCreateReport ?? false),
+    },
   };
 }
 
@@ -986,7 +1008,83 @@ function newsItemForMarketSummary(item = {}, { cutoffMs = 0 } = {}) {
   };
 }
 
-function externalMarketSummaryInputs({ worldReport = null, items = [], worldMemoryCutoffAt = "" } = {}) {
+export function selectExternalMarketSummaryUpdate({
+  newsStore = null,
+  worldMemoryCutoffAt = "",
+  briefing = {},
+  nowMs = Date.now(),
+} = {}) {
+  const allItems = externalNewsItemsForMarketSummary({
+    newsStore,
+    worldMemoryCutoffAt,
+  });
+  const allItemKeys = allItems.map((item) => newsItemSelectionKey(item));
+  const previousKeys = new Set(Array.isArray(briefing.processedNewsItemKeys) ? briefing.processedNewsItemKeys : []);
+  const canIncrement =
+    briefing.status === "ready" &&
+    Boolean(briefing.summaryText) &&
+    briefing.selectionPolicy === EXTERNAL_BRIEFING_SELECTION_POLICY &&
+    briefing.promptVersion === EXTERNAL_MARKET_SUMMARY_PROMPT_VERSION &&
+    briefing.basedOnWorldMemoryCollectionAt === worldMemoryCutoffAt;
+
+  if (!canIncrement) {
+    return {
+      due: true,
+      reason: "baseline-required",
+      updateMode: "full-rebase",
+      allItems,
+      promptItems: externalNewsItemsForMarketSummary({
+        newsStore,
+        worldMemoryCutoffAt,
+        limit: EXTERNAL_BRIEFING_BASELINE_ITEM_LIMIT,
+      }),
+      previousSummary: "",
+      processedNewsItemKeys: allItemKeys,
+      pendingDeltaCount: 0,
+      pendingDeltaStartedAt: "",
+    };
+  }
+
+  const deltaItems = allItems.filter((item) => !previousKeys.has(newsItemSelectionKey(item)));
+  if (!deltaItems.length) {
+    return {
+      due: false,
+      reason: "no-new-items",
+      updateMode: "incremental",
+      allItems,
+      promptItems: [],
+      previousSummary: briefing.summaryText,
+      processedNewsItemKeys: allItemKeys,
+      pendingDeltaCount: 0,
+      pendingDeltaStartedAt: "",
+    };
+  }
+
+  const pendingDeltaStartedAt = briefing.pendingDeltaStartedAt || new Date(nowMs).toISOString();
+  const pendingAgeMs = Math.max(0, nowMs - timestampMs(pendingDeltaStartedAt));
+  const due =
+    deltaItems.length >= EXTERNAL_BRIEFING_DELTA_MIN_ITEM_COUNT ||
+    pendingAgeMs >= EXTERNAL_BRIEFING_DELTA_MAX_WAIT_MS;
+  return {
+    due,
+    reason: due ? "delta-batch-ready" : "waiting-for-delta-batch",
+    updateMode: "incremental",
+    allItems,
+    promptItems: deltaItems.slice(0, EXTERNAL_BRIEFING_DELTA_ITEM_LIMIT),
+    previousSummary: briefing.summaryText,
+    processedNewsItemKeys: due ? allItemKeys : [...previousKeys],
+    pendingDeltaCount: deltaItems.length,
+    pendingDeltaStartedAt,
+  };
+}
+
+function externalMarketSummaryInputs({
+  worldReport = null,
+  items = [],
+  worldMemoryCutoffAt = "",
+  previousSummary = "",
+  updateMode = "full-rebase",
+} = {}) {
   const report = worldReport || {};
   const reportAt = cleanText(report.generatedAt || "", 80);
   const cutoffAt = cleanText(worldMemoryCutoffAt || "", 80);
@@ -999,7 +1097,17 @@ function externalMarketSummaryInputs({ worldReport = null, items = [], worldMemo
       worldMemoryCollectionAt: cutoffAt,
       selectionPolicy: EXTERNAL_BRIEFING_SELECTION_POLICY,
       minimumNewsItemsWhenAvailable: EXTERNAL_BRIEFING_MIN_NEWS_ITEM_COUNT,
+      baselineItemLimit: EXTERNAL_BRIEFING_BASELINE_ITEM_LIMIT,
+      deltaBatchMinimum: EXTERNAL_BRIEFING_DELTA_MIN_ITEM_COUNT,
+      deltaMaximumWaitMinutes: EXTERNAL_BRIEFING_DELTA_MAX_WAIT_MS / 60_000,
       worldMemoryBaseline: clampText(worldText, 1800),
+    },
+    update: {
+      mode: updateMode === "incremental" ? "incremental" : "full-rebase",
+      previousSummary:
+        updateMode === "incremental"
+          ? cleanText(previousSummary, EXTERNAL_MARKET_SUMMARY_DISPLAY_LIMIT)
+          : "",
     },
     news: {
       items: inputItems,
@@ -1012,8 +1120,16 @@ export function externalMarketSummaryInputFingerprint({
   items = [],
   worldMemoryCutoffAt = "",
   modelInfo = {},
+  previousSummary = "",
+  updateMode = "full-rebase",
 } = {}) {
-  const inputs = externalMarketSummaryInputs({ worldReport, items, worldMemoryCutoffAt });
+  const inputs = externalMarketSummaryInputs({
+    worldReport,
+    items,
+    worldMemoryCutoffAt,
+    previousSummary,
+    updateMode,
+  });
   const fingerprintInput = {
     promptVersion: EXTERNAL_MARKET_SUMMARY_PROMPT_VERSION,
     model: {
@@ -1026,13 +1142,27 @@ export function externalMarketSummaryInputFingerprint({
   return createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex");
 }
 
-export function externalMarketSummaryPrompt({ worldReport = null, items = [], worldMemoryCutoffAt = "" } = {}) {
-  const inputs = externalMarketSummaryInputs({ worldReport, items, worldMemoryCutoffAt });
+export function externalMarketSummaryPrompt({
+  worldReport = null,
+  items = [],
+  worldMemoryCutoffAt = "",
+  previousSummary = "",
+  updateMode = "full-rebase",
+} = {}) {
+  const inputs = externalMarketSummaryInputs({
+    worldReport,
+    items,
+    worldMemoryCutoffAt,
+    previousSummary,
+    updateMode,
+  });
   return [
     "너는 FinanceAgentGUI의 컨텍스트 메모리에 들어갈 짧은 시장 브리핑을 작성하는 번역/요약 모델이다.",
-    "입력 보도는 최신 World Memory 수집 성공 시각 이후 항목을 우선한다.",
-    `그 이후 항목이 ${EXTERNAL_BRIEFING_MIN_NEWS_ITEM_COUNT}건 이상이면 전부 들어온다.`,
-    `그 이후 항목이 ${EXTERNAL_BRIEFING_MIN_NEWS_ITEM_COUNT}건 미만이고 로컬 News Feed 저장소에 시각 정보가 있는 항목이 충분하면, 최신 항목으로 ${EXTERNAL_BRIEFING_MIN_NEWS_ITEM_COUNT}건까지 보강된 표본이 들어올 수 있다.`,
+    "도구 호출, 웹 검색, 파일 읽기, 셸 실행, 추가 조사를 하지 말고 제공된 입력만 처리한다.",
+    "full-rebase 모드에서는 최신 World Memory와 최근 대표 보도 표본으로 시장의 전체 기준 요약을 다시 만든다.",
+    "incremental 모드에서는 직전 시장 요약을 전체 기준 문맥으로 유지하고 새 보도 묶음으로 그 요약을 수정한다.",
+    "incremental 모드의 새 보도만 독립적으로 요약하지 않는다. 여전히 유효한 직전 판단은 유지하고, 새 정보가 바꾸는 부분만 반영하며, 모순되거나 낡은 판단은 제거한다.",
+    `새 보도는 최소 ${EXTERNAL_BRIEFING_DELTA_MIN_ITEM_COUNT}건을 묶거나 최대 ${EXTERNAL_BRIEFING_DELTA_MAX_WAIT_MS / 60_000}분을 기다린 뒤 갱신한다.`,
     "afterWorldMemoryCollection=false인 보강 항목은 이미 기준 World Memory 서술에 일부 반영됐을 수 있으므로 새로 발생한 사건처럼 단정하지 말고 현재 시장 톤과 리스크를 보정하는 근거로만 다룬다.",
     "World Memory 보고서 요약은 기준 서술로만 쓰고, News Feed 후보의 1차 컷오프는 수집 성공 시각을 따른다.",
     "뉴스 항목을 그대로 나열하지 말고, 한국어 시장 요약으로 압축한다.",
@@ -1043,7 +1173,7 @@ export function externalMarketSummaryPrompt({ worldReport = null, items = [], wo
     "체제 붕괴급 사건이 아니더라도 시장이 현재 이슈를 이미 상당히 부정적으로 해석하고 가격에 반영하고 있으면 urgent로 둔다.",
     "주요 지수 급락, 금리·환율·신용스프레드·변동성의 급격한 재가격화, 안전자산 선호 급증, 광범위한 매도, 예상 밖 정책·규제·중앙은행 위험회피가 함께 나타나면 urgent 후보로 본다.",
     "critical은 급격한 시장 레짐 전환이나 금융 시스템 장애처럼 즉시 비상 절차가 필요한 신호에만 쓴다.",
-    "urgent 또는 critical이면 shouldCreateReport는 true다. none 또는 watch면 false다.",
+    "urgent 또는 critical이면 shouldNotify는 true다. none 또는 watch면 false다.",
     "내부 용어인 News Feed, 월드 메모리, 컨텍스트, 브리핑 후보, post-cutoff 같은 표현은 summaryKo에 쓰지 않는다.",
     "핵심 신호, 후속 확인 목록, 주의점, keySignals, watchPoints는 만들지 않는다. 필요한 시장 신호와 경계 조건은 summaryKo 또는 severityKo 안에 자연스럽게만 녹인다.",
     "severityKo는 심각성 평가만 1-2문장으로 쓰고, 내부 처리 과정이나 모델명은 쓰지 않는다.",
@@ -1057,12 +1187,15 @@ export function externalMarketSummaryPrompt({ worldReport = null, items = [], wo
       confidence: 0.0,
       alertLevel: "none|watch|urgent|critical",
       severityKo: "한국어 1-2문장 심각성 평가",
-      shouldCreateReport: false,
+      shouldNotify: false,
       pushSummary: "긴급 알림용 한 줄 요약 또는 빈 문자열",
     }),
     "",
     "기준 World Memory:",
     JSON.stringify(inputs.worldMemory, null, 2),
+    "",
+    "요약 갱신 상태:",
+    JSON.stringify(inputs.update, null, 2),
     "",
     "변동 뉴스:",
     JSON.stringify(inputs.news, null, 2),
@@ -1082,10 +1215,10 @@ function externalMarketSummarySchema() {
       confidence: { type: "number" },
       alertLevel: { type: "string", enum: ["none", "watch", "urgent", "critical"] },
       severityKo: { type: "string" },
-      shouldCreateReport: { type: "boolean" },
+      shouldNotify: { type: "boolean" },
       pushSummary: { type: "string" },
     },
-    required: ["marketTone", "summaryKo", "confidence", "alertLevel", "severityKo", "shouldCreateReport", "pushSummary"],
+    required: ["marketTone", "summaryKo", "confidence", "alertLevel", "severityKo", "shouldNotify", "pushSummary"],
   };
 }
 
@@ -1101,7 +1234,7 @@ export function normalizeExternalMarketSummaryCandidate(payload = {}) {
     : 0;
   const alertLevel = normalizeMarketAlertLevel(payload.alertLevel || payload.severityLevel || payload.severity);
   const severityKo = cleanText(payload.severityKo || payload.rationaleKo || payload.severitySummaryKo || "", 700);
-  const shouldCreateReport = MARKET_REPORT_ALERT_LEVELS.has(alertLevel);
+  const shouldNotify = MARKET_REPORT_ALERT_LEVELS.has(alertLevel);
   const pushSummary = cleanText(payload.pushSummary || "", 110);
   const issues = [];
   if (!summaryKo) issues.push("summaryKo가 비어 있습니다");
@@ -1118,7 +1251,8 @@ export function normalizeExternalMarketSummaryCandidate(payload = {}) {
     confidence,
     alertLevel,
     severityKo: severityKo || defaultSeverityText(alertLevel),
-    shouldCreateReport,
+    shouldNotify,
+    shouldCreateReport: shouldNotify,
     pushSummary,
     error: issues.length ? `시장 요약 검증 보류: ${issues.join(", ")}` : "",
   };
@@ -1135,9 +1269,9 @@ function formatExternalMarketSummary(summary = {}) {
     "",
     "심각성 평가:",
     `등급: ${candidate.alertLevel}`,
-    `긴급 절차: ${candidate.shouldCreateReport ? "실행 대상" : "대기"}`,
+    `브라우저 알림: ${candidate.shouldNotify ? "발송 대상" : "대기"}`,
     `판단: ${candidate.severityKo}`,
-    candidate.shouldCreateReport && candidate.pushSummary ? `알림 요약: ${candidate.pushSummary}` : "",
+    candidate.shouldNotify && candidate.pushSummary ? `알림 요약: ${candidate.pushSummary}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -1251,8 +1385,8 @@ export function extractExternalMarketSummaryFromBriefingText(text = "") {
       displayLines.push(line);
       continue;
     }
-    if (trimmed.startsWith("긴급 절차:")) {
-      parsed.shouldCreateReport = /실행|필요|true|yes/i.test(trimmed);
+    if (trimmed.startsWith("긴급 절차:") || trimmed.startsWith("브라우저 알림:")) {
+      parsed.shouldCreateReport = /실행|필요|발송 대상|true|yes/i.test(trimmed);
       displayLines.push(line);
       continue;
     }
@@ -1295,6 +1429,10 @@ function publicExternalMarketSummary() {
     intervalMs: Number(briefing.intervalMs || EXTERNAL_BRIEFING_INTERVAL_MS),
     newsItemsConsidered: Number(briefing.newsItemsConsidered ?? parsed.newsItemsConsidered ?? 0),
     newsItemsSummarized: Number(briefing.newsItemsSummarized ?? briefing.newsItemsConsidered ?? parsed.newsItemsConsidered ?? 0),
+    newsItemsInputCount: Number(briefing.newsItemsInputCount || 0),
+    pendingDeltaCount: Number(briefing.pendingDeltaCount || 0),
+    pendingDeltaStartedAt: cleanText(briefing.pendingDeltaStartedAt || "", 80),
+    summaryUpdateMode: cleanText(briefing.summaryUpdateMode || "", 40),
     inputFingerprint: cleanText(briefing.inputFingerprint || "", 80),
     inputFingerprintAlgorithm: cleanText(briefing.inputFingerprintAlgorithm || "", 24),
     promptVersion: cleanText(briefing.promptVersion || "", 120),
@@ -1310,7 +1448,14 @@ function publicExternalMarketSummary() {
     alertLevel: normalizeMarketAlertLevel(briefing.alertLevel || parsed.alertLevel || ""),
     severityKo: cleanText(briefing.severityKo || parsed.severityKo || "", 700),
     shouldCreateReport: Boolean(briefing.shouldCreateReport ?? parsed.shouldCreateReport ?? false),
+    shouldNotify: Boolean(
+      briefing.shouldNotify ??
+        briefing.shouldCreateReport ??
+        parsed.shouldCreateReport ??
+        false
+    ),
     pushSummary: cleanText(briefing.pushSummary || "", 110),
+    lastTelemetry: briefing.lastTelemetry || null,
     lastError: cleanText(briefing.lastError || "", 500),
   };
 }
@@ -1319,6 +1464,8 @@ export function buildMarketSummaryWithTranslationModel({
   worldReport = null,
   items = [],
   worldMemoryCutoffAt = "",
+  previousSummary = "",
+  updateMode = "full-rebase",
   modelInfo = null,
   runCodexModel = runCodexJsonModel,
   runAntigravityModel = runAntigravityJsonModel,
@@ -1338,7 +1485,7 @@ export function buildMarketSummaryWithTranslationModel({
         "",
         "심각성 평가:",
         "등급: none",
-        "긴급 절차: 대기",
+        "브라우저 알림: 대기",
         `판단: ${candidate.severityKo}`,
       ].join("\n"),
       model: "",
@@ -1347,13 +1494,20 @@ export function buildMarketSummaryWithTranslationModel({
       alertLevel: candidate.alertLevel,
       severityKo: candidate.severityKo,
       shouldCreateReport: false,
+      shouldNotify: false,
       pushSummary: "",
       detection: marketSummaryDetection(candidate),
       error: "",
     };
   }
   const selectedModelInfo = modelInfo || chooseSharedMemoryTranslationModel();
-  const prompt = externalMarketSummaryPrompt({ worldReport, items, worldMemoryCutoffAt });
+  const prompt = externalMarketSummaryPrompt({
+    worldReport,
+    items,
+    worldMemoryCutoffAt,
+    previousSummary,
+    updateMode,
+  });
   const payload =
     selectedModelInfo.provider === ANTIGRAVITY_PROVIDER_ID
       ? runAntigravityModel(prompt, selectedModelInfo)
@@ -1370,8 +1524,16 @@ export function buildMarketSummaryWithTranslationModel({
     alertLevel: candidate.alertLevel,
     severityKo: candidate.severityKo,
     shouldCreateReport: candidate.shouldCreateReport,
+    shouldNotify: candidate.shouldNotify,
     pushSummary: candidate.pushSummary,
     detection: marketSummaryDetection(candidate),
+    telemetry: payload.__llmTelemetry || {
+      threadId: "",
+      turnCount: 0,
+      toolCallCount: null,
+      tokenUsage: null,
+      promptChars: prompt.length,
+    },
     error: "",
   };
 }
@@ -1397,8 +1559,10 @@ function cachedExternalMarketSummaryForFingerprint(fingerprint = "") {
     alertLevel: normalizeMarketAlertLevel(briefing.alertLevel || "none"),
     severityKo: cleanText(briefing.severityKo || "", 700),
     shouldCreateReport: Boolean(briefing.shouldCreateReport),
+    shouldNotify: Boolean(briefing.shouldNotify ?? briefing.shouldCreateReport),
     pushSummary: cleanText(briefing.pushSummary || "", 110),
     detection: marketSummaryDetection(briefing),
+    telemetry: briefing.lastTelemetry || null,
     summaryGeneratedAt: cleanText(briefing.summaryGeneratedAt || briefing.lastBuiltAt || "", 80),
     error: "",
   };
@@ -1416,10 +1580,12 @@ function failedExternalMarketSummaryResult({ itemCount = 0, error = "" } = {}) {
     alertLevel: "none",
     severityKo,
     shouldCreateReport: false,
+    shouldNotify: false,
     pushSummary: "",
     detection: {
       alertLevel: "none",
       shouldCreateReport: false,
+      shouldNotify: false,
       rationaleKo: severityKo,
       signals: ["시장 요약 생성 실패"],
     },
@@ -1499,6 +1665,7 @@ function persistExternalMemoryBriefing({
   marketSummaryResult,
   inputFingerprint,
   cacheStatus,
+  selection,
 } = {}) {
   const built = buildExternalNewsBriefing({
     worldReport,
@@ -1532,7 +1699,12 @@ function persistExternalMemoryBriefing({
       basedOnWorldMemoryCollectionAt: built.collectionAt || "",
       selectionPolicy: EXTERNAL_BRIEFING_SELECTION_POLICY,
       newsItemsConsidered: built.consideredCount,
-      newsItemsSummarized: summaryItems.length,
+      newsItemsSummarized: built.consideredCount,
+      newsItemsInputCount: summaryItems.length,
+      summaryUpdateMode: selection?.updateMode || "full-rebase",
+      processedNewsItemKeys: selection?.processedNewsItemKeys || [],
+      pendingDeltaCount: 0,
+      pendingDeltaStartedAt: "",
       inputFingerprint,
       inputFingerprintAlgorithm: "sha256",
       promptVersion: EXTERNAL_MARKET_SUMMARY_PROMPT_VERSION,
@@ -1547,19 +1719,37 @@ function persistExternalMemoryBriefing({
       alertLevel: marketSummaryResult.alertLevel || "none",
       severityKo: cleanText(marketSummaryResult.severityKo || "", 700),
       shouldCreateReport: Boolean(marketSummaryResult.shouldCreateReport),
+      shouldNotify: Boolean(marketSummaryResult.shouldNotify ?? marketSummaryResult.shouldCreateReport),
       pushSummary: cleanText(marketSummaryResult.pushSummary || "", 110),
+      lastTelemetry: marketSummaryResult.telemetry || null,
       lastError: marketSummaryResult.error,
     },
   });
   return built.text;
 }
 
-function refreshExternalMemoryBriefingIfDue(date = new Date()) {
+function deferExternalMemoryBriefingUpdate({ now, state, briefing, selection }) {
+  writeExternalMemoryState({
+    ...state,
+    briefing: {
+      ...briefing,
+      nextBuildAt: addMs(now, EXTERNAL_BRIEFING_INTERVAL_MS),
+      cacheStatus: selection.reason,
+      newsItemsConsidered: selection.allItems.length,
+      pendingDeltaCount: selection.pendingDeltaCount,
+      pendingDeltaStartedAt: selection.pendingDeltaStartedAt,
+      lastAttemptAt: now,
+    },
+  });
+}
+
+export function refreshExternalMemoryBriefingIfDue(date = new Date(), { force = false } = {}) {
   const now = date.toISOString();
   const state = readExternalMemoryState();
   const briefing = state.briefing || {};
   const currentText = readTextFile(EXTERNAL_MEMORY_BRIEFING_PATH);
   if (
+    !force &&
     currentText &&
     briefing.selectionPolicy === EXTERNAL_BRIEFING_SELECTION_POLICY &&
     briefing.nextBuildAt &&
@@ -1573,10 +1763,17 @@ function refreshExternalMemoryBriefingIfDue(date = new Date()) {
     const worldReport = readWorldMemoryReportState(worldState);
     const worldMemoryCutoffAt = worldMemoryCollectionCutoffAt(worldState);
     const newsStore = readNewsFeedStore();
-    const summaryItems = externalNewsItemsForMarketSummary({
+    const selection = selectExternalMarketSummaryUpdate({
       newsStore,
       worldMemoryCutoffAt,
+      briefing,
+      nowMs: date.getTime(),
     });
+    if (!selection.due && currentText) {
+      deferExternalMemoryBriefingUpdate({ now, state, briefing, selection });
+      return currentText;
+    }
+    const summaryItems = selection.promptItems;
     let modelInfo = { provider: "none", model: "none", reasoning: "none" };
     let modelSelectionError = null;
     if (summaryItems.length) {
@@ -1592,6 +1789,8 @@ function refreshExternalMemoryBriefingIfDue(date = new Date()) {
       items: summaryItems,
       worldMemoryCutoffAt,
       modelInfo,
+      previousSummary: selection.previousSummary,
+      updateMode: selection.updateMode,
     });
     const flight = runExternalMarketSummarySingleFlight({
       fingerprint: inputFingerprint,
@@ -1607,6 +1806,8 @@ function refreshExternalMemoryBriefingIfDue(date = new Date()) {
             worldReport,
             items: summaryItems,
             worldMemoryCutoffAt,
+            previousSummary: selection.previousSummary,
+            updateMode: selection.updateMode,
             modelInfo,
           });
         } catch (error) {
@@ -1624,6 +1825,7 @@ function refreshExternalMemoryBriefingIfDue(date = new Date()) {
           marketSummaryResult,
           inputFingerprint,
           cacheStatus: "miss",
+          selection,
         });
         return { marketSummaryResult, text, persisted: true };
       },
@@ -1638,6 +1840,7 @@ function refreshExternalMemoryBriefingIfDue(date = new Date()) {
       marketSummaryResult: flight.value.marketSummaryResult,
       inputFingerprint,
       cacheStatus: flight.cacheStatus,
+      selection,
     });
   } catch (error) {
     const latestState = readExternalMemoryState();

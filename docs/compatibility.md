@@ -101,6 +101,19 @@ The user logs in manually in the opened browser. The app then captures only Arca
 
 When that captured session is valid, the stock-channel index can show the Arca.live notification list inside the app. `모두 읽기` uses the same local session to call Arca.live's notification read endpoint and then verifies the refreshed unread count. `전체 보기` still opens the original Arca.live notification page. A stock-channel notification opens the existing in-app article reader; notifications for other channels keep the external new-tab behavior.
 
+The local `POST /api/arca/publish` endpoint accepts a validated Axios-style
+Markdown article, uses its first Markdown heading as the post title, and submits
+the remaining body to the stock channel's `뉴스` category. It fetches a fresh
+write form and one-time tokens for every post, sends the write once, and reads
+the created article back to verify the exact title. An accepted but unverified
+write is never retried automatically because that could create a duplicate.
+Callers first send `dryRun: true` to verify the visible title and target; an
+actual write is rejected unless the follow-up payload includes `confirm: true`.
+The publication harness rejects malformed articles and replaces any remaining
+Unicode ZWJ emoji sequence with a non-ZWJ emoji before submission; the
+axios-summerizer validator is expected to catch these sequences earlier so a
+context-appropriate emoji can be chosen.
+
 Notification polling must not request `/u/notification`: Arca.live treats opening that page as reading the current notifications. The local poller reads the JSON notification feed and uses the configured channel page only for the unread badge; `/u/notification` is reserved for an explicit `전체 보기` navigation.
 
 The in-app article reader treats the fetched Arca.live article-body and comment HTML fragments as trusted content and inserts them directly into the local reader DOM without an iframe. Relative resource URLs are resolved against the original article URL, and injected `script` nodes are remounted so they execute. This deliberately inherits Arca.live's own content filtering trust boundary; upstream scripts run in the local app page context. Comment link-preview markup is retained instead of being flattened to plain text.

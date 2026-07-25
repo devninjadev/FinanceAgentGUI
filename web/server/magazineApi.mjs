@@ -1690,7 +1690,7 @@ function activeMagazineGenerationLock() {
 }
 
 function newsFeedItemTimestamp(item = {}) {
-  for (const field of ["publishedAt", "fetchedAt", "translatedAt"]) {
+  for (const field of ["sourcePublishedAt", "publishedAt", "fetchedAt", "translatedAt"]) {
     const timestamp = parseTimestamp(item[field]);
     if (timestamp) return { timestamp, field, iso: nowIso(new Date(timestamp)) };
   }
@@ -1775,6 +1775,7 @@ function compactNewsFeedItemForDecision(item = {}) {
   return {
     id: truncateSchedulerText(item.id || item.sourceFingerprint || "", 80),
     source: truncateSchedulerText(item.feedTitle || item.feedId || "", 80),
+    sourceUrl: truncateSchedulerText(item.sourceUrl || item.url || "", 500),
     title: truncateSchedulerText(item.translatedTitle || item.title || item.translatedText || item.originalText, 220),
     original: truncateSchedulerText(
       item.originalText && item.originalText !== item.translatedTitle ? item.originalText : "",
@@ -1790,6 +1791,15 @@ function compactArticleNewsFeedIds(metadata = {}) {
   return Array.from(new Set(
     items
       .map((item) => truncateSchedulerText(item?.id || item?.sourceFingerprint || "", 80))
+      .filter(Boolean)
+  )).slice(0, 8);
+}
+
+function compactArticleNewsFeedUrls(metadata = {}) {
+  const items = Array.isArray(metadata.newsFeed?.items) ? metadata.newsFeed.items : [];
+  return Array.from(new Set(
+    items
+      .map((item) => truncateSchedulerText(item?.sourceUrl || item?.url || "", 500))
       .filter(Boolean)
   )).slice(0, 8);
 }
@@ -1857,6 +1867,7 @@ async function compactRecentArticlesForDecision(limit = 8) {
       editorialAngle: truncateSchedulerText(metadata.editorialAngle || "", 140),
       noveltyNote: truncateSchedulerText(metadata.noveltyNote || "", 180),
       newsFeedIds: compactArticleNewsFeedIds(metadata),
+      newsFeedUrls: compactArticleNewsFeedUrls(metadata),
       worldMemoryEventIds: compactArticleWorldMemoryEventIds(metadata),
       primaryWorldMemoryEventId: compactArticleWorldMemoryEventIds(metadata)[0] || "",
       timestamp,
@@ -1869,20 +1880,25 @@ async function compactRecentArticlesForDecision(limit = 8) {
 }
 
 async function buildMagazineArticleCountDecisionContext(options = {}) {
-  const [worldState, newsStore, preferenceStore, biasStore, recentArticles] = await Promise.all([
+  const [worldState, newsStore, preferenceStore, biasStore, recentArticleWindow] = await Promise.all([
     readJsonFile(WORLD_MEMORY_STATE_PATH),
     readJsonFile(NEWS_FEED_STORE_PATH),
     readPreferenceStore(),
     readBiasStore(),
-    compactRecentArticlesForDecision(8),
+    compactRecentArticlesForDecision(12),
   ]);
+  const recentArticles = recentArticleWindow.slice(0, 8);
   const topicDiscoveryLane = hasMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     ? normalizeMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     : null;
   const perArticleSlotMode = Boolean(options.perArticleSlotMode || !topicDiscoveryLane);
   const cutoffMs = parseTimestamp(worldState?.collector?.lastSuccessfulAt);
   const newsItems = Array.isArray(newsStore?.items) ? newsStore.items : [];
-  const allPostCutoffNewsItems = compactPostCutoffNewsFeedItemsForDecision(newsItems, cutoffMs);
+  const allPostCutoffNewsItems = compactPostCutoffNewsFeedItemsForDecision(newsItems, cutoffMs, {
+    excludedNewsFeedIds: recentArticleWindow.flatMap((article) => article.newsFeedIds || []),
+    excludedSourceUrls: recentArticleWindow.flatMap((article) => article.newsFeedUrls || []),
+  });
+  const unfilteredPostCutoffCount = compactPostCutoffNewsFeedItemsForDecision(newsItems, cutoffMs).length;
   const shouldBuildScoutContext = perArticleSlotMode || topicDiscoveryLane?.id === "world-memory-scout";
   const scoutContext =
     shouldBuildScoutContext
@@ -1934,6 +1950,7 @@ async function buildMagazineArticleCountDecisionContext(options = {}) {
       postCutoffCount: postCutoffNewsItems.length,
       postCutoffItems: postCutoffNewsItems,
       eligiblePostCutoffCount: allPostCutoffNewsItems.length,
+      excludedRecentIdentityCount: Math.max(0, unfilteredPostCutoffCount - allPostCutoffNewsItems.length),
       excludedFromTopicDiscovery: newsFeedExcludedFromTopicDiscovery,
       cutoffPolicy: cutoffMs
         ? "use only items after worldMemory.collector.lastSuccessfulAt"
@@ -1999,12 +2016,31 @@ export function reuseMagazineArticleCountDecision(cache = null, evidenceFingerpr
   };
 }
 
-export function compactPostCutoffNewsFeedItemsForDecision(newsItems = [], cutoffMs = 0) {
+function normalizedDecisionSourceUrl(value) {
+  return truncateSchedulerText(value || "", 500).replace(/#.*$/, "").replace(/\/$/, "");
+}
+
+export function compactPostCutoffNewsFeedItemsForDecision(newsItems = [], cutoffMs = 0, options = {}) {
   if (!cutoffMs) return [];
   const items = Array.isArray(newsItems) ? newsItems : [];
+  const excludedNewsFeedIds = new Set(
+    (Array.isArray(options.excludedNewsFeedIds) ? options.excludedNewsFeedIds : [])
+      .map((id) => truncateSchedulerText(id || "", 80))
+      .filter(Boolean)
+  );
+  const excludedSourceUrls = new Set(
+    (Array.isArray(options.excludedSourceUrls) ? options.excludedSourceUrls : [])
+      .map(normalizedDecisionSourceUrl)
+      .filter(Boolean)
+  );
   return items
     .map((item) => ({ item, itemTime: newsFeedItemTimestamp(item) }))
     .filter(({ itemTime }) => itemTime.timestamp > cutoffMs)
+    .filter(({ item }) => {
+      const id = truncateSchedulerText(item.id || item.sourceFingerprint || "", 80);
+      const url = normalizedDecisionSourceUrl(item.sourceUrl || item.url);
+      return !excludedNewsFeedIds.has(id) && !(url && excludedSourceUrls.has(url));
+    })
     .sort((a, b) => b.itemTime.timestamp - a.itemTime.timestamp || String(a.item.id || "").localeCompare(String(b.item.id || "")))
     .map(({ item }) => compactNewsFeedItemForDecision(item));
 }
@@ -2201,11 +2237,12 @@ async function buildWorldMemoryScoutContextForDecision(recentArticles = []) {
   };
 }
 
-function buildMagazineArticleCountDecisionPrompt(context) {
+export function buildMagazineArticleCountDecisionPrompt(context) {
   const maxTargetCount = clampInteger(context?.maxTargetCount, 0, 3, magazineSchedulerMaxPerCycle());
   return [
     "너는 FinanceAgentGUI 주식채널 매거진+의 자동 편집회의 JSON 하네스다.",
     `이번 자동 생성 주기에서 새 매거진 기사를 몇 개 쓸지 0~${maxTargetCount} 사이 정수로 결정한다.`,
+    "도구, 웹 검색, 파일 읽기, 추가 조사를 하지 말고 이 한 번의 답변으로 끝낸다.",
     `사용자 설정 maxTargetCount=${maxTargetCount}는 확정 생성 수가 아니라 상한이다. 충분한 독립 신규 각도가 없으면 이보다 적게 선택한다.`,
     "topicDiscoveryPolicy.id가 'per-article-slot-random'이면 서버는 targetCount가 정해진 뒤 실제 기사 슬롯마다 독립적으로 12% 비주류 후보 발굴 분기를 굴린다. 이 단계에서는 기사 수와 후보 풀의 품질만 판단한다.",
     "topicDiscoveryLane이 있으면 서버가 이미 정한 특정 기사 슬롯의 주제 후보판이다. 모델은 이 값을 바꾸지 말고, 그 후보판 안에서 후보 품질만 의미적으로 판단한다.",
@@ -2447,16 +2484,25 @@ async function decideScheduledMagazineArticleCount({ scheduledAt = "", topicDisc
       agent.provider === MAGAZINE_CODEX_PROVIDER_ID
         ? result.value
         : parseJsonObjectFromText(result.answer || "");
+    const normalizedDecision = normalizeMagazineArticleCountDecision(parsedDecision, {
+      maxCount,
+      provider: agent.provider,
+      model: agent.model,
+      reasoning: agent.reasoning,
+      elapsedMs: result.telemetry?.durationMs ?? result.elapsedMs,
+      topicDiscoveryLane: normalizedTopicDiscoveryLane,
+      topicDiscoveryPolicy,
+    });
+    const newsFeedCutoff = truncateSchedulerText(
+      context.newsFeed?.worldMemoryLastSuccessfulAt || "",
+      80,
+    );
     const decision = {
-      ...normalizeMagazineArticleCountDecision(parsedDecision, {
-        maxCount,
-        provider: agent.provider,
-        model: agent.model,
-        reasoning: agent.reasoning,
-        elapsedMs: result.telemetry?.durationMs ?? result.elapsedMs,
-        topicDiscoveryLane: normalizedTopicDiscoveryLane,
-        topicDiscoveryPolicy,
-      }),
+      ...normalizedDecision,
+      candidateAngles: normalizedDecision.candidateAngles.map((angle) => ({
+        ...angle,
+        ...(newsFeedCutoff ? { newsFeedCutoff } : {}),
+      })),
       cacheHit: false,
       evidenceFingerprint,
       selectionPipeline:

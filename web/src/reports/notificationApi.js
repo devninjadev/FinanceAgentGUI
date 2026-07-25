@@ -14,13 +14,13 @@ export function fetchNotificationStatus(fetchImpl) {
   return requestNotification("/api/notifications/status", {}, fetchImpl);
 }
 
-export function markReportsNotificationsOpened(fetchImpl) {
+export function markNewsFeedNotificationsOpened(fetchImpl) {
   return requestNotification(
     "/api/notifications/read-state",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "mark-reports-opened" }),
+      body: JSON.stringify({ action: "mark-news-feed-opened" }),
     },
     fetchImpl
   );

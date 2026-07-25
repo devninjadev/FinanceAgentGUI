@@ -153,6 +153,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/arca/publish")) {
+    await handleArcaEndpoint("publish", req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/arca/emoticons")) {
     await handleArcaEndpoint("emoticons", req, res);
     return;
@@ -474,16 +479,6 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/notifications/push")) {
     await handleNotificationsEndpoint("push", req, res);
-    return;
-  }
-
-  if (req.url?.startsWith("/api/notifications/emergency-report")) {
-    await handleNotificationsEndpoint("emergency-report", req, res);
-    return;
-  }
-
-  if (req.url?.startsWith("/api/notifications/emergency-scenario")) {
-    await handleNotificationsEndpoint("emergency-scenario", req, res);
     return;
   }
 

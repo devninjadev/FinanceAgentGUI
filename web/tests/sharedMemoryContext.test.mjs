@@ -10,6 +10,7 @@ import {
   normalizeExternalMarketSummaryCandidate,
   runExternalMarketSummarySingleFlight,
   sanitizeWorldMemoryReportText,
+  selectExternalMarketSummaryUpdate,
 } from "../server/sharedMemoryStore.mjs";
 
 test("external market summary fingerprint ignores wall-clock time and tracks exact semantic inputs", () => {
@@ -68,8 +69,72 @@ test("external market summary prompt keeps a stable provider-cache prefix", () =
 
   assert.equal(later, first);
   assert.equal(first.includes("builtAt"), false);
+  assert.match(first, /도구 호출, 웹 검색, 파일 읽기, 셸 실행, 추가 조사를 하지 말고/);
+  assert.match(first, /직전 시장 요약을 전체 기준 문맥으로 유지/);
   assert.ok(first.indexOf("기준 World Memory:") < first.indexOf("변동 뉴스:"));
   assert.ok(first.indexOf("반환 형식:") < first.indexOf("기준 World Memory:"));
+});
+
+test("external market summary batches thin deltas against the previous summary instead of summarizing two rows alone", () => {
+  const cutoff = "2026-07-23T00:00:00.000Z";
+  const baselineItems = Array.from({ length: 30 }, (_value, index) => ({
+    id: `baseline-${index}`,
+    publishedAt: new Date(Date.parse("2026-07-23T01:00:00.000Z") + index * 60_000).toISOString(),
+    translatedTitle: `기준 기사 ${index}`,
+  }));
+  const baseline = selectExternalMarketSummaryUpdate({
+    newsStore: { items: baselineItems },
+    worldMemoryCutoffAt: cutoff,
+    briefing: {},
+    nowMs: Date.parse("2026-07-23T02:00:00.000Z"),
+  });
+  assert.equal(baseline.due, true);
+  assert.equal(baseline.updateMode, "full-rebase");
+  assert.equal(baseline.promptItems.length, 30);
+
+  const priorBriefing = {
+    status: "ready",
+    summaryText: "금리와 유가가 함께 오르며 위험회피가 우세하다.",
+    selectionPolicy: "world-memory-baseline-60-then-prior-summary-plus-batched-delta",
+    promptVersion: "finance-agent-gui.external-market-summary.v3",
+    basedOnWorldMemoryCollectionAt: cutoff,
+    processedNewsItemKeys: baseline.processedNewsItemKeys,
+  };
+  const twoNewItems = [
+    {
+      id: "delta-1",
+      publishedAt: "2026-07-23T02:01:00.000Z",
+      translatedTitle: "새 기사 1",
+    },
+    {
+      id: "delta-2",
+      publishedAt: "2026-07-23T02:02:00.000Z",
+      translatedTitle: "새 기사 2",
+    },
+  ];
+  const waiting = selectExternalMarketSummaryUpdate({
+    newsStore: { items: [...twoNewItems, ...baselineItems] },
+    worldMemoryCutoffAt: cutoff,
+    briefing: priorBriefing,
+    nowMs: Date.parse("2026-07-23T02:10:00.000Z"),
+  });
+  assert.equal(waiting.due, false);
+  assert.equal(waiting.reason, "waiting-for-delta-batch");
+  assert.equal(waiting.pendingDeltaCount, 2);
+
+  const dueByTime = selectExternalMarketSummaryUpdate({
+    newsStore: { items: [...twoNewItems, ...baselineItems] },
+    worldMemoryCutoffAt: cutoff,
+    briefing: {
+      ...priorBriefing,
+      pendingDeltaStartedAt: "2026-07-23T02:00:00.000Z",
+    },
+    nowMs: Date.parse("2026-07-23T02:31:00.000Z"),
+  });
+  assert.equal(dueByTime.due, true);
+  assert.equal(dueByTime.updateMode, "incremental");
+  assert.equal(dueByTime.promptItems.length, 2);
+  assert.equal(dueByTime.previousSummary, priorBriefing.summaryText);
 });
 
 test("external market summary single-flight reuses exact cache and joins an active generation", () => {
@@ -217,7 +282,7 @@ test("external briefing stores a market summary from the selected News Feed samp
   assert.match(briefing.text, /혼재 국면/);
   assert.match(briefing.text, /심각성 평가/);
   assert.match(briefing.text, /등급: watch/);
-  assert.match(briefing.text, /긴급 절차: 대기/);
+  assert.match(briefing.text, /브라우저 알림: 대기/);
   assert.match(briefing.text, /translation-test-model/);
   assert.match(briefing.text, /대상 보도 수: 3/);
   assert.doesNotMatch(briefing.text, /핵심 신호/);
@@ -384,7 +449,7 @@ test("external market summary harness accepts a summary without signal lists", (
   assert.equal(candidate.shouldCreateReport, false);
 });
 
-test("external market summary harness requires push summary for urgent reports", () => {
+test("external market summary harness requires a push summary for urgent notifications", () => {
   const candidate = normalizeExternalMarketSummaryCandidate({
     marketTone: "risk_off",
     summaryKo: "시장 전반의 위험회피가 빠르게 확산되고 있다.",
@@ -419,7 +484,7 @@ test("external briefing exposes a display market summary without generation meta
     "",
     "심각성 평가:",
     "등급: watch",
-    "긴급 절차: 대기",
+    "브라우저 알림: 대기",
     "판단: 관찰할 만하지만 긴급 절차 대상은 아니다.",
     "",
     "핵심 신호:",

@@ -114,6 +114,10 @@ export function codexApiPlugin() {
         await handleLazyArcaEndpoint("comment", req, res);
       });
 
+      server.middlewares.use("/api/arca/publish", async (req, res) => {
+        await handleLazyArcaEndpoint("publish", req, res);
+      });
+
       server.middlewares.use("/api/arca/emoticons", async (req, res) => {
         await handleLazyArcaEndpoint("emoticons", req, res);
       });
@@ -379,14 +383,6 @@ export function codexApiPlugin() {
 
       server.middlewares.use("/api/notifications/push", async (req, res) => {
         await handleNotificationsEndpoint("push", req, res);
-      });
-
-      server.middlewares.use("/api/notifications/emergency-report", async (req, res) => {
-        await handleNotificationsEndpoint("emergency-report", req, res);
-      });
-
-      server.middlewares.use("/api/notifications/emergency-scenario", async (req, res) => {
-        await handleNotificationsEndpoint("emergency-scenario", req, res);
       });
 
       server.middlewares.use("/api/notifications/read-state", async (req, res) => {

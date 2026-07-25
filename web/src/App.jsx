@@ -261,7 +261,7 @@ function App() {
   const notificationController = useNotificationController();
   const {
     notificationStatus,
-    markReportsNotificationsOpened,
+    markNewsFeedNotificationsOpened,
   } = notificationController;
   const agentRuntimeController = useAgentRuntimeController();
   const {
@@ -576,13 +576,13 @@ function App() {
       refreshBoard();
     }
     if (arcaReaderArticle) closeArcaArticleReader();
-    if (item.view === "reports") {
-      void markReportsNotificationsOpened();
+    if (item.view === "news-feed") {
+      void markNewsFeedNotificationsOpened();
     }
     setActiveView(item.view);
   }
 
-  function openReportsFromBrowserNotification(notification = null) {
+  function openNewsFeedFromBrowserNotification(notification = null) {
     if (notification && typeof notification.close === "function") {
       notification.close();
     }
@@ -591,9 +591,8 @@ function App() {
     } catch {
       // Focus can fail in restricted browser contexts; still navigate the app state.
     }
-    setActiveView("reports");
-    setReportRefreshSignal((value) => value + 1);
-    void markReportsNotificationsOpened();
+    setActiveView("news-feed");
+    void markNewsFeedNotificationsOpened();
   }
 
   function showBrowserNotificationForStatus(status = notificationStatusRef.current) {
@@ -602,7 +601,7 @@ function App() {
       return false;
     }
     setBrowserNotificationPermission(window.Notification.permission || "default");
-    const urgentUpdate = status?.reportsUrgentUpdate || {};
+    const urgentUpdate = status?.newsFeedUrgentUpdate || {};
     const notificationId = urgentUpdate.id || status?.latest?.id || "";
     if (!urgentUpdate.showBadge || !notificationId) return false;
     if (browserNotificationLastShownRef.current === notificationId) return false;
@@ -618,12 +617,12 @@ function App() {
       renotify: true,
       data: {
         id: notificationId,
-        view: "reports",
+        view: "news-feed",
       },
     });
     notification.onclick = (event) => {
       event.preventDefault();
-      openReportsFromBrowserNotification(notification);
+      openNewsFeedFromBrowserNotification(notification);
     };
     browserNotificationLastShownRef.current = notificationId;
     writeLastBrowserNotificationId(notificationId);
@@ -812,7 +811,7 @@ function App() {
   useEffect(() => {
     notificationStatusRef.current = notificationStatus;
     showBrowserNotificationForStatus(notificationStatus);
-  }, [notificationStatus?.latest?.id, notificationStatus?.reportsUrgentUpdate?.showBadge]);
+  }, [notificationStatus?.latest?.id, notificationStatus?.newsFeedUrgentUpdate?.showBadge]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("Notification" in window)) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   fetchNotificationStatus,
-  markReportsNotificationsOpened as markReportsOpenedRequest,
+  markNewsFeedNotificationsOpened as markNewsFeedOpenedRequest,
 } from "./notificationApi.js";
 
 const NOTIFICATION_STATUS_POLL_INTERVAL_MS = 15_000;
@@ -15,9 +15,9 @@ export function useNotificationController() {
     return payload;
   }, []);
 
-  const markReportsNotificationsOpened = useCallback(async () => {
+  const markNewsFeedNotificationsOpened = useCallback(async () => {
     try {
-      const payload = await markReportsOpenedRequest();
+      const payload = await markNewsFeedOpenedRequest();
       setNotificationStatus(payload);
       return payload;
     } catch {
@@ -47,6 +47,6 @@ export function useNotificationController() {
   return {
     notificationStatus,
     refreshNotificationStatus,
-    markReportsNotificationsOpened,
+    markNewsFeedNotificationsOpened,
   };
 }

@@ -12,6 +12,10 @@ import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import { formatDateTime } from "../utils/formatters.js";
 import { FeedSourceLabel } from "./FeedSourceLabel.jsx";
 import { newsFeedClipboardSourceUrl } from "./newsFeedClipboard.js";
+import {
+  newsFeedGlobalMarketImpactBadge,
+  newsFeedGlobalMarketImpactClipboard,
+} from "./newsFeedGlobalMarketImpact.js";
 import { newsFeedFeeds, newsFeedHealthState, newsFeedStatusLabel } from "./newsFeedStatus.js";
 
 function formatNewsFeedCount(value) {
@@ -216,6 +220,33 @@ function normalizeNewsFeedClipboardMetaRow(cloneNode) {
   }
 }
 
+function normalizeNewsFeedClipboardMarketImpact(cloneNode, globalMarketImpact) {
+  const badge = cloneNode.querySelector(".news-feed-market-impact-badge");
+  if (!badge) return;
+  const clipboardImpact = newsFeedGlobalMarketImpactClipboard(globalMarketImpact);
+  if (!clipboardImpact) {
+    badge.remove();
+    return;
+  }
+
+  badge.textContent = clipboardImpact.text;
+  badge.removeAttribute("class");
+  badge.style.display = "inline";
+  badge.style.minHeight = "0";
+  badge.style.margin = "0";
+  badge.style.padding = "0";
+  badge.style.border = "0";
+  badge.style.borderRadius = "0";
+  badge.style.background = "transparent";
+  badge.style.color = clipboardImpact.color;
+  badge.style.fontSize = "inherit";
+  badge.style.fontWeight = "800";
+  badge.style.lineHeight = "inherit";
+  badge.style.verticalAlign = "baseline";
+  badge.style.whiteSpace = "nowrap";
+  badge.insertAdjacentText("afterend", " ");
+}
+
 function newsFeedPlainTextFromNode(node) {
   const holder = document.createElement("div");
   holder.style.position = "fixed";
@@ -237,6 +268,7 @@ async function buildNewsFeedClipboardPayload(sourceNode, item) {
     element.remove();
   });
   normalizeNewsFeedClipboardMetaRow(cloneNode);
+  normalizeNewsFeedClipboardMarketImpact(cloneNode, item?.globalStockMarketImpact);
   addNewsFeedClipboardUrl(cloneNode, item?.sourceUrl);
   await inlineNewsFeedClipboardImages(sourceNode, cloneNode);
   const plainText = newsFeedPlainTextFromNode(cloneNode);
@@ -593,6 +625,9 @@ export default function NewsFeedView({
             const showOriginalTitle = originalTitle && originalTitle !== originalBody;
             const translationStatusClass =
               item.translationStatus === "translated" ? "translated" : "pending";
+            const globalMarketImpactBadge = newsFeedGlobalMarketImpactBadge(
+              item.globalStockMarketImpact
+            );
             const itemCopyActive = copyState.itemId === item.id;
             const itemCopyStatus = itemCopyActive ? copyState.status : "idle";
             const itemCopyLabel =
@@ -638,7 +673,17 @@ export default function NewsFeedView({
                     </span>
                   ) : null}
                 </div>
-                <p className="news-feed-translation">{bodyText}</p>
+                <p className="news-feed-translation">
+                  {globalMarketImpactBadge ? (
+                    <span
+                      className={`news-feed-market-impact-badge ${globalMarketImpactBadge.className}`}
+                      title={`글로벌 주식시장 관점: ${globalMarketImpactBadge.label}`}
+                    >
+                      {globalMarketImpactBadge.label}
+                    </span>
+                  ) : null}
+                  {bodyText}
+                </p>
                 {originalTitle || originalBody ? (
                   <details className="news-feed-original">
                     <summary>원문</summary>

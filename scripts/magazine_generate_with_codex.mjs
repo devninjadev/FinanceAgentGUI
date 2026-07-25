@@ -42,6 +42,7 @@ const LEGACY_HARNESS_PROFILE = "legacy";
 const DEFAULT_HARNESS_PROFILE = "v2";
 const EDITORIAL_REVIEW_POLICY = "magazine-editorial-review-v2";
 const EDITORIAL_EXEMPLAR_CONFIG_PATH = join(GUIBUILD_ROOT, "config", "magazine-editorial-exemplars.json");
+const CHATGPT_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 
 function argValue(name, fallback = "") {
   const index = process.argv.indexOf(name);
@@ -70,7 +71,11 @@ function cleanAntigravityModel(value, fallback = "Gemini 3.5 Flash (Medium)") {
 }
 
 function findCodexCommand() {
-  return process.env.CODEX_CLI_PATH || "codex";
+  return (
+    process.env.CODEX_CLI_PATH ||
+    process.env.CODEX_BIN ||
+    (existsSync(CHATGPT_BUNDLED_CODEX) ? CHATGPT_BUNDLED_CODEX : "codex")
+  );
 }
 
 function findAntigravityCommand() {
@@ -209,7 +214,7 @@ function worldMemoryLastSuccessfulAt() {
 }
 
 function newsFeedItemTimestamp(item = {}) {
-  for (const field of ["publishedAt", "fetchedAt", "translatedAt"]) {
+  for (const field of ["sourcePublishedAt", "publishedAt", "fetchedAt", "translatedAt"]) {
     const timestamp = parseTimestamp(item[field]);
     if (timestamp) return { field, timestamp, iso: new Date(timestamp).toISOString() };
   }
@@ -1389,6 +1394,9 @@ export function normalizeLockedTopic(source = {}) {
   const topic = source && typeof source === "object" && !Array.isArray(source) ? source : {};
   const title = compactPromptText(topic.title || topic.angle || "", 220);
   if (!title) return null;
+  const newsFeedCutoffTimestamp = parseTimestamp(
+    topic.newsFeedCutoff || topic.worldMemoryLastSuccessfulAt || "",
+  );
   return {
     title,
     reason: compactPromptText(topic.reason || topic.rationale || "", 500),
@@ -1397,6 +1405,9 @@ export function normalizeLockedTopic(source = {}) {
     primaryEvent: compactPromptText(topic.primaryEvent || topic.event || "", 300),
     newsFeedIds: identityList(Array.isArray(topic.newsFeedIds) ? topic.newsFeedIds : topic.sourceIds || []),
     researchQueries: identityList(Array.isArray(topic.researchQueries) ? topic.researchQueries : []).slice(0, 5),
+    ...(newsFeedCutoffTimestamp
+      ? { newsFeedCutoff: new Date(newsFeedCutoffTimestamp).toISOString() }
+      : {}),
   };
 }
 
@@ -1410,10 +1421,13 @@ function lockedTopicFromEnvironment() {
   }
 }
 
-function selectedNewsFeedEvidenceSummary(newsFeedIds = []) {
+function selectedNewsFeedEvidenceSummary(newsFeedIds = [], newsFeedCutoff = "") {
   const ids = new Set(identityList(newsFeedIds));
   if (!ids.size) return "- 확정 소재에 고정된 로컬 보도 id가 없다. 필요한 근거는 공식/외부 출처로 조사한다.";
-  const cutoff = worldMemoryLastSuccessfulAt();
+  const frozenCutoffTimestamp = parseTimestamp(newsFeedCutoff);
+  const cutoff = frozenCutoffTimestamp
+    ? { iso: new Date(frozenCutoffTimestamp).toISOString(), timestamp: frozenCutoffTimestamp }
+    : worldMemoryLastSuccessfulAt();
   const store = readJsonFile(NEWS_FEED_STORE_PATH);
   const items = Array.isArray(store?.items) ? store.items : [];
   const selected = items.filter((item) => ids.has(String(item.id || item.sourceFingerprint || "")));
@@ -1466,6 +1480,7 @@ function buildV2TopicPreflightPrompt() {
 }
 
 async function selectV2LockedTopic({ provider, codex, approval, model, speed, timeoutMs, tempDir, agentLabel }) {
+  const selectionCutoff = worldMemoryLastSuccessfulAt();
   const outputPath = join(tempDir, `${provider}-topic-preflight.json`);
   console.log("\nRunning Magazine v2 topic preflight...");
   await runAgentPrompt({
@@ -1485,9 +1500,12 @@ async function selectV2LockedTopic({ provider, codex, approval, model, speed, ti
   if (!decision || decision.status !== "selected") {
     throw new Error(`${agentLabel} v2 topic preflight did not select an article: ${decision?.reason || "invalid decision"}`);
   }
-  const lockedTopic = normalizeLockedTopic(decision);
+  const lockedTopic = normalizeLockedTopic({
+    ...decision,
+    newsFeedCutoff: selectionCutoff.iso,
+  });
   if (!lockedTopic) throw new Error(`${agentLabel} v2 topic preflight returned no usable title`);
-  selectedNewsFeedEvidenceSummary(lockedTopic.newsFeedIds);
+  selectedNewsFeedEvidenceSummary(lockedTopic.newsFeedIds, lockedTopic.newsFeedCutoff);
   return lockedTopic;
 }
 
@@ -1496,7 +1514,10 @@ export function buildV2Prompt({ count, replace, articleDirectory, staged, agentL
   const recentArticles = recentArticleWindowSummary(8);
   const normalizedLockedTopic = normalizeLockedTopic(lockedTopic);
   if (!normalizedLockedTopic) throw new Error("Magazine v2 writer requires a locked topic from preflight");
-  const newsFeedCandidates = selectedNewsFeedEvidenceSummary(normalizedLockedTopic.newsFeedIds);
+  const newsFeedCandidates = selectedNewsFeedEvidenceSummary(
+    normalizedLockedTopic.newsFeedIds,
+    normalizedLockedTopic.newsFeedCutoff,
+  );
   const worldMemorySignals = worldMemoryCurrentSignalSummary(8);
   return [
     `너는 FinanceAgentGUI 배포본 안에서 실행되는 ${agentLabel} 금융 매거진 기자 겸 편집자다.`,
@@ -2546,7 +2567,10 @@ function writeSimpleDraftPackage({
   const articleId = availableSimpleArticleId(article.articleId, stagingArticlesDir);
   const articleDir = join(stagingArticlesDir, articleId);
   mkdirSync(articleDir, { recursive: true });
-  const cutoff = worldMemoryLastSuccessfulAt();
+  const frozenCutoffTimestamp = parseTimestamp(lockedTopic.newsFeedCutoff);
+  const cutoff = frozenCutoffTimestamp
+    ? { iso: new Date(frozenCutoffTimestamp).toISOString(), timestamp: frozenCutoffTimestamp }
+    : worldMemoryLastSuccessfulAt();
   const metadata = {
     title: article.title,
     deck: article.deck,
@@ -2634,7 +2658,7 @@ async function runSimpleProductionPipeline({
   if (count !== 1) {
     throw new Error("simple Magazine production pipeline accepts exactly one article per generator run");
   }
-  let lockedTopic = configuredLockedTopic;
+  let lockedTopic = normalizeLockedTopic(configuredLockedTopic);
   let discoveryTelemetry = null;
   if (!lockedTopic) {
     const discovery = await discoverSimpleTopicFromAllCandidates({
@@ -2652,9 +2676,20 @@ async function runSimpleProductionPipeline({
       primaryEvent: discovery.topic.eventSignature?.action,
       newsFeedIds: discovery.topic.newsFeedIds,
       researchQueries: [],
+      newsFeedCutoff: discovery.cutoff,
+    });
+    discoveryTelemetry = {
+      ...discoveryTelemetry,
+      excludedRecentIdentityCount: discovery.excludedRecentIdentityCount,
+    };
+  } else if (!lockedTopic.newsFeedCutoff) {
+    lockedTopic = normalizeLockedTopic({
+      ...lockedTopic,
+      newsFeedCutoff: worldMemoryLastSuccessfulAt().iso,
     });
   }
   if (!lockedTopic) throw new Error("simple Magazine production pipeline could not lock a topic");
+  selectedNewsFeedEvidenceSummary(lockedTopic.newsFeedIds, lockedTopic.newsFeedCutoff);
 
   const writerPromise = generateSimpleDraftFromLockedTopic({
     topic: lockedTopic,

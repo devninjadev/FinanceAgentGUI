@@ -1053,3 +1053,39 @@ test("magazine v2 quality check accepts an integrated one-shot editorial review"
   assert.equal(output.ok, true);
   assert.equal(output.errors.length, 0);
 });
+
+test("magazine v2 quality check accepts two locked anchors from the integrated News Feed one-shot", () => {
+  const articleRoot = mkdtempSync(join(tmpdir(), "magazine-v2-two-anchors-"));
+  writeArticle(articleRoot, {
+    body: makeArticleBody(),
+    metadataPatch: {
+      sourceBasis: [
+        "Test Wire, 2026-07-24: 데이터센터 채권 조달비용 상승",
+        "Second Wire, 2026-07-24: AI 연계 회사채 거래 확대",
+      ],
+      worldMemory: null,
+      newsFeed: {
+        selectionPolicy: "post-world-memory-update-only",
+        worldMemoryLastSuccessfulAt: "2026-07-24T03:59:48.761Z",
+        items: [
+          { id: "nf_1", publishedAt: "2026-07-24T04:01:00.000Z" },
+          { id: "nf_2", publishedAt: "2026-07-24T04:02:00.000Z" },
+        ],
+      },
+      researchMode: "news-feed-first",
+      editorialReviewDecision: {
+        policy: "magazine-editorial-review-v2",
+        method: "LLM_INTEGRATED_ONE_SHOT_REVIEW",
+        reviewer: "magazine-simple-writer-integrated-review",
+        suggestedTitle: "AI 전력 수요 확대가 유틸리티 비용을 흔듭니다",
+        publicationReady: true,
+        summary: "두 개의 잠긴 근거로 사건과 시장 메커니즘을 일관되게 설명했습니다.",
+        issues: [],
+      },
+    },
+  });
+
+  const output = JSON.parse(runV2Check(articleRoot));
+  assert.equal(output.ok, true);
+  assert.equal(output.errors.some((issue) => issue.code === "source-basis-too-thin"), false);
+});

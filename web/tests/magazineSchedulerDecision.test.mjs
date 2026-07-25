@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildMagazineArticleCountDecisionPrompt,
   buildMagazineTopicDiscoverySlots,
   chooseMagazineTopicDiscoveryLane,
   compactPostCutoffNewsFeedItemsForDecision,
@@ -193,6 +194,47 @@ test("magazine scheduler includes every post-cutoff News Feed item in decision c
   assert.equal(compacted[0].id, "nf-32");
   assert.equal(compacted.at(-1).id, "nf-01");
   assert.equal(compacted.some((item) => item.id === "nf-before-cutoff"), false);
+});
+
+test("magazine scheduler removes exact recent article identities before model judgment", () => {
+  const cutoffMs = Date.parse("2026-07-03T12:00:00.000Z");
+  const items = [
+    {
+      id: "nf-new",
+      translatedTitle: "새 후보",
+      sourceUrl: "https://example.com/new",
+      sourcePublishedAt: "2026-07-03T12:03:00.000Z",
+    },
+    {
+      id: "nf-used-id",
+      translatedTitle: "이미 쓴 id",
+      sourceUrl: "https://example.com/other",
+      sourcePublishedAt: "2026-07-03T12:02:00.000Z",
+    },
+    {
+      id: "nf-other-id",
+      translatedTitle: "이미 쓴 URL",
+      sourceUrl: "https://example.com/used/",
+      sourcePublishedAt: "2026-07-03T12:01:00.000Z",
+    },
+  ];
+  const compacted = compactPostCutoffNewsFeedItemsForDecision(items, cutoffMs, {
+    excludedNewsFeedIds: ["nf-used-id"],
+    excludedSourceUrls: ["https://example.com/used"],
+  });
+
+  assert.deepEqual(compacted.map((item) => item.id), ["nf-new"]);
+});
+
+test("magazine count decision prompt forbids tools and additional investigation", () => {
+  const prompt = buildMagazineArticleCountDecisionPrompt({
+    maxTargetCount: 2,
+    newsFeed: { postCutoffItems: [] },
+    recentArticles: [],
+  });
+
+  assert.match(prompt, /도구, 웹 검색, 파일 읽기, 추가 조사를 하지 말고/);
+  assert.match(prompt, /JSON 객체 하나만 반환/);
 });
 
 test("magazine topic discovery lane uses a true 12 percent scout branch", () => {
@@ -472,6 +514,11 @@ test("Magazine v2 extracts explicit Codex session ids and normalizes locked topi
     newsFeedIds: ["nf_1", "nf_2"],
     researchQueries: [],
   });
+  assert.equal(normalizeLockedTopic({
+    title: "컷오프 고정 소재",
+    newsFeedIds: ["nf_1"],
+    newsFeedCutoff: "2026-07-24T03:30:00+00:00",
+  }).newsFeedCutoff, "2026-07-24T03:30:00.000Z");
 });
 
 test("Magazine v2 extracts Codex cached-input token telemetry", () => {

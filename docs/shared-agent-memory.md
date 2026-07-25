@@ -87,26 +87,22 @@ the bridge between formal World Memory updates.
   lowest Luna reasoning level exposed by the CLI catalog (currently `low`).
   News Feed, Economic Calendar, this shared-memory summary, and the visible
   translation-model label must all use the same version-gated selector.
-  The sample prioritizes rows after `data/world-memory/collector-state.json`
-  `collector.lastSuccessfulAt`. If that fresh window has fewer than 30 timestamped
-  rows and the feed store itself is not that small, it backfills from the latest
-  timestamped News Feed rows until the sample reaches 30. If the total feed store
-  has fewer than 30 timestamped rows, it summarizes all available timestamped
-  rows. If the collection timestamp is not available, no News Feed items are
-  eligible for this layer; the report generation timestamp must not be used as a
-  substitute cutoff.
+  A new World Memory cutoff creates a bounded baseline from 30-60 representative
+  timestamped News Feed rows. Later refreshes preserve the previous market
+  summary as the baseline context and send only newly observed rows. Thin deltas
+  wait until six rows accumulate or 30 minutes elapse, so two isolated rows do
+  not replace the full-market context. If the collection timestamp is not
+  available, no News Feed items are eligible for this layer; the report
+  generation timestamp must not be used as a substitute cutoff.
 - The same model response carries `alertLevel`, `severityKo`,
-  `shouldCreateReport`, and `pushSummary`; do not run a second text-matching or
+  `shouldNotify`, and `pushSummary`; do not run a second text-matching or
   model-only severity pass over the finished summary.
 - When the refreshed summary is `urgent` or `critical`, the same background
-  maintenance cycle triggers the existing emergency-market-update procedure once
-  for that summary: generate
-  the fast report, save it under `data/reports/`, queue the browser notification,
-  and dedupe later polls. A reportable episode gets one `urgent` report at most;
-  if the same episode escalates from `urgent` to `critical`, it may create one
-  additional report. Continued `urgent` or continued `critical` summaries should
-  not create repeated emergency reports until the summary severity falls back to
-  `watch` or `none` and a later reportable episode begins.
+  maintenance cycle queues a browser notification once for that alert episode.
+  It does not generate or save a report. Continued `urgent` or `critical`
+  summaries are suppressed; an `urgent` episode can notify once more only if it
+  escalates to `critical`. The notification opens `News Feed`, whose sidebar
+  item owns the unread red state.
 - It does not append raw News Feed item lists to prompt memory. If the model
   summary fails, the layer records a degraded status and retries on the next
   refresh rather than accumulating the candidate list.
@@ -128,11 +124,11 @@ GET /api/memory?limit=5&offset=0
 The response also includes `contextMemory.marketSummary`, a display-safe view
 of the current translation-model market summary used by the News Feed screen.
 The visible summary text includes a trailing `심각성 평가` block, and the object
-also exposes the parsed `alertLevel`, `severityKo`, `shouldCreateReport`, and
+also exposes the parsed `alertLevel`, `severityKo`, `shouldNotify`, and
 `pushSummary`. Cache diagnostics include `inputFingerprint`, `cacheStatus`,
 `summaryGeneratedAt`, and `lastReusedAt`; the fingerprint is a one-way SHA-256
 digest rather than raw prompt data. `GET /api/memory` is a cached, non-blocking status read; the
-server-owned maintenance worker runs the automatic urgent/critical hook.
+server-owned maintenance worker runs the automatic urgent/critical notification hook.
 
 Append a record:
 

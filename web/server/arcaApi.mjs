@@ -15,7 +15,10 @@ const MAX_ARTICLE_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_ARCA_MEDIA_BYTES = 20 * 1024 * 1024;
 const MAX_COMMENT_LENGTH = 8000;
 const MAX_COMBO_EMOTICONS = 3;
+const MAX_ARCA_ARTICLE_TITLE_LENGTH = 200;
+const MAX_ARCA_ARTICLE_MARKDOWN_LENGTH = 200000;
 const MAX_ARCA_NOTIFICATION_ITEMS = 50;
+const ARCA_NEWS_CATEGORY = "경제뉴스";
 const guardedArcaImageSockets = new WeakSet();
 
 function escapeRegExp(value) {
@@ -35,6 +38,15 @@ function decodeHtmlEntities(value) {
 
 function stripTags(value) {
   return decodeHtmlEntities(String(value).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function nodeText(node) {
@@ -1121,6 +1133,195 @@ export function extractArcaArticleDetailFromHtml(
   return extractArticleDetail(parse(String(html || "")), { baseUrl: normalizeBaseUrl(baseUrl) }, new URL(url));
 }
 
+const ZWJ_EMOJI_ALTERNATIVES = [
+  ["💻", "💻"],
+  ["⚖", "⚖️"],
+  ["🔬", "🔬"],
+  ["🦯", "🦯"],
+  ["🦽", "🦽"],
+  ["🦼", "🦼"],
+  ["🍼", "🍼"],
+  ["❤", "❤️"],
+  ["🗨", "💬"],
+  ["🔧", "🔧"],
+  ["🎓", "🎓"],
+  ["🏫", "🏫"],
+  ["🌾", "🌾"],
+  ["✈", "✈️"],
+  ["🚒", "🚒"],
+];
+
+function nonZwjEmojiAlternative(grapheme) {
+  for (const [marker, replacement] of ZWJ_EMOJI_ALTERNATIVES) {
+    if (grapheme.includes(marker)) return replacement;
+  }
+  if (/[👨👩🧑👦👧👶]/u.test(grapheme)) return grapheme.match(/[👨👩🧑👦👧👶]/u)?.[0] || "👤";
+  return "🔹";
+}
+
+export function replaceZwjEmojiSequences(value) {
+  const source = String(value || "")
+    .replace(/&zwj;|&#8205;|&#x200d;/gi, "\u200d");
+  const segmenter = new Intl.Segmenter("ko", { granularity: "grapheme" });
+  let text = "";
+  let replacementCount = 0;
+  for (const { segment } of segmenter.segment(source)) {
+    if (segment.includes("\u200d")) {
+      text += nonZwjEmojiAlternative(segment);
+      replacementCount += 1;
+    } else {
+      text += segment;
+    }
+  }
+  return { text, replacementCount };
+}
+
+function renderAxiosInlineMarkdown(value) {
+  const escaped = escapeHtml(value);
+  return escaped
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      (_match, label, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`
+    )
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+}
+
+export function renderAxiosMarkdownToArcaHtml(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const output = [];
+  let listItems = [];
+  const flushList = () => {
+    if (!listItems.length) return;
+    output.push(`<ul>${listItems.map((item) => `<li>${renderAxiosInlineMarkdown(item)}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const headingMatch = line.match(/^#\s+(\S.*)$/);
+    if (headingMatch) {
+      flushList();
+      output.push(`<h1>${renderAxiosInlineMarkdown(headingMatch[1])}</h1>`);
+      continue;
+    }
+    if (line === "&nbsp;") {
+      flushList();
+      output.push("<p>&nbsp;</p>");
+      continue;
+    }
+    if (line.startsWith("* ")) {
+      listItems.push(line.slice(2).trim());
+      continue;
+    }
+    flushList();
+    output.push(`<p>${renderAxiosInlineMarkdown(line)}</p>`);
+  }
+  flushList();
+  return output.join("\n");
+}
+
+export function normalizeAxiosArcaPublication(payload = {}) {
+  const source = String(payload.articleMarkdown || payload.markdown || "");
+  if (!source.trim() || source.length > MAX_ARCA_ARTICLE_MARKDOWN_LENGTH) return null;
+  const normalized = replaceZwjEmojiSequences(source);
+  const lines = normalized.text.split(/\r?\n/);
+  const titleIndex = lines.findIndex((line) => line.trim());
+  if (titleIndex < 0) return null;
+  const titleLine = lines[titleIndex].trim();
+  if (!/^#\s+\S/.test(titleLine)) return null;
+  const title = titleLine.replace(/^#\s+/, "").trim();
+  if (!title || title.length > MAX_ARCA_ARTICLE_TITLE_LENGTH) return null;
+  const bodyMarkdown = lines.slice(titleIndex + 1).join("\n").trim();
+  if (!bodyMarkdown) return null;
+  const content = renderAxiosMarkdownToArcaHtml(bodyMarkdown);
+  if (!content) return null;
+  return {
+    channel: DEFAULT_CHANNEL,
+    category: ARCA_NEWS_CATEGORY,
+    title,
+    content,
+    markdown: normalized.text,
+    zwjReplacementCount: normalized.replacementCount,
+  };
+}
+
+export function extractArcaArticleWriteContract(
+  html,
+  { baseUrl = DEFAULT_BASE_URL, channel = DEFAULT_CHANNEL } = {}
+) {
+  const root = parse(String(html || ""));
+  const form = root.querySelector("#article_write_form");
+  const action = absoluteArcaUrl(form?.getAttribute("action"), baseUrl);
+  let actionUrl;
+  try {
+    actionUrl = new URL(action);
+  } catch {
+    actionUrl = null;
+  }
+  const expectedPath = `/b/${channel}/write`;
+  const csrf = form?.querySelector('input[name="_csrf"]')?.getAttribute("value") || "";
+  const token = form?.querySelector('input[name="token"]')?.getAttribute("value") || "";
+  const contentType = form?.querySelector('input[name="contentType"]')?.getAttribute("value") || "";
+  const categoryOptions = form?.querySelectorAll('select[name="category"] option') || [];
+  const hasNewsCategory = categoryOptions.some(
+    (option) => option.getAttribute("value") === ARCA_NEWS_CATEGORY && nodeText(option).includes("뉴스")
+  );
+  if (
+    !csrf ||
+    !token ||
+    contentType !== "html" ||
+    !hasNewsCategory ||
+    !actionUrl ||
+    actionUrl.origin !== new URL(normalizeBaseUrl(baseUrl)).origin ||
+    actionUrl.pathname !== expectedPath
+  ) {
+    return null;
+  }
+  return {
+    actionUrl,
+    csrf,
+    token,
+    contentType,
+    category: ARCA_NEWS_CATEGORY,
+  };
+}
+
+export function buildArcaArticleFormData(publication, contract) {
+  return new URLSearchParams({
+    _csrf: String(contract.csrf || ""),
+    token: String(contract.token || ""),
+    contentType: String(contract.contentType || "html"),
+    category: String(contract.category || ARCA_NEWS_CATEGORY),
+    title: publication.title,
+    content: publication.content,
+  });
+}
+
+export function createdArcaArticleUrl(response, body, { baseUrl = DEFAULT_BASE_URL } = {}) {
+  const candidates = [];
+  const location = response?.headers?.get?.("location");
+  if (location) candidates.push(location);
+  try {
+    const payload = JSON.parse(String(body || ""));
+    candidates.push(payload?.url, payload?.redirect, payload?.location);
+  } catch {
+    const hrefMatch = String(body || "").match(/(?:href=["'])?(\/b\/stock\/\d+)(?:[?"'#<\s]|$)/i);
+    if (hrefMatch?.[1]) candidates.push(hrefMatch[1]);
+  }
+  for (const candidate of candidates.filter(Boolean)) {
+    try {
+      const url = new URL(String(candidate), normalizeBaseUrl(baseUrl));
+      if (url.origin === new URL(normalizeBaseUrl(baseUrl)).origin && /^\/b\/stock\/\d+\/?$/.test(url.pathname)) {
+        return url.toString();
+      }
+    } catch {
+      // Ignore malformed upstream locations.
+    }
+  }
+  return "";
+}
+
 function buildArticleListUrl(config, payload) {
   const channel = normalizeChannel(payload.channel) || config.defaultChannel;
   const url = new URL(`${config.baseUrl}/b/${channel}`);
@@ -1524,6 +1725,163 @@ async function postArcaComment(payload = {}) {
     comments: after.comments || before.comments || [],
     commenting: after.commenting || before.commenting,
     fetchedAt: after.fetchedAt || new Date().toISOString(),
+  };
+}
+
+async function publishAxiosArticle(payload = {}) {
+  const config = getConfig();
+  const publication = normalizeAxiosArcaPublication(payload);
+  if (!publication) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_ARTICLE_PUBLISH_INVALID", "error", "Axios 기사 제목 또는 본문 형식이 올바르지 않습니다.")],
+    };
+  }
+  if (!getArcaCookieHeader()) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_AUTH_REQUIRED", "error", "게시글을 작성하려면 설정에서 아카라이브 로그인을 연결해야 합니다.")],
+    };
+  }
+
+  const writeUrl = new URL(`/b/${publication.channel}/write`, config.baseUrl);
+  let pageResponse;
+  let pageHtml = "";
+  try {
+    pageResponse = await fetchWithTimeout(writeUrl, {
+      headers: buildHeaders({ referer: `${config.baseUrl}/b/${publication.channel}` }),
+      redirect: "follow",
+    });
+    pageHtml = await readTextSafely(pageResponse);
+  } catch (error) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_ARTICLE_PUBLISH_NETWORK_FAILED", "error", `게시글 작성 준비 실패: ${error.message}`)],
+    };
+  }
+  if (isArcaLoginPage(pageResponse, pageHtml)) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_AUTH_REQUIRED", "error", "저장된 아카라이브 로그인 세션이 만료되었습니다.")],
+    };
+  }
+  if (isCloudflareChallenge(pageResponse, pageHtml)) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_CLOUDFLARE_CHALLENGE", "error", "Cloudflare challenge로 게시글 작성이 차단되었습니다.")],
+    };
+  }
+  if (!pageResponse.ok) {
+    return {
+      ok: false,
+      status: pageResponse.status,
+      issues: [issue("ARCA_HTTP_ERROR", "error", `아카라이브 글쓰기 페이지가 HTTP ${pageResponse.status}를 반환했습니다.`)],
+    };
+  }
+
+  const contract = extractArcaArticleWriteContract(pageHtml, {
+    baseUrl: config.baseUrl,
+    channel: publication.channel,
+  });
+  if (!contract) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_ARTICLE_FORM_CHANGED", "error", "아카라이브 게시글 작성 폼의 규격 또는 뉴스 탭 값이 변경되었습니다.")],
+    };
+  }
+  if (payload.dryRun === true) {
+    return {
+      ok: true,
+      dryRun: true,
+      ready: true,
+      title: publication.title,
+      channel: publication.channel,
+      category: publication.category,
+      zwjReplacementCount: publication.zwjReplacementCount,
+    };
+  }
+  if (payload.confirm !== true) {
+    return {
+      ok: false,
+      issues: [issue(
+        "ARCA_ARTICLE_PUBLISH_CONFIRM_REQUIRED",
+        "error",
+        "실제 게시에는 대상과 제목을 드라이런으로 확인한 뒤 confirm=true가 필요합니다."
+      )],
+    };
+  }
+
+  let response;
+  let responseBody = "";
+  try {
+    response = await fetchWithTimeout(contract.actionUrl, {
+      method: "POST",
+      headers: {
+        ...buildHeaders({ referer: writeUrl.toString() }),
+        accept: "application/json,text/html;q=0.9,*/*;q=0.8",
+        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      },
+      body: buildArcaArticleFormData(publication, contract),
+      redirect: "manual",
+    });
+    responseBody = await readTextSafely(response);
+  } catch (error) {
+    return {
+      ok: false,
+      issues: [issue("ARCA_ARTICLE_PUBLISH_FAILED", "error", `게시글 작성 요청 실패: ${error.message}`)],
+    };
+  }
+
+  const upstreamError = upstreamCommentError(response, responseBody);
+  if (response.status >= 400 || upstreamError) {
+    return {
+      ok: false,
+      status: response.status,
+      issues: [issue(
+        "ARCA_ARTICLE_PUBLISH_REJECTED",
+        "error",
+        upstreamError || `아카라이브가 HTTP ${response.status}를 반환했습니다.`
+      )],
+    };
+  }
+
+  const articleUrl = createdArcaArticleUrl(response, responseBody, { baseUrl: config.baseUrl });
+  if (!articleUrl) {
+    return {
+      ok: false,
+      accepted: true,
+      verified: false,
+      issues: [issue(
+        "ARCA_ARTICLE_PUBLISH_UNVERIFIED",
+        "error",
+        "아카라이브가 작성 요청을 수락했지만 생성된 게시글 URL을 확인할 수 없습니다. 중복 방지를 위해 자동 재시도하지 않습니다."
+      )],
+    };
+  }
+
+  const verification = await readArticleDetail({ url: articleUrl });
+  const verified = Boolean(
+    verification.ok &&
+    verification.article?.title?.trim() === publication.title &&
+    verification.article?.url
+  );
+  return {
+    ok: verified,
+    accepted: true,
+    verified,
+    articleUrl,
+    title: publication.title,
+    channel: publication.channel,
+    category: publication.category,
+    zwjReplacementCount: publication.zwjReplacementCount,
+    fetchedAt: verification.fetchedAt || new Date().toISOString(),
+    issues: verified
+      ? []
+      : [issue(
+          "ARCA_ARTICLE_PUBLISH_VERIFY_FAILED",
+          "error",
+          "게시글 작성은 수락되었지만 생성된 글의 제목을 다시 확인하지 못했습니다. 중복 방지를 위해 자동 재시도하지 않습니다."
+        )],
   };
 }
 
@@ -2062,6 +2420,15 @@ export async function handleArcaEndpoint(endpoint, req, res) {
         return;
       }
       sendJson(res, await postArcaComment(await readEndpointPayload(req)));
+      return;
+    }
+
+    if (endpoint === "publish") {
+      if (req.method !== "POST") {
+        sendJson(res, { ok: false, error: "method not allowed" }, 405);
+        return;
+      }
+      sendJson(res, await publishAxiosArticle(await readEndpointPayload(req)));
       return;
     }
 

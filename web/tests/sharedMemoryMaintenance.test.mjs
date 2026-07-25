@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { maintainSharedMemory } from "../server/sharedMemoryMaintenance.mjs";
 
-test("shared memory maintenance refreshes the summary and forwards urgent state to the emergency procedure", async () => {
+test("shared memory maintenance refreshes the summary and forwards urgent state to the notification procedure", async () => {
   const calls = [];
   const result = await maintainSharedMemory({
     readStatus(options) {
@@ -18,14 +18,14 @@ test("shared memory maintenance refreshes the summary and forwards urgent state 
         },
       };
     },
-    async runEmergencyProcedure(summary) {
-      calls.push(["emergency", summary]);
-      return { ok: true, skipped: false, reason: "emergency-procedure-ran" };
+    async runNotificationProcedure(summary) {
+      calls.push(["notification", summary]);
+      return { ok: true, skipped: false, reason: "notification-procedure-ran" };
     },
   });
 
   assert.deepEqual(calls[0], ["status", { refresh: true, limit: 1, offset: 0 }]);
-  assert.equal(calls[1][0], "emergency");
+  assert.equal(calls[1][0], "notification");
   assert.equal(calls[1][1].alertLevel, "urgent");
   assert.equal(result.ok, true);
   assert.equal(result.skipped, false);
@@ -33,14 +33,14 @@ test("shared memory maintenance refreshes the summary and forwards urgent state 
 });
 
 test("shared memory maintenance skips cleanly when no market summary is available", async () => {
-  let emergencyCalls = 0;
+  let notificationCalls = 0;
   const result = await maintainSharedMemory({
     readStatus: () => ({ contextMemory: {} }),
-    runEmergencyProcedure: async () => {
-      emergencyCalls += 1;
+    runNotificationProcedure: async () => {
+      notificationCalls += 1;
     },
   });
 
   assert.equal(result.reason, "market-summary-unavailable");
-  assert.equal(emergencyCalls, 0);
+  assert.equal(notificationCalls, 0);
 });

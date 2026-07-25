@@ -22,7 +22,9 @@ const OUTPUT_SCHEMA_PATH = join(GUIBUILD_ROOT, "config", "magazine-simple-articl
 const TOPIC_SCHEMA_PATH = join(GUIBUILD_ROOT, "config", "magazine-simple-topic.schema.json");
 const NEWS_FEED_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const WORLD_MEMORY_STATE_PATH = join(GUIBUILD_ROOT, "data", "world-memory", "collector-state.json");
+const ARTICLES_DIR = join(GUIBUILD_ROOT, "data", "magazine", "articles");
 const SIMPLE_TEST_ROOT = join(GUIBUILD_ROOT, "data", "magazine", "simple-tests");
+const CHATGPT_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const TOOL_ITEM_TYPES = new Set([
   "command_execution",
   "file_change",
@@ -33,6 +35,14 @@ const TOOL_ITEM_TYPES = new Set([
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function magazineCodexCommand() {
+  return (
+    process.env.CODEX_BIN ||
+    process.env.CODEX_CLI_PATH ||
+    (existsSync(CHATGPT_BUNDLED_CODEX) ? CHATGPT_BUNDLED_CODEX : "codex")
+  );
 }
 
 function cleanText(value, maxChars = 20_000) {
@@ -111,22 +121,89 @@ export function selectNewsEvidence(newsFeed, ids = []) {
 }
 
 function newsItemTimestamp(item = {}) {
-  for (const field of ["publishedAt", "fetchedAt", "translatedAt"]) {
+  for (const field of ["sourcePublishedAt", "publishedAt", "fetchedAt", "translatedAt"]) {
     const timestamp = Date.parse(item?.[field] || "");
     if (Number.isFinite(timestamp)) return timestamp;
   }
   return 0;
 }
 
-export function allEligibleNewsEvidence(newsFeed, worldMemoryState) {
+function normalizedEvidenceUrl(value) {
+  return cleanText(value, 1_000).replace(/#.*$/, "").replace(/\/$/, "");
+}
+
+export function recentArticleNewsIdentities(limit = 12) {
+  if (!existsSync(ARTICLES_DIR)) return { newsFeedIds: [], sourceUrls: [] };
+  const articles = readdirSync(ARTICLES_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const metadataPath = join(ARTICLES_DIR, entry.name, "metadata.json");
+      if (!existsSync(metadataPath)) return null;
+      try {
+        const metadata = readJson(metadataPath);
+        const timestamp = Date.parse(
+          metadata.uploadedAt ||
+            metadata.generatedAt ||
+            metadata.publishedAt ||
+            metadata.createdAt ||
+            metadata.updatedAt ||
+            "",
+        );
+        return {
+          metadata,
+          timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+          id: entry.name,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.timestamp - left.timestamp || left.id.localeCompare(right.id))
+    .slice(0, Math.max(0, Number.parseInt(limit, 10) || 0));
+  const newsFeedIds = new Set();
+  const sourceUrls = new Set();
+  for (const article of articles) {
+    const items = Array.isArray(article.metadata?.newsFeed?.items)
+      ? article.metadata.newsFeed.items
+      : [];
+    for (const item of items) {
+      const id = cleanText(item?.id || item?.sourceFingerprint, 120);
+      const url = normalizedEvidenceUrl(item?.sourceUrl || item?.url);
+      if (id) newsFeedIds.add(id);
+      if (url) sourceUrls.add(url);
+    }
+  }
+  return { newsFeedIds: [...newsFeedIds], sourceUrls: [...sourceUrls] };
+}
+
+export function allEligibleNewsEvidence(newsFeed, worldMemoryState, options = {}) {
   const cutoff = cleanText(worldMemoryState?.collector?.lastSuccessfulAt, 80);
   const cutoffTimestamp = Date.parse(cutoff);
   if (!Number.isFinite(cutoffTimestamp)) {
     throw new Error("World Memory의 마지막 성공 시각을 찾을 수 없습니다");
   }
+  const excludedNewsFeedIds = new Set(
+    (Array.isArray(options.excludedNewsFeedIds) ? options.excludedNewsFeedIds : [])
+      .map((id) => cleanText(id, 120))
+      .filter(Boolean),
+  );
+  const excludedSourceUrls = new Set(
+    (Array.isArray(options.excludedSourceUrls) ? options.excludedSourceUrls : [])
+      .map(normalizedEvidenceUrl)
+      .filter(Boolean),
+  );
+  let excludedCount = 0;
   const candidates = (Array.isArray(newsFeed?.items) ? newsFeed.items : [])
     .map((item) => ({ item, timestamp: newsItemTimestamp(item) }))
     .filter(({ timestamp }) => timestamp > cutoffTimestamp)
+    .filter(({ item }) => {
+      const id = cleanText(item?.id || item?.sourceFingerprint, 120);
+      const url = normalizedEvidenceUrl(item?.sourceUrl || item?.url);
+      const excluded = excludedNewsFeedIds.has(id) || (url && excludedSourceUrls.has(url));
+      if (excluded) excludedCount += 1;
+      return !excluded;
+    })
     .sort(
       (left, right) =>
         right.timestamp - left.timestamp ||
@@ -135,7 +212,7 @@ export function allEligibleNewsEvidence(newsFeed, worldMemoryState) {
     .map(({ item }) => compactNewsEvidence(item))
     .filter(Boolean);
   if (!candidates.length) throw new Error("기준 업데이트 이후 사용할 수 있는 News Feed 후보가 없습니다");
-  return { cutoff, candidates };
+  return { cutoff, candidates, excludedCount };
 }
 
 function allowedTopicLabels() {
@@ -530,7 +607,7 @@ function runObservedCodex({
       "-",
     ];
     const child = spawnObservedLlm(
-      process.env.CODEX_BIN || "codex",
+      magazineCodexCommand(),
       args,
       {
         cwd: workingDirectory,
@@ -664,7 +741,11 @@ export async function runIsolatedCodexJsonPrompt({
 
 export async function discoverSimpleTopicFromAllCandidates(options = {}) {
   const newsFeed = readJson(NEWS_FEED_PATH);
-  const eligible = allEligibleNewsEvidence(newsFeed, readJson(WORLD_MEMORY_STATE_PATH));
+  const recentIdentities = recentArticleNewsIdentities(12);
+  const eligible = allEligibleNewsEvidence(newsFeed, readJson(WORLD_MEMORY_STATE_PATH), {
+    excludedNewsFeedIds: recentIdentities.newsFeedIds,
+    excludedSourceUrls: recentIdentities.sourceUrls,
+  });
   const prompt = buildAllCandidateTopicPrompt(eligible);
   if (prompt.length > 500_000) {
     throw new Error(`전체 후보 프롬프트가 안전 상한을 넘었습니다: ${prompt.length}자`);
@@ -683,6 +764,7 @@ export async function discoverSimpleTopicFromAllCandidates(options = {}) {
     topic: normalizeDiscoveredTopic(result.value, eligible.candidates),
     candidates: eligible.candidates,
     cutoff: eligible.cutoff,
+    excludedRecentIdentityCount: eligible.excludedCount,
     telemetry: result.telemetry,
   };
 }
@@ -746,7 +828,11 @@ export async function generateSimpleMagazineArticle(options) {
     let candidateCount = 0;
     let candidateCutoff = "";
     if (options.discoverAll) {
-      const eligible = allEligibleNewsEvidence(newsFeed, readJson(WORLD_MEMORY_STATE_PATH));
+      const recentIdentities = recentArticleNewsIdentities(12);
+      const eligible = allEligibleNewsEvidence(newsFeed, readJson(WORLD_MEMORY_STATE_PATH), {
+        excludedNewsFeedIds: recentIdentities.newsFeedIds,
+        excludedSourceUrls: recentIdentities.sourceUrls,
+      });
       candidateCount = eligible.candidates.length;
       candidateCutoff = eligible.cutoff;
       const discoveryPrompt = buildAllCandidateTopicPrompt(eligible);

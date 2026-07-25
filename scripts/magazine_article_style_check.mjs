@@ -1073,6 +1073,10 @@ function checkArticle({ articleId, metadata, html }, topicCatalog) {
   const sectionParagraphCounts = paragraphCountsBySection(html);
   const attributionCount = countAttributions(html, bodyText);
   const sourceCount = Array.isArray(metadata.sourceBasis) ? metadata.sourceBasis.length : 0;
+  const integratedNewsFeedOneShot =
+    metadata.researchMode === "news-feed-first" &&
+    metadata.editorialReviewDecision?.method === "LLM_INTEGRATED_ONE_SHOT_REVIEW";
+  const minimumSourceCount = integratedNewsFeedOneShot ? 2 : 3;
 
   if (!metadata.title || !metadata.summary || !metadata.heroImage) {
     issues.push({ level: "error", code: "metadata-missing-catalog-fields", message: "metadata must include title, summary, and heroImage" });
@@ -1086,8 +1090,14 @@ function checkArticle({ articleId, metadata, html }, topicCatalog) {
   issues.push(...checkReaderToneDecision(metadata));
   issues.push(...checkQuoteFlowDecision(metadata));
 
-  if (!Array.isArray(metadata.sourceBasis) || metadata.sourceBasis.length < 3) {
-    issues.push({ level: "error", code: "source-basis-too-thin", message: "sourceBasis should include at least three source or evidence entries" });
+  if (!Array.isArray(metadata.sourceBasis) || metadata.sourceBasis.length < minimumSourceCount) {
+    issues.push({
+      level: "error",
+      code: "source-basis-too-thin",
+      message: integratedNewsFeedOneShot
+        ? "integrated one-shot News Feed articles should include at least two locked evidence entries"
+        : "sourceBasis should include at least three source or evidence entries",
+    });
   }
 
   if (sourceCount < 5) {
