@@ -9,6 +9,7 @@ import { recoverPendingLlmObservations } from "./llmProcessObserver.mjs";
 import { handleBinanceMarketDataEndpoint } from "./binanceMarketDataApi.mjs";
 import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
+import { handleFomcRateExpectationEndpoint } from "./fomcRateExpectationApi.mjs";
 import { handleInvestSimulatorEndpoint } from "./investSimulatorApi.mjs";
 import { handleMemoryEndpoint, startSharedMemoryMaintenanceScheduler } from "./memoryApi.mjs";
 import { handleMagazineEndpoint, startMagazineScheduler } from "./magazineApi.mjs";
@@ -359,6 +360,11 @@ const server = createServer(async (req, res) => {
 
   if (req.url?.startsWith("/api/economic-calendar/translations")) {
     await handleEconomicCalendarEndpoint("translations", req, res);
+    return;
+  }
+
+  if (req.url?.startsWith("/api/fomc-rate-expectations")) {
+    await handleFomcRateExpectationEndpoint(req, res);
     return;
   }
 

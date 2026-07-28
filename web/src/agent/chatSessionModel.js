@@ -14,6 +14,7 @@ export const personaEligibleScreens = new Set([
   "transaction-status",
   "earning-calendar",
   "economic-calendar",
+  "fomc-rate-expectations",
   "portfolio",
   "portfolio-canvas",
 ]);

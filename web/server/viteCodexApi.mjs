@@ -1,5 +1,6 @@
 import { handleEconomicCalendarEndpoint } from "./economicCalendarApi.mjs";
 import { handleEarningsEndpoint } from "./earningsApi.mjs";
+import { handleFomcRateExpectationEndpoint } from "./fomcRateExpectationApi.mjs";
 import { ensureAstopObserverStatus } from "./astopObserver.mjs";
 import { handleBinanceMarketDataEndpoint } from "./binanceMarketDataApi.mjs";
 import { handleInvestSimulatorEndpoint } from "./investSimulatorApi.mjs";
@@ -287,6 +288,10 @@ export function codexApiPlugin() {
 
       server.middlewares.use("/api/economic-calendar/translations", async (req, res) => {
         await handleEconomicCalendarEndpoint("translations", req, res);
+      });
+
+      server.middlewares.use("/api/fomc-rate-expectations", async (req, res) => {
+        await handleFomcRateExpectationEndpoint(req, res);
       });
 
       server.middlewares.use("/api/portfolio/canvases", async (req, res) => {

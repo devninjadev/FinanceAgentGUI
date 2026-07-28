@@ -22,6 +22,7 @@ const EarningCalendarView = React.lazy(() =>
 const EconomicCalendarView = React.lazy(() =>
   import("../calendars/CalendarViews.jsx").then((module) => ({ default: module.EconomicCalendarView }))
 );
+const FomcRateExpectationView = React.lazy(() => import("../calendars/FomcRateExpectationView.jsx"));
 const PortfolioGuidePage = React.lazy(() =>
   import("../portfolio/PortfolioGuidePage.jsx").then((module) => ({ default: module.PortfolioGuidePage }))
 );
@@ -302,6 +303,15 @@ export function AppRoutes({ activeView, models }) {
   }
   if (activeView === "economic-calendar") {
     return <CalendarRoute type="economic" model={models.economicCalendar()} />;
+  }
+  if (activeView === "fomc-rate-expectations") {
+    return (
+      <section className="workspace-canvas" aria-label="FOMC 금리 예상">
+        <React.Suspense fallback={<RouteLoading label="FOMC 금리 예상 불러오는 중" />}>
+          <FomcRateExpectationView />
+        </React.Suspense>
+      </section>
+    );
   }
   return <StockChannelRoute model={models.stock()} />;
 }

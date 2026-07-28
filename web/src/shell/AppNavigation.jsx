@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import BookOpenText from "lucide-react/dist/esm/icons/book-open-text.js";
 import CalendarDays from "lucide-react/dist/esm/icons/calendar-days.js";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
@@ -91,6 +91,16 @@ export function AppNavigation({
   worldMemoryHealth,
 }) {
   const PortfolioChevron = portfolioSidebarOpen ? ChevronDown : ChevronRight;
+  const [economicCalendarOpen, setEconomicCalendarOpen] = useState(
+    () => activeView === "economic-calendar" || activeView === "fomc-rate-expectations",
+  );
+  const EconomicCalendarChevron = economicCalendarOpen ? ChevronDown : ChevronRight;
+
+  useEffect(() => {
+    if (activeView === "economic-calendar" || activeView === "fomc-rate-expectations") {
+      setEconomicCalendarOpen(true);
+    }
+  }, [activeView]);
 
   return (
     <aside className="app-sidebar" aria-label="FinanceAgentGUI navigation">
@@ -119,8 +129,15 @@ export function AppNavigation({
                         ? arcaNotificationHealth
                         : null;
                   const isPortfolioItem = item.view === "portfolio";
+                  const isEconomicCalendarItem = item.view === "economic-calendar";
                   const isPortfolioSurface = activeView === "portfolio" || activeView === "portfolio-canvas";
-                  const isActiveItem = isPortfolioItem ? isPortfolioSurface : item.view === activeView;
+                  const isEconomicCalendarSurface =
+                    activeView === "economic-calendar" || activeView === "fomc-rate-expectations";
+                  const isActiveItem = isPortfolioItem
+                    ? isPortfolioSurface
+                    : isEconomicCalendarItem
+                      ? isEconomicCalendarSurface
+                      : item.view === activeView;
                   const showNewsFeedUrgentUpdateBadge =
                     item.view === "news-feed" && notificationStatus?.newsFeedUrgentUpdate?.showBadge;
                   const newsFeedUrgentUpdateSummary = notificationStatus?.newsFeedUrgentUpdate?.summary || "";
@@ -148,12 +165,17 @@ export function AppNavigation({
                           "nav-item",
                           isActiveItem ? "is-active" : "",
                           showNewsFeedUrgentUpdateBadge ? "is-critical-alert" : "",
-                          isPortfolioItem ? "has-children" : "",
+                          isPortfolioItem || isEconomicCalendarItem ? "has-children" : "",
                         ]
                           .filter(Boolean)
                           .join(" ")}
                         type="button"
-                        onClick={() => onSelectItem(item)}
+                        onClick={() => {
+                          if (isEconomicCalendarItem) {
+                            setEconomicCalendarOpen((open) => !open);
+                          }
+                          onSelectItem(item);
+                        }}
                         title={
                           showNewsFeedUrgentUpdateBadge
                             ? `긴급 업데이트${newsFeedUrgentUpdateSummary ? `: ${newsFeedUrgentUpdateSummary}` : ""}`
@@ -161,7 +183,13 @@ export function AppNavigation({
                               ? itemStatusHealth.title
                               : item.label
                         }
-                        aria-expanded={isPortfolioItem ? portfolioSidebarOpen : undefined}
+                        aria-expanded={
+                          isPortfolioItem
+                            ? portfolioSidebarOpen
+                            : isEconomicCalendarItem
+                              ? economicCalendarOpen
+                              : undefined
+                        }
                       >
                         <Icon size={16} strokeWidth={2} />
                         <span className="nav-item-label">
@@ -202,8 +230,31 @@ export function AppNavigation({
                         <NavStatusDot health={itemStatusHealth} />
                         {isPortfolioItem ? (
                           <PortfolioChevron className="nav-item-chevron" size={15} strokeWidth={2.2} />
+                        ) : isEconomicCalendarItem ? (
+                          <EconomicCalendarChevron className="nav-item-chevron" size={15} strokeWidth={2.2} />
                         ) : null}
                       </button>
+                      {isEconomicCalendarItem && economicCalendarOpen ? (
+                        <div className="nav-sub-list" aria-label="Economic Calendar 하위 메뉴">
+                          <div className="nav-sub-item-wrap is-economic-calendar">
+                            <button
+                              className={
+                                activeView === "fomc-rate-expectations"
+                                  ? "nav-sub-item is-active"
+                                  : "nav-sub-item"
+                              }
+                              type="button"
+                              onClick={() => onSelectItem({
+                                label: "FOMC 금리 예상",
+                                view: "fomc-rate-expectations",
+                              })}
+                            >
+                              <span className="nav-sub-bullet" aria-hidden="true" />
+                              <span className="nav-item-text">FOMC 금리 예상</span>
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
                       {isPortfolioItem && portfolioSidebarOpen ? (
                         <PortfolioCanvasNavList
                           activeCanvasId={activePortfolioCanvas?.id || ""}
