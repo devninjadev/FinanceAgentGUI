@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { init as initEChart, use as useEChart } from "echarts/core";
 import { LineChart } from "echarts/charts";
 import {
@@ -212,10 +212,33 @@ function LoadingState() {
   );
 }
 
-function SummaryCell({ label, value, detail, accent = false }) {
+function TermHelp({ label, children, align = "center" }) {
+  const tooltipId = useId();
+  return (
+    <span className={`fomc-term-help is-${align}`}>
+      <button
+        className="fomc-term-help-button"
+        type="button"
+        aria-label={`${label} 설명`}
+        aria-describedby={tooltipId}
+      >
+        ?
+      </button>
+      <span className="fomc-term-help-popover" id={tooltipId} role="tooltip">
+        <strong>{label}</strong>
+        <span>{children}</span>
+      </span>
+    </span>
+  );
+}
+
+function SummaryCell({ label, help, helpAlign = "center", value, detail, accent = false }) {
   return (
     <div className={`fomc-summary-cell${accent ? " is-accent" : ""}`}>
-      <span>{label}</span>
+      <span className="fomc-metric-label">
+        {label}
+        {help ? <TermHelp label={label} align={helpAlign}>{help}</TermHelp> : null}
+      </span>
       <strong>{value}</strong>
       <small>{detail}</small>
     </div>
@@ -271,9 +294,19 @@ export default function FomcRateExpectationView() {
       <header className="fomc-page-header">
         <div>
           <p className="fomc-kicker">ECONOMIC CALENDAR / FEDERAL RESERVE</p>
-          <h1>FOMC 금리 예상</h1>
+          <div className="fomc-title-line">
+            <h1>FOMC 금리 예상</h1>
+            <TermHelp label="FOMC" align="start">
+              미국 중앙은행인 연방준비제도에서 통화정책과 기준금리 방향을 결정하는 위원회입니다.
+              통상 매년 여덟 차례 정례회의를 엽니다.
+            </TermHelp>
+          </div>
           <p className="fomc-source-line">
             Fed 공식 회의일과 회의월 30-Day Fed Funds Futures로 계산한 시장 기대입니다.
+            <TermHelp label="30-Day Fed Funds Futures" align="start">
+              계약월의 일별 실효 연방기금금리 평균을 거래하는 CBOT 선물입니다.
+              화면에서는 종목 코드가 ZQ로 시작하며, 가격이 높을수록 시장이 예상하는 금리는 낮습니다.
+            </TermHelp>
           </p>
         </div>
         <button
@@ -304,7 +337,13 @@ export default function FomcRateExpectationView() {
         <>
           <section className="fomc-control-line" aria-label="회의 선택과 데이터 상태">
             <label>
-              <span>계산 기준 회의</span>
+              <span>
+                계산 기준 회의
+                <TermHelp label="계산 기준 회의" align="start">
+                  아래의 선물 계약, 금리 변화, 시나리오 확률을 계산할 FOMC 회의입니다.
+                  회의를 바꾸면 화면의 모든 계산 기준도 함께 바뀝니다.
+                </TermHelp>
+              </span>
               <select
                 value={selected.meetingId}
                 onChange={(event) => setSelectedMeetingId(event.target.value)}
@@ -333,26 +372,36 @@ export default function FomcRateExpectationView() {
             />
             <SummaryCell
               label="회의월 계약"
+              help="FOMC 결정일이 들어 있는 달에 만기되는 ZQ 선물입니다. 예를 들어 ZQN26.CBT는 2026년 7월물입니다."
+              helpAlign="end"
               value={selected.ticker}
               detail="Yahoo Finance · CBOT"
             />
             <SummaryCell
               label="ZQ 선물가격"
+              help="30-Day Fed Funds Futures의 거래가격입니다. 100에서 이 가격을 빼면 시장이 반영한 계약월 평균 EFFR을 얻습니다."
+              helpAlign="start"
               value={number(selected.price, 3)}
               detail={`시세시각 ${selected.quoteMarketTime?.slice(11, 16) || "—"} UTC`}
             />
             <SummaryCell
               label="암시 월평균 EFFR"
+              help="ZQ 가격에 반영된 계약월 전체의 평균 실효 연방기금금리입니다. 회의 직후 금리 그 자체가 아니라 월중 모든 날짜의 평균입니다."
+              helpAlign="end"
               value={`${number(selected.impliedAverageEffr, 3)}%`}
               detail="100 - 선물가격"
             />
             <SummaryCell
               label="현재 DFF"
+              help="FRED가 제공하는 일별 실효 연방기금금리 계열의 코드입니다. 실제 거래를 가중평균한 금리이며 연준의 목표금리 상단·하단과는 다릅니다."
+              helpAlign="start"
               value={`${number(selected.currentEffr, 2)}%`}
               detail={`FRED · ${payload.market.effrAsOf}`}
             />
             <SummaryCell
               label="회의 후 등가 변화"
+              help="선물의 월평균을 회의 직전과 이후 기간으로 나눠 역산한 금리 변화입니다. bp는 베이시스포인트이며 1bp는 0.01%포인트입니다."
+              helpAlign="end"
               value={`${signed(selected.deltaBps, 1)}bp`}
               detail={`직전 ${number(selected.preMeetingRate, 3)}% → 이후 ${number(selected.postMeetingRate, 3)}%`}
               accent
@@ -362,8 +411,20 @@ export default function FomcRateExpectationView() {
           <section className="fomc-scenario-section" aria-labelledby="fomc-scenario-title">
             <div className="fomc-section-heading">
               <div>
-                <p>이진 시나리오</p>
-                <h2 id="fomc-scenario-title">선택한 금리변동의 실현 확률</h2>
+                <p>
+                  이진 시나리오
+                  <TermHelp label="이진 시나리오" align="start">
+                    동결과 선택한 한 가지 금리변동만 가능하다고 단순화한 모형입니다.
+                    여러 인상·인하 폭을 동시에 계산하는 전체 FedWatch 분포와는 다릅니다.
+                  </TermHelp>
+                </p>
+                <h2 id="fomc-scenario-title">
+                  선택한 금리변동의 실현 확률
+                  <TermHelp label="실현 확률" align="start">
+                    선물에 반영된 평균 금리변화를 두 시나리오 사이의 비중으로 환산한 값입니다.
+                    원시값이 0~100%를 벗어나면 두 시나리오만으로 현재 가격을 설명할 수 없다는 뜻입니다.
+                  </TermHelp>
+                </h2>
               </div>
               <strong className={probability.valid ? "" : "is-warning"}>
                 {probability.valid ? `${number(probabilityPct, 1)}%` : "모형 범위 밖"}
@@ -408,7 +469,13 @@ export default function FomcRateExpectationView() {
             <div className="fomc-section-heading is-compact">
               <div>
                 <p>EXPECTATION PATH</p>
-                <h2 id="fomc-path-title">회의별 암시 금리 경로</h2>
+                <h2 id="fomc-path-title">
+                  회의별 암시 금리 경로
+                  <TermHelp label="암시 금리 경로" align="start">
+                    각 공식 FOMC 회의월 계약과 직전월 계약을 조합해 추정한 회의 후 EFFR의 흐름입니다.
+                    검은 점 하나가 회의 한 번의 추정치를 나타냅니다.
+                  </TermHelp>
+                </h2>
               </div>
               <span>검은 선: 회의 후 EFFR · 점선: 현재 DFF</span>
             </div>
@@ -428,12 +495,61 @@ export default function FomcRateExpectationView() {
               <span>결정 다음 날부터 변경 금리 적용 가정</span>
             </div>
             <dl className="fomc-method-grid">
-              <div><dt>계약월 일수 N</dt><dd>{selected.monthDays}일</dd></div>
-              <div><dt>결정일까지 B</dt><dd>{selected.preDecisionDays}일</dd></div>
-              <div><dt>결정 후 A</dt><dd>{selected.postDecisionDays}일</dd></div>
-              <div><dt>월평균 역산계수 N/A</dt><dd>{number(selected.factor, 3)}</dd></div>
-              <div><dt>실제 DFF 반영일</dt><dd>{selected.observedPreDecisionDays}일</dd></div>
-              <div><dt>최신 DFF 가정일</dt><dd>{selected.modeledPreDecisionDays}일</dd></div>
+              <div>
+                <dt>
+                  계약월 일수 N
+                  <TermHelp label="계약월 일수 N" align="start">
+                    FOMC 회의가 들어 있는 달의 전체 달력 일수입니다. ZQ는 영업일이 아니라 달력일 기준 월평균을 반영합니다.
+                  </TermHelp>
+                </dt>
+                <dd>{selected.monthDays}일</dd>
+              </div>
+              <div>
+                <dt>
+                  결정일까지 B
+                  <TermHelp label="결정일까지 B" align="end">
+                    월초부터 FOMC 결정일까지의 달력 일수입니다. 결정 당일 금리는 회의 전 구간에 포함합니다.
+                  </TermHelp>
+                </dt>
+                <dd>{selected.preDecisionDays}일</dd>
+              </div>
+              <div>
+                <dt>
+                  결정 후 A
+                  <TermHelp label="결정 후 A" align="start">
+                    결정 다음 날부터 월말까지 남은 달력 일수입니다. 새 금리가 적용된다고 가정하는 구간입니다.
+                  </TermHelp>
+                </dt>
+                <dd>{selected.postDecisionDays}일</dd>
+              </div>
+              <div>
+                <dt>
+                  월평균 역산계수 N/A
+                  <TermHelp label="월평균 역산계수 N/A" align="end">
+                    월평균 금리의 작은 차이를 회의 후 남은 기간의 금리변화로 환산하는 배율입니다.
+                    회의가 월말에 가까울수록 값이 커져 추정치가 민감해집니다.
+                  </TermHelp>
+                </dt>
+                <dd>{number(selected.factor, 3)}</dd>
+              </div>
+              <div>
+                <dt>
+                  실제 DFF 반영일
+                  <TermHelp label="실제 DFF 반영일" align="start">
+                    FRED에 이미 발표된 해당 월의 DFF 관측값을 그대로 사용한 날짜 수입니다.
+                  </TermHelp>
+                </dt>
+                <dd>{selected.observedPreDecisionDays}일</dd>
+              </div>
+              <div>
+                <dt>
+                  최신 DFF 가정일
+                  <TermHelp label="최신 DFF 가정일" align="end">
+                    아직 실제값이 발표되지 않아 가장 최근 DFF가 유지된다고 가정한 결정 전 날짜 수입니다.
+                  </TermHelp>
+                </dt>
+                <dd>{selected.modeledPreDecisionDays}일</dd>
+              </div>
             </dl>
             <p className="fomc-formula">
               회의 후 금리 = (N × 암시 월평균 EFFR − 결정일까지의 EFFR 합계) ÷ A
@@ -450,7 +566,13 @@ export default function FomcRateExpectationView() {
             <div className="fomc-section-heading is-compact">
               <div>
                 <p>OFFICIAL SCHEDULE × CONTRACT</p>
-                <h2 id="fomc-schedule-title">공식 일정과 회의월 계약</h2>
+                <h2 id="fomc-schedule-title">
+                  공식 일정과 회의월 계약
+                  <TermHelp label="공식 일정과 회의월 계약" align="start">
+                    연준 공식 캘린더의 결정일을 같은 달의 고정 ZQ 종목과 직접 연결한 표입니다.
+                    자동으로 월이 바뀌는 연속물 ZQ1! 대신 실제 만기월 종목을 사용합니다.
+                  </TermHelp>
+                </h2>
               </div>
               <span>행을 누르면 계산 기준이 바뀝니다.</span>
             </div>
