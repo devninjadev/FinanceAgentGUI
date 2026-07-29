@@ -41,8 +41,9 @@
           "primaryEvent": {
             "type": "string"
           },
-          "newsFeedIds": {
+          "worldMemoryEventIds": {
             "type": "array",
+            "minItems": 1,
             "items": {
               "type": "string"
             }
@@ -61,7 +62,7 @@
           "storyFamily",
           "editorialAngle",
           "primaryEvent",
-          "newsFeedIds",
+          "worldMemoryEventIds",
           "researchQueries"
         ]
       }

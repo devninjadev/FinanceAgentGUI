@@ -53,9 +53,24 @@ if (manifest.failClosedWhenInstalledObserverUnavailable !== true) {
 if (!Array.isArray(manifest.directExecutionWhen) || !manifest.directExecutionWhen.includes("not-installed")) {
   fail(errors, "config/llm-processes.json must preserve direct execution when astop is not installed");
 }
+if (manifest.unseenRegistration !== "reject-and-use-exact-pid-wait-while-gated") {
+  fail(errors, "config/llm-processes.json must reject proc=unseen before LLM gate release");
+}
+if (manifest.registryCapacityFallback !== "exact-pid-wait-while-gated") {
+  fail(errors, "config/llm-processes.json must keep the registry-full exact-PID gated fallback");
+}
+if (manifest.postLaunchRetry !== "forbidden") {
+  fail(errors, "config/llm-processes.json must forbid retry after an LLM may have executed");
+}
 for (const token of [
   "registerPidWatch",
   "confirmPidObserved",
+  "isAstopExactPidNotRunningFailure",
+  "isAstopUnseenRegistration",
+  "isAstopUnsafeRegistrationFailure",
+  "proc=unseen",
+  "=> Send header",
+  "GET /v1/wait",
   "--pid",
   "WAIT_FOR_OBSERVER_GATE",
   "REGISTER_SELF_AND_EXEC",
@@ -72,6 +87,11 @@ for (const token of [
   "verifyEvent",
 ]) {
   if (!observerText.includes(token)) fail(errors, `llmProcessObserver.mjs is missing ${token}`);
+}
+const synchronousDirectReturns =
+  observerText.match(/return directSync\(command, args, options\);/g) || [];
+if (synchronousDirectReturns.length !== 1) {
+  fail(errors, "llmProcessObserver.mjs must allow direct sync execution only before observation starts");
 }
 if (!observerText.includes('const OWNED_JOB_PREFIX = "finance-gui-llm-"')) {
   fail(errors, "llmProcessObserver.mjs must use an app-owned astop job prefix");

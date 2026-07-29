@@ -34,6 +34,7 @@ import { useMagazineReaderController } from "./magazine/useMagazineReaderControl
 import {
   buildMagazineArticleAgentContext,
   buildStockArticleAgentContext,
+  magazineArticleTopics,
   magazineArticleList,
   magazineFallbackCoverStories,
   magazineHeadlineStory,
@@ -77,7 +78,12 @@ import { postReportAction } from "./reports/reportsApi.js";
 import { useNotificationController } from "./reports/useNotificationController.js";
 import { AppNavigation } from "./shell/AppNavigation.jsx";
 import { AppRoutes, RouteLoading } from "./shell/AppRoutes.jsx";
+import {
+  agentSidebarPolicy,
+  ensureAgentSidebarOpenForAction,
+} from "./shell/agentSidebarPolicy.js";
 import { collectVisibleScreenSnapshot } from "./shell/screenSnapshot.js";
+import { useUiShellSettingsController } from "./shell/useUiShellSettingsController.js";
 import { buildWorldMemoryAskRequest } from "./worldMemory/askRequest.js";
 import { buildWorldMemoryPageContextSnapshot } from "./worldMemory/contextSnapshot.js";
 import { worldMemoryHealthState } from "./worldMemory/statusHelpers.js";
@@ -237,6 +243,11 @@ function App() {
     loadTransactionSettings,
     saveTransactionStatusHidden,
   } = transactionSettingsController;
+  const uiShellSettingsController = useUiShellSettingsController();
+  const {
+    uiShellSettings,
+    saveRightAgentSidebarOpen,
+  } = uiShellSettingsController;
   const sharedMemoryController = useSharedMemoryController({ activeView });
   const {
     memoryStatus,
@@ -463,6 +474,8 @@ function App() {
   const isWorldMemoryChatView = activeView === "world-memory" && worldMemoryEnabled;
   const isChatCanvasView = activeView === "chat";
   const isFullWidthCanvasView = isChatCanvasView;
+  const rightAgentSidebarPreferenceOpen = uiShellSettings?.settings?.rightAgentSidebarOpen !== false;
+  const rightAgentSidebarPolicy = agentSidebarPolicy(activeView, rightAgentSidebarPreferenceOpen);
   const activeChatScope = isPortfolioCanvasView
     ? { type: "portfolio-canvas", canvasId: activePortfolioCanvas.id }
     : isWorldMemoryChatView
@@ -1769,6 +1782,14 @@ function App() {
     }
   }
 
+  function handleAnalyzeEarningEvent(event) {
+    ensureAgentSidebarOpenForAction(
+      rightAgentSidebarPreferenceOpen,
+      (nextOpen) => void saveRightAgentSidebarOpen(nextOpen),
+    );
+    return analyzeEarningEvent(event);
+  }
+
   const defaultAgentRuntime = providerRuntimeForProvider(agentProvider);
   const worldMemoryAgentRuntime = worldMemoryManagementRuntime();
   const magazineAgentRuntime = magazineWritingRuntime();
@@ -2055,7 +2076,7 @@ function App() {
       agentIcon,
       analysisReady: agentOptionsReady,
       analysisBusy: isSending,
-      onAnalyzeEarning: analyzeEarningEvent,
+      onAnalyzeEarning: handleAnalyzeEarningEvent,
       onContextChange: setEarningCalendarContext,
     }),
     economicCalendar: () => ({
@@ -2078,7 +2099,7 @@ function App() {
       notificationActionError: arcaNotificationActionError,
       notificationHealth: arcaNotificationHealth,
       notificationStatus: arcaNotificationStatus,
-      onAttachArticle: attachArticleContext,
+      onAttachArticle: rightAgentSidebarPolicy.visible ? attachArticleContext : null,
       onBoardSearchInputChange: setBoardSearchInput,
       onCloseArticle: closeArcaArticleReader,
       onOpenArticle: (row) => void openArcaArticleReader(row),
@@ -2099,7 +2120,13 @@ function App() {
 
   return (
     <main
-      className={isFullWidthCanvasView ? "mockup-stage no-agent-sidebar" : "mockup-stage"}
+      className={
+        isFullWidthCanvasView
+          ? "mockup-stage no-agent-sidebar"
+          : rightAgentSidebarPolicy.visible
+            ? "mockup-stage"
+            : "mockup-stage is-agent-sidebar-collapsed"
+      }
       aria-label="에이전트 sidebar mockup"
     >
       <AppNavigation
@@ -2173,8 +2200,24 @@ function App() {
       ) : null}
 
       <AppRoutes activeView={activeView} models={routeModels} />
+      {rightAgentSidebarPolicy.showDock ? (
+        <button
+          className="agent-sidebar-dock-button"
+          type="button"
+          aria-label="에이전트 채팅 사이드바 열기"
+          title="에이전트 채팅 열기"
+          onClick={() => void saveRightAgentSidebarOpen(true)}
+        >
+          <img className="agent-logo-image" src={sidebarAgentRuntime.icon} alt="" />
+        </button>
+      ) : null}
       {isFullWidthCanvasView ? null : (
-        <AgentSidebar
+        <div
+          className={rightAgentSidebarPolicy.visible ? "agent-sidebar-panel is-open" : "agent-sidebar-panel"}
+          aria-hidden={!rightAgentSidebarPolicy.visible}
+          inert={rightAgentSidebarPolicy.visible ? undefined : true}
+        >
+          <AgentSidebar
           addChatAttachmentFiles={addChatAttachmentFiles}
           agentIcon={sidebarAgentRuntime.icon}
           agentOptionsReady={agentOptionsReady}
@@ -2198,6 +2241,11 @@ function App() {
           activeWorldMemoryActionId={worldMemoryAgentAction?.id || ""}
           runningWorldMemoryAgentActionId={worldMemoryRunningAgentActionId}
           onClearAttachedArticle={() => clearAttachedArticleForScope(activeChatScope)}
+          onClose={
+            rightAgentSidebarPolicy.canClose
+              ? () => void saveRightAgentSidebarOpen(false)
+              : undefined
+          }
           onExecuteWorldMemoryAction={executeWorldMemoryAgentAction}
           onNewChat={startNewChat}
           onPromptChange={(nextPrompt) => setPromptForScope(activeChatScope, nextPrompt)}
@@ -2222,7 +2270,8 @@ function App() {
           toolbarSpeedValue={agentOptionsReady ? sidebarAgentRuntime.selectedSpeed?.id : "loading"}
           visibleChatMessages={visibleChatMessages}
           worldMemoryActionBusy={worldMemoryActionBusy}
-        />
+          />
+        </div>
       )}
 
       <PortfolioCanvasDeleteDialog

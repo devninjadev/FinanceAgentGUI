@@ -98,6 +98,33 @@ report generation:
 - A report-only refresh can update `report.generatedAt` without changing
   `collector.lastSuccessfulAt`.
 
+## Market Liquidity Signals
+
+The World Memory situation report keeps two liquidity-related signals separate:
+
+- `신용·금융여건` uses the Chicago Fed `NFCIRISK` trend and the market-priced
+  `HYG/LQD` five-session change. It describes observed financial stress and
+  credit risk appetite.
+- `미국 순유동성` uses the weekly Wednesday-aligned proxy
+  `WALCL - WDTGAL - (RRPONTSYD * 1,000)`. `WALCL` and `WDTGAL` are USD
+  millions; `RRPONTSYD` is USD billions and is converted to millions before
+  subtraction.
+
+The report receives the net-liquidity level plus its 1-, 4-, and 13-week
+changes. Directional scoring should emphasize those changes rather than treating
+the absolute level as a buy or sell threshold. This proxy describes U.S. Federal
+Reserve and Treasury balance-sheet liquidity; it is not a global-liquidity
+measure and must not be merged into the `신용·금융여건` score. When any component
+is unavailable, the report must show a neutral data-gap note instead of inventing
+a value. A report-only refresh runs a market-only snapshot so these signals can
+be refreshed without scanning new FEED items, importing briefs, or advancing
+`collector.lastSuccessfulAt`.
+
+Signal-card `note` text is reader-facing interpretation: one or two short
+sentences that state the short- and medium-term direction in plain language.
+Formula names, proxy scope, caveats, and the score scale belong in the separate
+`methodology` tooltip and must not be repeated in the visible note.
+
 ## Change Suggestion States
 
 `data/world-memory/collector-state.json` keeps accepted report suggestions in

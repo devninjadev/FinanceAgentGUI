@@ -1495,6 +1495,11 @@
 
 .arca-notification-modal {
   display: grid;
+  grid-template-areas:
+    "header"
+    "status"
+    "list"
+    "footer";
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   width: min(620px, calc(100vw - 48px));
   max-height: min(720px, calc(100vh - 48px));
@@ -1508,6 +1513,7 @@
 }
 
 .arca-notification-modal-header {
+  grid-area: header;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1608,6 +1614,7 @@
 }
 
 .arca-notification-modal-error {
+  grid-area: status;
   margin: 12px 20px 0;
   padding: 10px 12px;
   border: 1px solid #e1b8b8;
@@ -1620,6 +1627,7 @@
 }
 
 .arca-notification-list {
+  grid-area: list;
   min-height: 0;
   overflow: auto;
   padding: 8px 0;
@@ -1736,6 +1744,7 @@
 }
 
 .arca-notification-modal-footer {
+  grid-area: footer;
   display: flex;
   align-items: center;
   justify-content: space-between;

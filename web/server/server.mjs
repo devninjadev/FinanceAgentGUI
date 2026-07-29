@@ -20,6 +20,7 @@ import { handleReportsEndpoint } from "./reportsApi.mjs";
 import { handleTossInvestEndpoint } from "./tossInvestApi.mjs";
 import { handleTossEtfNameTranslationEndpoint } from "./tossEtfNameTranslation.mjs";
 import { handleTransactionSettingsEndpoint } from "./transactionSettings.mjs";
+import { handleUiShellSettingsEndpoint } from "./uiShellSettings.mjs";
 import { handleWorldMemoryEndpoint, startWorldMemoryCollector } from "./worldMemoryApi.mjs";
 import {
   getCodexOptionsAsync,
@@ -383,6 +384,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/api/ui-shell/settings")) {
+    await handleUiShellSettingsEndpoint(req, res);
+    return;
+  }
+
   if (req.url?.startsWith("/api/invest-simulator/status")) {
     await handleInvestSimulatorEndpoint("status", req, res);
     return;
@@ -551,7 +557,7 @@ server.listen(port, host, () => {
     const llmRecovery = recoverPendingLlmObservations();
     if (llmRecovery.recovered || llmRecovery.failed) {
       console.log(
-        `LLM astop recovery: recovered=${llmRecovery.recovered} failed=${llmRecovery.failed} ignored=${llmRecovery.ignored}`,
+        `LLM astop recovery: recovered=${llmRecovery.recovered} unregistered=${llmRecovery.unregistered || 0} failed=${llmRecovery.failed} ignored=${llmRecovery.ignored}`,
       );
     }
     startNewsFeedCollector();

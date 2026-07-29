@@ -1319,7 +1319,7 @@ function BoardTitleCell({ row, onAttachArticle, onOpenArticle, isAttaching, agen
         {row.title}
       </a>
       {row.commentCount ? <span className="board-comment-count">[{row.commentCount}]</span> : null}
-      {row.type === "article" ? (
+      {row.type === "article" && onAttachArticle ? (
         <button
           className={isAttaching ? "board-codex-context-button is-loading" : "board-codex-context-button"}
           type="button"

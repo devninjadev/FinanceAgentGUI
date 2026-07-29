@@ -25,11 +25,15 @@ export function antigravityPrintInvocation({
   printTimeout = "2m",
   prompt = "",
   securityArgs = [],
+  agent = "",
+  newProject = false,
 } = {}) {
   const promptTransport = antigravityPromptTransport(cliVersion);
   return {
     args: [
       ...securityArgs,
+      ...(newProject ? ["--new-project"] : []),
+      ...(String(agent || "").trim() ? ["--agent", String(agent).trim()] : []),
       "--model",
       model,
       `--print-timeout=${printTimeout}`,

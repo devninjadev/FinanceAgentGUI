@@ -43,11 +43,15 @@ Token-consuming LLM processes have a stricter boundary. If `installed` is
 `true`, every Codex CLI and Antigravity CLI generation process must pass through
 `web/server/llmProcessObserver.mjs`, regardless of the general `enabled` flag.
 The launcher holds the process before model execution, registers the exact PID,
-connects a terminal wait, then releases it. It verifies and acknowledges the
-terminal event and removes the temporary watch. If the installed astop server is
-unhealthy or registration fails, the LLM does not start. This is a fail-closed
+connects a terminal wait, then releases it. A registration response of
+`proc=unseen` is removed immediately and, like named-registry capacity
+exhaustion, may switch the still-gated process once to the registry-free
+exact-PID wait API. The terminal request must be connected before release. The
+launcher verifies and acknowledges the terminal event and removes the temporary
+named watch. If the installed astop server is unhealthy or neither observation
+path can be established, the LLM does not start. This is a fail-closed
 observation failure, not a provider failure or a reason to spend tokens through
-an unobserved retry.
+an unobserved retry. A command that may already have executed is never retried.
 
 On an unsupported platform, or when installation is `false` or `null`, the same
 LLM command runs through its original direct path with no astop procedure. astop
@@ -98,6 +102,16 @@ The Arca.live notification login flow uses a dedicated browser profile:
 - browser DevTools endpoint: local `127.0.0.1:<random-port>`
 
 The user logs in manually in the opened browser. The app then captures only Arca.live cookies through the browser DevTools Protocol and stores them locally in `data/secrets/arca-session.json`.
+Subsequent Arca.live responses may rotate short-lived session or device cookies.
+The local server merges same-site `Set-Cookie` updates back into that protected
+local boundary using an atomic `0600` file replacement, without exposing cookie values
+through logs or API responses. Comment and article submissions use same-origin
+XHR headers (`Origin` and `X-Requested-With`) in addition to the freshest cookie
+snapshot.
+If a Chromium release rejects browser-wide cookie inspection, session capture
+falls back to `Network.getCookies` on an exact `arca.live` page target. If the
+dedicated profile is still running but its last tab was closed, capture opens a
+fresh Arca.live target in that profile before reading the cookies.
 
 When that captured session is valid, the stock-channel index can show the Arca.live notification list inside the app. `모두 읽기` uses the same local session to call Arca.live's notification read endpoint and then verifies the refreshed unread count. `전체 보기` still opens the original Arca.live notification page. A stock-channel notification opens the existing in-app article reader; notifications for other channels keep the external new-tab behavior.
 
@@ -113,6 +127,16 @@ The publication harness rejects malformed articles and replaces any remaining
 Unicode ZWJ emoji sequence with a non-ZWJ emoji before submission; the
 axios-summerizer validator is expected to catch these sequences earlier so a
 context-appropriate emoji can be chosen.
+If an accepted write response omits the created URL, the publisher performs one
+time-bounded lookup against the filtered `뉴스` index. It accepts only one new
+same-title candidate that was absent before submission, then verifies the exact
+article title and lead text through the existing article reader. Missing,
+ambiguous, or mismatched candidates remain accepted-but-unverified and are not
+retried automatically.
+The same read-after-write rule applies when upstream returns an error status:
+an exact new comment or one new article with matching title and lead is reported
+as recovered success; otherwise the HTTP rejection remains a failure and is not
+blindly retried.
 
 Notification polling must not request `/u/notification`: Arca.live treats opening that page as reading the current notifications. The local poller reads the JSON notification feed and uses the configured channel page only for the unread badge; `/u/notification` is reserved for an explicit `전체 보기` navigation.
 

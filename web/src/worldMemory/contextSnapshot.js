@@ -18,6 +18,7 @@ function compactWorldMemoryReportForContext(report = {}) {
           score: Number(signal?.score || 0),
           tone: compactVisibleScreenText(signal?.tone, 40),
           note: compactVisibleScreenText(signal?.note, 220),
+          methodology: compactVisibleScreenText(signal?.methodology, 240),
         }))
       : [],
     highlights: Array.isArray(view?.highlights)

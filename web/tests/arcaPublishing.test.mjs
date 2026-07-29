@@ -6,8 +6,10 @@ import {
   createdArcaArticleUrl,
   extractArcaArticleWriteContract,
   normalizeAxiosArcaPublication,
+  recoveredArcaArticleUrl,
   renderAxiosMarkdownToArcaHtml,
   replaceZwjEmojiSequences,
+  verifiesArcaPublication,
 } from "../server/arcaApi.mjs";
 
 test("ZWJ 이모지를 단일 비ZWJ 대체 이모지로 바꾼다", () => {
@@ -104,5 +106,86 @@ test("작성 응답에서 같은 호스트의 주식채널 게시글 URL만 받�
   assert.equal(
     createdArcaArticleUrl({ headers: { get: () => "https://evil.example/b/stock/123456" } }, ""),
     ""
+  );
+});
+
+test("작성 응답에 URL이 없으면 게시 전후 뉴스 목록의 새 글 하나만 복구한다", () => {
+  const config = { baseUrl: "https://arca.live" };
+  const publication = {
+    channel: "stock",
+    title: "⚠️ 미군 공습 멈춘 사이 이란 전쟁, 홍해와 카스피해로 번져",
+  };
+  const beforeIndex = {
+    ok: true,
+    config,
+    channel: "stock",
+    articles: [
+      {
+        title: "기존 뉴스",
+        href: "https://arca.live/b/stock/123?p=1&category=%EA%B2%BD%EC%A0%9C%EB%89%B4%EC%8A%A4",
+      },
+      {
+        title: "미군 공습 멈춘 사이 이란 전쟁, 홍해와 카스피해로 번져",
+        href: "https://arca.live/b/stock/122?p=1&category=%EA%B2%BD%EC%A0%9C%EB%89%B4%EC%8A%A4",
+      },
+    ],
+  };
+  const afterIndex = {
+    ok: true,
+    config,
+    channel: "stock",
+    articles: [
+      ...beforeIndex.articles,
+      {
+        title: "미군 공습 멈춘 사이 이란 전쟁, 홍해와 카스피해로 번져",
+        href: "https://arca.live/b/stock/178060120?p=1&category=%EA%B2%BD%EC%A0%9C%EB%89%B4%EC%8A%A4",
+      },
+    ],
+  };
+
+  assert.equal(
+    recoveredArcaArticleUrl(beforeIndex, afterIndex, publication),
+    "https://arca.live/b/stock/178060120"
+  );
+  assert.equal(
+    recoveredArcaArticleUrl(beforeIndex, {
+      ...afterIndex,
+      articles: [
+        ...afterIndex.articles,
+        {
+          title: "미군 공습 멈춘 사이 이란 전쟁, 홍해와 카스피해로 번져",
+          href: "https://arca.live/b/stock/178060121",
+        },
+      ],
+    }, publication),
+    ""
+  );
+  assert.equal(recoveredArcaArticleUrl(beforeIndex, beforeIndex, publication), "");
+});
+
+test("목록에서 복구한 게시글은 정확한 제목과 본문 리드까지 확인한다", () => {
+  const publication = {
+    channel: "stock",
+    title: "⚠️ 검증할 제목",
+    content: [
+      "<h1>⚠️ 검증할 제목</h1>",
+      "<p>&nbsp;</p>",
+      "<p>게시한 본문의 고유한 핵심 문장입니다.</p>",
+    ].join("\n"),
+  };
+  const article = {
+    title: "⚠️ 검증할 제목",
+    url: "https://arca.live/b/stock/178060120",
+    contentText: "⚠️ 검증할 제목 게시한 본문의 고유한 핵심 문장입니다.",
+  };
+
+  assert.equal(verifiesArcaPublication(article, publication, { requireLead: true }), true);
+  assert.equal(
+    verifiesArcaPublication(
+      { ...article, contentText: "제목만 같고 본문은 다른 글입니다." },
+      publication,
+      { requireLead: true }
+    ),
+    false
   );
 });

@@ -693,6 +693,12 @@
   background: transparent;
 }
 
+.mockup-stage.is-agent-sidebar-collapsed .magazine-topic-modal,
+.mockup-stage.is-agent-sidebar-collapsed .magazine-reader-modal,
+.mockup-stage.is-agent-sidebar-collapsed .magazine-reader-delete-overlay {
+  right: 0;
+}
+
 .magazine-reader-delete-dialog {
   display: grid;
   width: min(100%, 380px);

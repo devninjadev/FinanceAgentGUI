@@ -24,10 +24,13 @@ test("Antigravity invocation preserves both CLI contracts", () => {
     cliVersion: "1.1.1",
     model: "Current Model",
     prompt: "current prompt",
+    agent: "magazine-writer",
+    newProject: true,
   });
 
   assert.deepEqual(legacy.args.slice(-2), ["-p", "-"]);
   assert.equal(legacy.stdin, "legacy prompt");
   assert.deepEqual(current.args.slice(-2), ["-p", "current prompt"]);
+  assert.deepEqual(current.args.slice(0, 3), ["--new-project", "--agent", "magazine-writer"]);
   assert.equal(current.stdin, null);
 });

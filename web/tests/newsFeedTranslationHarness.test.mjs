@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   applyNewsFeedContentModes,
@@ -13,6 +15,11 @@ import {
   selectPendingNewsFeedTranslationBatch,
   translationPrompt,
 } from "../server/newsFeedApi.mjs";
+import {
+  buildCodexTranslationContextIsolation,
+  parseCodexFeatureNames,
+  parseCodexPromptInputSkillPaths,
+} from "../server/codexTranslationContext.mjs";
 
 const defaultNewsFeedConfig = JSON.parse(
   readFileSync(new URL("../../config/news-feeds.defaults.json", import.meta.url), "utf8"),
@@ -27,6 +34,80 @@ test("news feed Codex translation commits on process exit instead of delayed std
   assert.match(source, /const TRANSLATION_TIMEOUT_MS = 120000;/);
   assert.match(batchRunner, /child\.on\("exit", async \(code\) =>/);
   assert.doesNotMatch(batchRunner, /child\.on\("close"/);
+});
+
+test("news feed Codex translation removes skills, project docs, and agent tools from context", () => {
+  const temporaryHome = mkdtempSync(join(tmpdir(), "news-feed-context-diet-"));
+  const skillPath = join(temporaryHome, "skills", "translator-helper", "SKILL.md");
+  mkdirSync(join(temporaryHome, "skills", "translator-helper"), { recursive: true });
+  writeFileSync(skillPath, "# translator helper\n");
+
+  try {
+    const isolation = buildCodexTranslationContextIsolation({
+      env: { CODEX_HOME: temporaryHome },
+      skillPaths: [skillPath],
+      featureNames: [
+        "apps",
+        "browser_use",
+        "computer_use",
+        "multi_agent",
+        "shell_tool",
+        "unified_exec",
+      ],
+      cache: false,
+    });
+    const args = isolation.args;
+    const configValues = args.filter((value, index) => args[index - 1] === "-c");
+    const disabledFeatures = args.filter((value, index) => args[index - 1] === "--disable");
+
+    assert.equal(args.includes("--ignore-user-config"), false);
+    assert.equal(isolation.summary.userConfigCapabilitiesNeutralized, true);
+    assert.equal(configValues.includes("project_doc_max_bytes=0"), true);
+    assert.equal(configValues.includes("project_doc_fallback_filenames=[]"), true);
+    assert.equal(configValues.includes('web_search="disabled"'), true);
+    assert.equal(configValues.includes("tools.view_image=false"), true);
+    assert.equal(isolation.summary.multiAgentDisabled, true);
+    assert.deepEqual(disabledFeatures, [
+      "apps",
+      "browser_use",
+      "computer_use",
+      "multi_agent",
+      "shell_tool",
+      "unified_exec",
+    ]);
+    assert.match(configValues.find((value) => value.startsWith("skills.config=")) || "", /enabled=false/);
+    assert.equal(isolation.summary.disabledSkillCount, 1);
+    assert.equal(isolation.summary.disabledFeatureCount, 6);
+  } finally {
+    rmSync(temporaryHome, { recursive: true, force: true });
+  }
+});
+
+test("Codex context inspection parses only file-backed skills and supported features", () => {
+  const promptInput = JSON.stringify([
+    {
+      role: "developer",
+      content: [{
+        type: "input_text",
+        text: [
+          "<skills_instructions>",
+          "- one: helper (file: /tmp/one/SKILL.md)",
+          "- remote: helper (orchestrator resource: skill://remote)",
+          "</skills_instructions>",
+        ].join("\n"),
+      }],
+    },
+  ]);
+
+  assert.deepEqual(parseCodexPromptInputSkillPaths(promptInput), ["/tmp/one/SKILL.md"]);
+  assert.deepEqual(
+    parseCodexFeatureNames([
+      "apps stable true",
+      "old_feature removed false",
+      "shell_tool stable true",
+    ].join("\n")),
+    ["apps", "shell_tool"],
+  );
 });
 
 test("news feed parser applies a source-specific published-time offset", () => {
@@ -216,6 +297,46 @@ test("news feed translation harness rejects untranslated English copies", () => 
   assert.match(candidate.error, /영문 원문과 같습니다/);
 });
 
+test("news feed translation harness passes through ticker-and-percentage-only text", () => {
+  const source = "$SMH -5%; $SNDK -16%; $MU -11%";
+  const candidate = normalizeNewsFeedTranslationCandidate(
+    {
+      title: source,
+      originalText: "",
+      itemContentMode: "title-only",
+    },
+    {
+      textKo: source,
+      translationMode: "preserve-source",
+      globalStockMarketImpact: "negative",
+    },
+  );
+
+  assert.equal(candidate.ok, true);
+  assert.equal(candidate.textKo, source);
+  assert.equal(candidate.translationMode, "preserve-source");
+  assert.equal(candidate.globalStockMarketImpact, "negative");
+  assert.equal(candidate.error, "");
+});
+
+test("news feed translation harness rejects altered preserve-source text", () => {
+  const candidate = normalizeNewsFeedTranslationCandidate(
+    {
+      title: "$SMH -5%; $SNDK -16%; $MU -11%",
+      originalText: "",
+      itemContentMode: "title-only",
+    },
+    {
+      textKo: "$SMH -5%; $SNDK -15%; $MU -11%",
+      translationMode: "preserve-source",
+      globalStockMarketImpact: "negative",
+    },
+  );
+
+  assert.equal(candidate.ok, false);
+  assert.match(candidate.error, /preserve-source의 textKo가 원문과 다릅니다/);
+});
+
 test("news feed translation harness rejects English-only paraphrases", () => {
   const candidate = normalizeNewsFeedTranslationCandidate(
     {
@@ -303,6 +424,8 @@ test("news feed translation prompt classifies even small short-lived market move
   assert.match(prompt, /주요 지수의 작은 단기 움직임이라도 만들 개연성이 있으면/);
   assert.match(prompt, /서로 관련된 항목은 같은 시장 서사의 맥락으로 참고/);
   assert.match(prompt, /도구 호출, 웹 검색, 파일 읽기, 셸 실행, 추가 조사를 하지 말고/);
+  assert.match(prompt, /티커·종목코드·숫자·등락률·통화·단위·구두점/);
+  assert.match(prompt, /번역 가능한 자연어 구절이 하나라도 있으면 translationMode는 translated/);
 });
 
 test("news feed translation batching uses 12 normally and expands to 24 for a large backlog", () => {
@@ -477,7 +600,47 @@ test("title-only translation is stored in translatedTitle, not translatedText", 
   assert.equal(applied.translatedCount, 1);
   assert.equal(applied.store.items[0].translatedTitle, "물가 보고서 발표 후 주가가 상승했다.");
   assert.equal(applied.store.items[0].translatedText, "");
+  assert.equal(applied.store.items[0].translationMode, "translated");
   assert.equal(applied.store.items[0].globalStockMarketImpact, "positive");
+});
+
+test("title-only ticker text is stored as translated after source preservation", () => {
+  const source = "$SMH -5%; $SNDK -16%; $MU -11%";
+  const item = {
+    id: "nf_tickers",
+    title: source,
+    originalText: "",
+    itemContentMode: "title-only",
+    translationSourceField: "title",
+    translatedTitle: "",
+    translatedText: "",
+    translatedAt: "",
+    translationStatus: "pending",
+    translationError: "번역 검증 보류: textKo에 한국어가 없습니다",
+  };
+
+  const applied = applyNewsFeedTranslationBatch(
+    { collector: {}, items: [item] },
+    [item],
+    {
+      translations: [{
+        id: item.id,
+        textKo: source,
+        translationMode: "preserve-source",
+        globalStockMarketImpact: "negative",
+      }],
+      model: "gpt-5.6-luna",
+      reasoning: "low",
+    },
+  );
+
+  assert.equal(applied.translatedCount, 1);
+  assert.equal(applied.retryCount, 0);
+  assert.equal(applied.store.items[0].translatedTitle, source);
+  assert.equal(applied.store.items[0].translationStatus, "translated");
+  assert.equal(applied.store.items[0].translationMode, "preserve-source");
+  assert.equal(applied.store.items[0].translationError, "");
+  assert.equal(applied.store.items[0].globalStockMarketImpact, "negative");
 });
 
 test("news feed translation keeps only a missing batch result pending", () => {

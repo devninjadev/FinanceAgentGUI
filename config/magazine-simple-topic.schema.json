@@ -37,12 +37,15 @@
     "selectionReason": {
       "type": "string"
     },
-    "newsFeedIds": {
+    "worldMemoryEventIds": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "string"
       }
+    },
+    "worldMemoryQuery": {
+      "type": "string"
     }
   },
   "required": [
@@ -55,6 +58,7 @@
     "primaryEvent",
     "marketMechanism",
     "selectionReason",
-    "newsFeedIds"
+    "worldMemoryEventIds",
+    "worldMemoryQuery"
   ]
 }

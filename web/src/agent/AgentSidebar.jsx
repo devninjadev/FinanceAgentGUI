@@ -8,6 +8,7 @@ import PencilLine from "lucide-react/dist/esm/icons/pencil-line.js";
 import Plus from "lucide-react/dist/esm/icons/plus.js";
 import Settings from "lucide-react/dist/esm/icons/settings.js";
 import Square from "lucide-react/dist/esm/icons/square.js";
+import X from "lucide-react/dist/esm/icons/x.js";
 import { ArticleContextAttachment } from "../arca/ArticleContextAttachment.jsx";
 import { ChatAttachmentList, ChatMessage } from "./ChatMessages.jsx";
 import { Dropdown, ModelControl } from "./AgentControls.jsx";
@@ -35,6 +36,7 @@ export function AgentSidebar({
   messageStackRef,
   activeWorldMemoryActionId,
   onClearAttachedArticle,
+  onClose,
   onExecuteWorldMemoryAction,
   onNewChat,
   onPromptChange,
@@ -85,6 +87,18 @@ export function AgentSidebar({
           >
             <PencilLine size={19} strokeWidth={2.1} />
           </button>
+          {onClose ? (
+            <button
+              className="icon-button tooltip-button"
+              type="button"
+              aria-label="에이전트 채팅 사이드바 닫기"
+              title="사이드바 닫기"
+              data-tooltip="사이드바 닫기"
+              onClick={onClose}
+            >
+              <X size={20} strokeWidth={2.2} />
+            </button>
+          ) : null}
         </div>
       </header>
 

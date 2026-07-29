@@ -1825,6 +1825,22 @@ function commandForAction(body = {}) {
       timeoutMs: FEED_SCAN_TIMEOUT_MS,
     };
   }
+  if (action === "marketSnapshot") {
+    const outPath = join(WORLD_MEMORY_LOG_DIR, `world_memory_market_snapshot_${stampForFile()}.md`);
+    return {
+      scriptPath: MARKET_ANALYZER,
+      args: [
+        "--market-only",
+        "--news-language",
+        "original",
+        "--out",
+        outPath,
+      ],
+      output: "markdown-file",
+      outPath,
+      timeoutMs: FEED_SCAN_TIMEOUT_MS,
+    };
+  }
 
   throw new Error(`unknown world memory action: ${action || "(empty)"}`);
 }
@@ -1878,7 +1894,7 @@ function buildBriefGenerationPrompt({ preflight, feedScan }) {
   ].join("\n");
 }
 
-function buildSituationReportPrompt({
+export function buildSituationReportPrompt({
   listJson,
   statesJson,
   auditJson,
@@ -1897,6 +1913,13 @@ function buildSituationReportPrompt({
     "각 변경 제안을 아래 이전 관찰 목록과 의미 기준으로 분류한다. 재선정한 제안이 같은 문제의 수치·시점·표현만 갱신한 후속이면 해당 continuityId를 정확히 재사용하고, 별개 문제면 continuityId를 빈 문자열로 둔다.",
     "문자열 포함 여부나 단어 겹침만으로 분류하지 말고, 제안의 대상·의도·요구되는 후속 행동이 같은지 판단한다. 같은 continuityId는 결과 배열에 한 번만 쓰고 최신 문장만 남긴다.",
     "근거가 부족하면 부족하다고 말하고, 실제 행동 제안은 감시/확인/보류처럼 검증 가능한 수준으로 제안한다.",
+    "signalRadar에는 `신용·금융여건`과 `미국 순유동성`을 서로 다른 축으로 반드시 둔다.",
+    "`신용·금융여건`은 NFCIRISK와 HYG/LQD를 중심으로 평가하고, 미국 순유동성 구성요소를 이 점수에 섞지 않는다.",
+    "`미국 순유동성`은 FEED 스캔에 제공된 WALCL−TGA−RRP 수준과 1주·4주·13주 변화만 평가한다.",
+    "signalRadar.note는 독자가 바로 이해할 수 있는 시장 해석 1~2문장으로 쓴다. 숫자를 나열한 뒤 반드시 단기와 중기 방향이 무엇을 뜻하는지 설명한다.",
+    "signalRadar.note에는 WALCL·TGA·RRP 같은 산식 기호, `프록시`, `동일시하지 않는다`, `단정하지 않는다` 같은 방법론·면책 문구를 쓰지 않는다.",
+    "신용·금융여건과 미국 순유동성의 산식·범위·점수 방향은 methodology에만 짧게 적고 note에서 반복하지 않는다.",
+    "미국 순유동성 구성요소가 없거나 n/a이면 값을 만들지 말고 score 50, tone neutral로 두고 데이터 공백을 note에 적는다.",
     "마크다운이 아니라 JSON 객체 하나만 반환한다. 설명, 코드펜스, HTML 태그는 넣지 않는다.",
     "",
     "반환 schema:",
@@ -1908,7 +1931,20 @@ function buildSituationReportPrompt({
         summary: "첫 화면 요약 1문장",
         narrative: "현재 시장 해석 1~2문단",
         signalRadar: [
-          { label: "유동성", score: 65, tone: "positive", note: "점수 근거" },
+          {
+            label: "신용·금융여건",
+            score: 65,
+            tone: "positive",
+            note: "금융여건 완화가 이어지고 있지만 회사채 시장에는 단기 경계가 남아 있다.",
+            methodology: "NFCIRISK와 HYG/LQD를 평가한다. 0은 긴축, 50은 혼조, 100은 완화다.",
+          },
+          {
+            label: "미국 순유동성",
+            score: 58,
+            tone: "neutral",
+            note: "지난주에는 줄었지만 최근 1개월과 3개월 흐름은 증가세다. 단기 조정에도 중기 유동성은 확장 쪽이다.",
+            methodology: "WALCL−WDTGAL−RRPONTSYD의 4주·13주 변화를 중심으로 본다. 0은 흡수, 50은 혼조, 100은 공급이다.",
+          },
           { label: "정책", score: 45, tone: "neutral", note: "점수 근거" },
           { label: "지정학", score: 70, tone: "negative", note: "점수 근거" }
         ],
@@ -1967,15 +2003,25 @@ function normalizeTextList(value, limit = 6) {
     .slice(0, limit);
 }
 
-function normalizeSignalRadar(value) {
+export function normalizeSignalRadar(value) {
+  const methodologyByLabel = {
+    "신용·금융여건": "NFCIRISK와 HYG/LQD를 평가한다. 0은 긴축, 50은 혼조, 100은 완화다.",
+    "미국 순유동성":
+      "WALCL−WDTGAL−RRPONTSYD의 4주·13주 변화를 중심으로 본다. 0은 흡수, 50은 혼조, 100은 공급이다.",
+  };
   return asArray(value)
     .filter((item) => item && typeof item === "object")
-    .map((item) => ({
-      label: String(item.label || "").trim() || "Signal",
-      score: clampScore(item.score),
-      tone: parseEnum(String(item.tone || "").trim(), ["positive", "neutral", "negative"], "neutral"),
-      note: String(item.note || "").trim(),
-    }))
+    .map((item) => {
+      const rawLabel = String(item.label || "").trim() || "Signal";
+      const label = rawLabel === "유동성" ? "신용·금융여건" : rawLabel;
+      return {
+        label,
+        score: clampScore(item.score),
+        tone: parseEnum(String(item.tone || "").trim(), ["positive", "neutral", "negative"], "neutral"),
+        note: String(item.note || "").trim(),
+        methodology: methodologyByLabel[label] || String(item.methodology || "").trim(),
+      };
+    })
     .slice(0, 8);
 }
 
@@ -2107,7 +2153,7 @@ function renderReportHtmlDocument(view) {
     .map(
       (item) => `
         <article class="signal ${escapeHtml(item.tone)}">
-          <div><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.note)}</span></div>
+          <div><strong title="${escapeHtml(item.methodology || "")}">${escapeHtml(item.label)}</strong><span>${escapeHtml(item.note)}</span></div>
           <div class="bar"><i style="width:${clampScore(item.score)}%"></i></div>
           <b>${clampScore(item.score)}</b>
         </article>`
@@ -2673,13 +2719,14 @@ async function refreshWorldMemoryReportSnapshot({
     steps.push({ id: "init", ok: init.ok, text: safeStepText(init) });
     if (!init.ok) throw new Error(init.error || "월드 메모리 DB 초기화 실패");
 
-    const [taxonomyRefresh, auditAfter, harnessAfter, embedAfter, listAfter, statesAfter] = await Promise.all([
+    const [taxonomyRefresh, auditAfter, harnessAfter, embedAfter, listAfter, statesAfter, marketSnapshot] = await Promise.all([
       runCommandFromBody({ action: "taxonomyRefresh", limit: 160 }),
       runCommandFromBody({ action: "audit", days: 30 }),
       runCommandFromBody({ action: "harness", days: 30 }),
       runCommandFromBody({ action: "embedStatus" }),
       runCommandFromBody({ action: "list", days: 30, entryMode: "all", limit: 80 }),
       runCommandFromBody({ action: "states", status: "all", limit: 80 }),
+      runCommandFromBody({ action: "marketSnapshot" }),
     ]);
     steps.push(
       { id: "taxonomy-refresh", ok: taxonomyRefresh.ok, text: safeStepText(taxonomyRefresh) },
@@ -2687,7 +2734,13 @@ async function refreshWorldMemoryReportSnapshot({
       { id: "harness-after", ok: harnessAfter.ok, text: safeStepText(harnessAfter) },
       { id: "embed-after", ok: embedAfter.ok, text: safeStepText(embedAfter) },
       { id: "list-after", ok: listAfter.ok, text: safeStepText(listAfter) },
-      { id: "states-after", ok: statesAfter.ok, text: safeStepText(statesAfter) }
+      { id: "states-after", ok: statesAfter.ok, text: safeStepText(statesAfter) },
+      {
+        id: "market-snapshot",
+        ok: marketSnapshot.ok,
+        text: safeStepText(marketSnapshot),
+        artifact: marketSnapshot.artifact,
+      }
     );
     if (!auditAfter.ok) throw new Error(auditAfter.error || "audit 실패");
     if (!harnessAfter.ok) throw new Error(harnessAfter.error || "harness 실패");
@@ -2697,7 +2750,10 @@ async function refreshWorldMemoryReportSnapshot({
       statesJson: statesAfter.json,
       auditJson: auditAfter.json,
       feedScan: [
-        "새 FEED 스캔 없이 현재 로컬 월드메모리 DB와 state를 기준으로 보고서/변경 제안을 재생성한다.",
+        "새 FEED 스캔이나 brief import 없이 현재 로컬 월드메모리 DB와 state를 기준으로 보고서/변경 제안을 재생성한다.",
+        marketSnapshot.ok
+          ? `최신 시장·금융여건 스냅샷:\n${safeOutput(marketSnapshot.outputText, MODEL_FEED_SCAN_LIMIT)}`
+          : `최신 시장·금융여건 스냅샷 실패: ${safeStepText(marketSnapshot) || "원인 미상"}`,
         sourceAction ? `직전 변경 액션: ${sourceAction}` : "",
         reason ? `갱신 사유: ${reason}` : "",
       ].filter(Boolean).join("\n"),

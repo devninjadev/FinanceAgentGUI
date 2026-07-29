@@ -1,16 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  allEligibleNewsEvidence,
+  buildAntigravitySchemaPrompt,
+  allEligibleWorldMemoryEvidence,
   articleMarkdownToHtml,
+  assertJsonSchema,
   buildAllCandidateTopicPrompt,
+  buildEditorialStyleCard,
   buildSimpleMagazinePrompt,
-  compactNewsEvidence,
+  compactWorldMemoryEvidence,
   inspectCodexJsonl,
   normalizeDiscoveredTopic,
   normalizeSimpleArticle,
-  selectNewsEvidence,
+  normalizeWorldMemorySemanticSearch,
+  selectWorldMemoryEvidence,
+  sumTokenUsage,
+  sumToolCallCount,
 } from "../../scripts/magazine_generate_simple.mjs";
+import { buildCodexMagazineContextIsolation } from "../server/codexTranslationContext.mjs";
 
 const topic = {
   title: "알파벳의 첫 현금흐름 적자",
@@ -21,129 +29,197 @@ const topic = {
 
 const evidence = [
   {
-    id: "nf_1",
-    source: "Test Wire",
-    publishedAt: "2026-07-23T00:00:00.000Z",
-    headline: "알파벳이 첫 분기 잉여현금흐름 적자를 기록했다.",
-    url: "https://example.com/1",
+    id: "wm_1",
+    eventId: "wm_1",
+    asOf: "2026-07-23T00:00:00.000Z",
+    title: "알파벳이 첫 분기 잉여현금흐름 적자를 기록했다.",
+    summary: "AI 설비투자와 현금흐름의 시간표가 갈라졌습니다.",
+    sources: [{ name: "Test Wire", url: "https://example.com/1" }],
   },
 ];
 
-test("simple prompt contains exactly three prose exemplars and no repository instructions", () => {
+test("simple prompt contains exactly three compact style cards and bounded web verification", () => {
   const prompt = buildSimpleMagazinePrompt({
     topic,
     evidence,
     exemplars: [1, 2, 3].map((index) => ({
       id: `example-${index}`,
       title: `예시 ${index}`,
-      article: `예시 본문 ${index}`,
+      styleCard: `예시 스타일 카드 ${index}`,
     })),
   });
-  assert.equal((prompt.match(/=== 문체 예시/g) || []).length, 3);
-  assert.match(prompt, /도구, 웹 검색, 파일 읽기, 추가 조사를 하지 말고/);
+  assert.equal((prompt.match(/=== 스타일 카드 \d:/g) || []).length, 3);
+  assert.match(prompt, /웹 검색은 최신성·모순·원출처를 확인해야 할 때만 최대 2회/);
+  assert.match(prompt, /브라우저, 앱, 스킬, 플러그인, MCP, 파일 읽기, 셸 실행, 하위 에이전트는 사용하지 마십시오/);
+  assert.match(prompt, /매번 새 세션/);
   assert.match(prompt, /편집 표찰을 노출하지 말고 실제 주장이나 쟁점을 쓰십시오/);
   assert.match(prompt, /publicationReady=false/);
   assert.match(prompt, /알파벳의 첫 현금흐름 적자/);
   assert.doesNotMatch(prompt, /AGENTS\.md|docs\/magazine\.md|\[편집 지도\]/);
 });
 
-test("news evidence selector keeps only requested live items in requested order", () => {
-  const newsFeed = {
-    items: [
-      {
-        id: "nf_2",
-        feedTitle: "Second",
-        title: "SECOND",
-        translatedTitle: "두 번째",
-        sourceUrl: "https://example.com/2",
-        publishedAt: "2026-07-23T02:00:00.000Z",
-      },
-      {
-        id: "nf_1",
-        feedTitle: "First",
-        title: "FIRST",
-        translatedTitle: "첫 번째",
-        sourceUrl: "https://example.com/1",
-        publishedAt: "2026-07-23T01:00:00.000Z",
-      },
-    ],
+test("editorial maps are reduced to 2-3k style cards without article bodies", () => {
+  const editorialMap = {
+    thesis: "핵심 질문을 가격 예측에서 비용과 책임의 배분 문제로 옮깁니다.",
+    voice: Object.fromEntries(
+      Array.from({ length: 12 }, (_, index) => [
+        `voice${index}`,
+        `독자와 함께 메커니즘을 따라가는 존댓말 리듬 ${index}. ${"문단의 여백과 행위자를 유지합니다. ".repeat(4)}`,
+      ]),
+    ),
+    argumentativeTurns: Array.from({ length: 12 }, (_, index) => ({
+      move: `논증 이동 ${index}: ${"사실의 기능을 다음 질문으로 바꿉니다. ".repeat(4)}`,
+      why: `전환 이유 ${index}: ${"비용을 실제 행위자에게 연결합니다. ".repeat(4)}`,
+    })),
+    counterargument: {
+      strongForm: "가장 강한 반론을 약화하지 않고 충분히 인정합니다. ".repeat(8),
+      answer: "반론의 장점을 계약 조건과 검증 가능한 기준으로 흡수합니다. ".repeat(8),
+    },
+    endingTransformation: {
+      opening: "첫 장면의 질문을 다시 불러옵니다. ".repeat(8),
+      change: "같은 장면의 의미가 비용과 책임의 문제로 달라지게 닫습니다. ".repeat(8),
+    },
   };
-  assert.deepEqual(
-    selectNewsEvidence(newsFeed, ["nf_1", "nf_2"]).map((item) => item.id),
-    ["nf_1", "nf_2"],
-  );
-  assert.equal(compactNewsEvidence(newsFeed.items[0]).headline, "두 번째");
-  assert.throws(() => selectNewsEvidence(newsFeed, ["nf_missing"]), /찾을 수 없습니다/);
+  const card = buildEditorialStyleCard(editorialMap, { id: "test-card", title: "테스트 카드" });
+  assert.equal(card.length >= 2_000, true);
+  assert.equal(card.length <= 3_000, true);
+  assert.match(card, /\[전이 금지\]/);
 });
 
-test("all-candidate discovery includes every item after the World Memory cutoff without a count cap", () => {
-  const newsFeed = {
-    items: Array.from({ length: 61 }, (_, index) => ({
-      id: `nf_${index}`,
-      feedTitle: "Test Wire",
-      title: `headline ${index}`,
-      translatedTitle: `후보 ${index}`,
-      publishedAt: new Date(Date.parse("2026-07-23T00:00:00.000Z") + index * 1_000).toISOString(),
-    })),
-  };
-  const eligible = allEligibleNewsEvidence(newsFeed, {
-    collector: { lastSuccessfulAt: "2026-07-23T00:00:09.000Z" },
+test("Magazine Codex context removes agent surfaces while preserving live web search", () => {
+  const isolation = buildCodexMagazineContextIsolation({
+    skillPaths: ["/tmp/magazine-helper/SKILL.md"],
+    featureNames: ["apps", "browser_use", "multi_agent", "shell_tool", "skill_search"],
+    cache: false,
+    webSearchMode: "live",
   });
-  assert.equal(eligible.candidates.length, 51);
-  assert.equal(eligible.candidates[0].id, "nf_60");
-  assert.equal(eligible.candidates.at(-1).id, "nf_10");
+  const configValues = isolation.args.filter((value, index) => isolation.args[index - 1] === "-c");
+  const disabledFeatures = isolation.args.filter(
+    (value, index) => isolation.args[index - 1] === "--disable",
+  );
+  assert.equal(configValues.includes('web_search="live"'), true);
+  assert.equal(configValues.includes("project_doc_max_bytes=0"), true);
+  assert.equal(isolation.summary.multiAgentDisabled, true);
+  assert.deepEqual(disabledFeatures, [
+    "apps",
+    "browser_use",
+    "multi_agent",
+    "shell_tool",
+    "skill_search",
+  ]);
+  assert.match(configValues.find((value) => value.startsWith("skills.config=")) || "", /enabled=false/);
+});
+
+test("Antigravity Magazine agents expose only bounded web research to the writer", () => {
+  const writer = readFileSync(
+    new URL("../../config/antigravity-agents/magazine-writer/agent.md", import.meta.url),
+    "utf8",
+  );
+  const selector = readFileSync(
+    new URL("../../config/antigravity-agents/magazine-selector/agent.md", import.meta.url),
+    "utf8",
+  );
+  assert.match(writer, /tools:\n  - search_web\n  - read_url_content/);
+  assert.match(writer, /subagent: false/);
+  assert.match(writer, /skills: \[\]/);
+  assert.match(writer, /plugins: \[\]/);
+  assert.match(writer, /mcpServers: \[\]/);
+  assert.doesNotMatch(writer, /view_file|run_command|invoke_subagent|browser_use|browser_tool/);
+  assert.match(selector, /tools: \[\]/);
+});
+
+test("local JSON Schema validation remains provider-independent", () => {
+  assert.equal(assertJsonSchema({ value: "ok" }, {
+    type: "object",
+    additionalProperties: false,
+    properties: { value: { type: "string" } },
+    required: ["value"],
+  }).value, "ok");
+  assert.throws(
+    () => assertJsonSchema({ value: "ok", extra: true }, {
+      type: "object",
+      additionalProperties: false,
+      properties: { value: { type: "string" } },
+      required: ["value"],
+    }),
+    /허용되지 않은 필드/,
+  );
+});
+
+test("Antigravity receives the checked-in JSON Schema inside its one-shot prompt", () => {
+  const prompt = buildAntigravitySchemaPrompt("기사 작성", {
+    type: "object",
+    required: ["summary"],
+  });
+  assert.match(prompt, /반드시 만족할 최종 JSON Schema/);
+  assert.match(prompt, /"required":\["summary"\]/);
+});
+
+test("unreported Antigravity usage remains unknown instead of becoming fake zeroes", () => {
+  const stages = [{ tokenUsage: null, toolCallCount: null }];
+  assert.equal(sumTokenUsage(stages), null);
+  assert.equal(sumToolCallCount(stages), null);
+  assert.deepEqual(
+    sumTokenUsage([
+      {
+        tokenUsage: { inputTokens: 10, cachedInputTokens: 2, outputTokens: 3 },
+        toolCallCount: 0,
+      },
+    ]),
+    { inputTokens: 10, cachedInputTokens: 2, outputTokens: 3 },
+  );
+  assert.equal(sumToolCallCount([{ toolCallCount: 0 }]), 0);
+});
+
+test("World Memory evidence selector keeps only requested live events in requested order", () => {
+  const rows = [
+    { event_id: "wm_2", title: "두 번째", as_of: "2026-07-23T02:00:00.000Z" },
+    { event_id: "wm_1", title: "첫 번째", as_of: "2026-07-23T01:00:00.000Z" },
+  ];
+  assert.deepEqual(
+    selectWorldMemoryEvidence(rows, ["wm_1", "wm_2"]).map((item) => item.id),
+    ["wm_1", "wm_2"],
+  );
+  assert.equal(compactWorldMemoryEvidence(rows[0]).title, "두 번째");
+  assert.throws(() => selectWorldMemoryEvidence(rows, ["wm_missing"]), /찾을 수 없습니다/);
+});
+
+test("all-candidate discovery includes every provided World Memory row", () => {
+  const rows = Array.from({ length: 61 }, (_, index) => ({
+    event_id: `wm_${index}`,
+    title: `후보 ${index}`,
+    as_of: new Date(Date.parse("2026-07-23T00:00:00.000Z") + index * 1_000).toISOString(),
+  }));
+  const eligible = allEligibleWorldMemoryEvidence(rows);
+  assert.equal(eligible.candidates.length, 61);
+  assert.equal(eligible.candidates[0].id, "wm_0");
+  assert.equal(eligible.candidates.at(-1).id, "wm_60");
   const prompt = buildAllCandidateTopicPrompt(eligible);
-  assert.match(prompt, /51개 후보를 빠짐없이 모두 검토/);
+  assert.match(prompt, /61개를 빠짐없이 모두 검토/);
   assert.match(prompt, /개수 할당량은 없습니다/);
+  assert.match(prompt, /속보 피드나 외부 검색 결과에서 새 주제를 찾지 마십시오/);
   for (const candidate of eligible.candidates) assert.match(prompt, new RegExp(`"${candidate.id}"`));
 });
 
-test("all-candidate discovery removes exact News Feed ids and source URLs used by recent articles", () => {
-  const newsFeed = {
-    items: [
-      {
-        id: "nf_new",
-        feedTitle: "Test Wire",
-        translatedTitle: "새 후보",
-        sourceUrl: "https://example.com/new",
-        sourcePublishedAt: "2026-07-23T01:03:00.000Z",
-      },
-      {
-        id: "nf_used_id",
-        feedTitle: "Test Wire",
-        translatedTitle: "이미 사용한 id",
-        sourceUrl: "https://example.com/other",
-        sourcePublishedAt: "2026-07-23T01:02:00.000Z",
-      },
-      {
-        id: "nf_other_id",
-        feedTitle: "Test Wire",
-        translatedTitle: "이미 사용한 URL",
-        sourceUrl: "https://example.com/used/",
-        sourcePublishedAt: "2026-07-23T01:01:00.000Z",
-      },
-    ],
-  };
-  const eligible = allEligibleNewsEvidence(
-    newsFeed,
-    { collector: { lastSuccessfulAt: "2026-07-23T01:00:00.000Z" } },
-    {
-      excludedNewsFeedIds: ["nf_used_id"],
-      excludedSourceUrls: ["https://example.com/used"],
-    },
-  );
+test("all-candidate discovery removes World Memory event ids used by recent articles", () => {
+  const rows = [
+    { event_id: "wm_new", title: "새 후보" },
+    { event_id: "wm_used", title: "이미 사용한 이벤트" },
+  ];
+  const eligible = allEligibleWorldMemoryEvidence(rows, {
+    excludedWorldMemoryEventIds: ["wm_used"],
+  });
 
-  assert.deepEqual(eligible.candidates.map((item) => item.id), ["nf_new"]);
-  assert.equal(eligible.excludedCount, 2);
+  assert.deepEqual(eligible.candidates.map((item) => item.id), ["wm_new"]);
+  assert.equal(eligible.excludedCount, 1);
 });
 
 test("semantic topic result may select any valid ids from the uncapped candidate pool", () => {
   const candidates = Array.from({ length: 40 }, (_, index) => ({
-    id: `nf_${index}`,
-    source: "Test Wire",
-    publishedAt: new Date(Date.parse("2026-07-23T00:00:00.000Z") + index * 1_000).toISOString(),
-    headline: `후보 ${index}`,
-    url: "",
+    id: `wm_${index}`,
+    eventId: `wm_${index}`,
+    asOf: new Date(Date.parse("2026-07-23T00:00:00.000Z") + index * 1_000).toISOString(),
+    title: `후보 ${index}`,
   }));
   const discovered = normalizeDiscoveredTopic(
     {
@@ -156,12 +232,31 @@ test("semantic topic result may select any valid ids from the uncapped candidate
       primaryEvent: "유조선 운항 차질이 유가와 금리 기대를 함께 끌어올렸다",
       marketMechanism: "운항 차질이 보험료와 운임을 높이고 물가 기대를 통해 채권 금리로 전이된다",
       selectionReason: "실물 공급과 금융 가격을 연결하는 독립 사건이기 때문입니다.",
-      newsFeedIds: ["nf_39", "nf_3", "not-live"],
+      worldMemoryEventIds: ["wm_39", "wm_3", "not-live"],
+      worldMemoryQuery: "유가 충격과 금리 전이",
     },
     candidates,
   );
-  assert.deepEqual(discovered.newsFeedIds, ["nf_39", "nf_3"]);
-  assert.deepEqual(discovered.eventSignature.sourceIds, ["nf_39", "nf_3"]);
+  assert.deepEqual(discovered.worldMemoryEventIds, ["wm_39", "wm_3"]);
+  assert.deepEqual(discovered.eventSignature.sourceIds, ["wm_39", "wm_3"]);
+  assert.equal(discovered.worldMemoryEvidence.length, 2);
+});
+
+test("World Memory semantic search metadata is complete and keeps real event hits", () => {
+  const normalized = normalizeWorldMemorySemanticSearch({
+    query: "AI 데이터센터 프로젝트금융",
+    engine: "sentence-transformers",
+    model: "test-model",
+    candidate_count: 10,
+    matched_count: 1,
+    rows: [{ event_id: "wm_1", title: "메타 데이터센터 장기채" }],
+  });
+  assert.equal(normalized.query, "AI 데이터센터 프로젝트금융");
+  assert.equal(normalized.hits[0].eventId, "wm_1");
+  assert.throws(
+    () => normalizeWorldMemorySemanticSearch({ query: "x", engine: "", model: "", rows: [] }),
+    /비어 있습니다/,
+  );
 });
 
 test("one-shot JSONL inspection counts turns, tools, and tokens", () => {
@@ -177,6 +272,7 @@ test("one-shot JSONL inspection counts turns, tools, and tokens", () => {
   assert.deepEqual(inspected, {
     turnCount: 1,
     toolCallCount: 1,
+    toolTypeCounts: { command_execution: 1 },
     threadId: "thread-1",
     tokenUsage: { inputTokens: 1234, cachedInputTokens: 1000, outputTokens: 567 },
   });
@@ -197,7 +293,7 @@ test("simple article normalizer enforces useful prose while preserving locked me
         object: ["잉여현금흐름", "SpaceX 지분"],
         time: "2026-07-23T00:00:00.000Z",
         marketMechanism: "현재 현금 유출과 매도 제한 자산 가치의 시간표가 분리된다",
-        sourceIds: ["nf_1", "not-live"],
+        sourceIds: ["wm_1", "not-live"],
       },
       editorialReview: {
         publicationReady: true,
@@ -211,7 +307,7 @@ test("simple article normalizer enforces useful prose while preserving locked me
   assert.equal(article.articleId, "alphabet-cash-flow-spacex-stake");
   assert.equal(article.storyFamily, "AI 자본지출");
   assert.equal(article.sourceBasis.length, 1);
-  assert.deepEqual(article.eventSignature.sourceIds, ["nf_1"]);
+  assert.deepEqual(article.eventSignature.sourceIds, ["wm_1"]);
   assert.equal(article.editorialReviewDecision.method, "LLM_INTEGRATED_ONE_SHOT_REVIEW");
   assert.throws(
     () => normalizeSimpleArticle(
@@ -228,7 +324,7 @@ test("simple article normalizer enforces useful prose while preserving locked me
           object: [],
           time: "",
           marketMechanism: "메커니즘",
-          sourceIds: ["nf_1"],
+          sourceIds: ["wm_1"],
         },
         editorialReview: {
           publicationReady: true,
@@ -258,7 +354,7 @@ test("simple article normalizer fails closed on an integrated blocking review", 
           object: ["핵심 수치"],
           time: "2026-07-23T00:00:00.000Z",
           marketMechanism: "검증되지 않은 주장이 가격 판단을 왜곡할 수 있다",
-          sourceIds: ["nf_1"],
+          sourceIds: ["wm_1"],
         },
         editorialReview: {
           publicationReady: false,

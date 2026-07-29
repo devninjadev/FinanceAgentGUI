@@ -540,7 +540,28 @@
   font-weight: 800;
 }
 
-.world-memory-signal-head span {
+.world-memory-signal-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.world-memory-signal-methodology {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #83837d;
+  cursor: help;
+}
+
+.world-memory-signal-methodology:hover,
+.world-memory-signal-methodology:focus-visible {
+  color: #3f5f50;
+  outline: none;
+}
+
+.world-memory-signal-score {
   color: #5a5a55;
 }
 

@@ -23,6 +23,7 @@ function worldMemoryAskItemForContext(section, item = {}, extra = {}) {
       score: extra.score ?? item.score ?? "",
       tone: compactWorldMemoryText(item.tone || "", 40),
       note: compactWorldMemoryText(item.note || "", 320),
+      methodology: compactWorldMemoryText(item.methodology || "", 240),
     };
   }
 

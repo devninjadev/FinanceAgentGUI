@@ -1,5 +1,8 @@
 import { parse } from "node-html-parser";
-import { getArcaCookieHeader } from "./arcaAuthApi.mjs";
+import {
+  getArcaCookieHeader,
+  updateArcaSessionCookiesFromResponse,
+} from "./arcaAuthApi.mjs";
 import { readJsonBody, sendJson } from "./codexProbe.mjs";
 
 const DEFAULT_BASE_URL = "https://arca.live";
@@ -19,6 +22,7 @@ const MAX_ARCA_ARTICLE_TITLE_LENGTH = 200;
 const MAX_ARCA_ARTICLE_MARKDOWN_LENGTH = 200000;
 const MAX_ARCA_NOTIFICATION_ITEMS = 50;
 const ARCA_NEWS_CATEGORY = "경제뉴스";
+const ARCA_PUBLISH_INDEX_TIMEOUT_MS = 2500;
 const guardedArcaImageSockets = new WeakSet();
 
 function escapeRegExp(value) {
@@ -574,6 +578,16 @@ function buildHeaders({ referer = "" } = {}) {
   return headers;
 }
 
+export function buildArcaWriteHeaders({ referer = "", baseUrl = DEFAULT_BASE_URL } = {}) {
+  return {
+    ...buildHeaders({ referer }),
+    accept: "application/json, text/javascript, */*; q=0.01",
+    "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+    origin: new URL(normalizeBaseUrl(baseUrl)).origin,
+    "x-requested-with": "XMLHttpRequest",
+  };
+}
+
 function buildNotificationUrl(config) {
   return new URL("/u/notification", config.baseUrl);
 }
@@ -810,7 +824,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    updateArcaSessionCookiesFromResponse(response, url);
+    return response;
   } finally {
     clearTimeout(timer);
   }
@@ -1322,6 +1338,72 @@ export function createdArcaArticleUrl(response, body, { baseUrl = DEFAULT_BASE_U
   return "";
 }
 
+function normalizedArcaIndexTitle(value) {
+  return String(value || "")
+    .normalize("NFC")
+    .replace(/^(?:\s|\p{Extended_Pictographic}|\p{Regional_Indicator}|\u200d|\ufe0f)+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function canonicalChannelArticleUrl(value, { baseUrl = DEFAULT_BASE_URL, channel = DEFAULT_CHANNEL } = {}) {
+  try {
+    const base = new URL(normalizeBaseUrl(baseUrl));
+    const url = new URL(String(value || ""), base);
+    const articlePath = new RegExp(`^/b/${escapeRegExp(channel)}/\\d+/?$`);
+    if (url.origin !== base.origin || !articlePath.test(url.pathname)) return "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+export function recoveredArcaArticleUrl(beforeIndex, afterIndex, publication) {
+  if (!beforeIndex?.ok || !afterIndex?.ok) return "";
+  const channel = normalizeChannel(publication?.channel);
+  const expectedTitle = normalizedArcaIndexTitle(publication?.title);
+  if (!channel || !expectedTitle || afterIndex.channel !== channel) return "";
+
+  const baseUrl = afterIndex.config?.baseUrl || beforeIndex.config?.baseUrl || DEFAULT_BASE_URL;
+  const previousUrls = new Set(
+    (beforeIndex.articles || [])
+      .map((article) => canonicalChannelArticleUrl(article?.href, { baseUrl, channel }))
+      .filter(Boolean)
+  );
+  const candidates = new Set(
+    (afterIndex.articles || [])
+      .filter((article) => normalizedArcaIndexTitle(article?.title) === expectedTitle)
+      .map((article) => canonicalChannelArticleUrl(article?.href, { baseUrl, channel }))
+      .filter((url) => url && !previousUrls.has(url))
+  );
+  return candidates.size === 1 ? [...candidates][0] : "";
+}
+
+function normalizedArcaVerificationText(value) {
+  return String(value || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function publicationLeadText(publication) {
+  const root = parse(String(publication?.content || ""));
+  for (const paragraph of root.querySelectorAll("p")) {
+    const text = normalizedArcaVerificationText(nodeText(paragraph));
+    if (text) return text;
+  }
+  return "";
+}
+
+export function verifiesArcaPublication(article, publication, { requireLead = false } = {}) {
+  if (article?.title?.trim() !== publication?.title || !article?.url) {
+    return false;
+  }
+  if (!requireLead) return true;
+  const lead = publicationLeadText(publication);
+  const contentText = normalizedArcaVerificationText(article?.contentText);
+  return Boolean(lead && contentText.includes(lead));
+}
+
 function buildArticleListUrl(config, payload) {
   const channel = normalizeChannel(payload.channel) || config.defaultChannel;
   const url = new URL(`${config.baseUrl}/b/${channel}`);
@@ -1353,7 +1435,7 @@ function buildArticleListUrl(config, payload) {
   return { channel, page, url };
 }
 
-async function listChannelArticles(payload = {}) {
+async function listChannelArticles(payload = {}, { timeoutMs = 15000 } = {}) {
   const config = getConfig();
   const { channel, page, url } = buildArticleListUrl(config, payload);
   const issues = [];
@@ -1369,10 +1451,14 @@ async function listChannelArticles(payload = {}) {
   let response;
   let html = "";
   try {
-    response = await fetchWithTimeout(url, {
-      headers: buildHeaders(),
-      redirect: "follow",
-    });
+    response = await fetchWithTimeout(
+      url,
+      {
+        headers: buildHeaders(),
+        redirect: "follow",
+      },
+      timeoutMs
+    );
     html = await readTextSafely(response);
   } catch (error) {
     return {
@@ -1616,6 +1702,19 @@ export function upstreamCommentError(response, body) {
   }
 }
 
+export function findCreatedArcaComment(before, after, comment) {
+  const beforeIds = new Set((before?.comments || []).map((item) => item.id));
+  const expectedAuthor = String(before?.commenting?.currentUser || "").trim();
+  return (after?.comments || []).find((item) => {
+    if (beforeIds.has(item.id) || String(item.parentId || "") !== String(comment.parentId || "")) return false;
+    if (expectedAuthor && item.author && item.author !== expectedAuthor) return false;
+    if (comment.contentType === "text") return item.text.trim() === comment.content;
+    const postedIds = comment.emoticons.map((emoticon) => emoticon.attachmentId);
+    const renderedIds = (item.emoticons || []).map((media) => media.attachmentId);
+    return postedIds.length === renderedIds.length && postedIds.every((id, index) => id === renderedIds[index]);
+  });
+}
+
 async function postArcaComment(payload = {}) {
   const config = getConfig();
   const url = normalizeArticleUrl(payload, config);
@@ -1683,11 +1782,7 @@ async function postArcaComment(payload = {}) {
   try {
     response = await fetchWithTimeout(actionUrl, {
       method: "POST",
-      headers: {
-        ...buildHeaders({ referer: url.toString() }),
-        accept: "application/json,text/html;q=0.9,*/*;q=0.8",
-        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      },
+      headers: buildArcaWriteHeaders({ referer: url.toString(), baseUrl: config.baseUrl }),
       body: formData,
       redirect: "manual",
     });
@@ -1700,7 +1795,22 @@ async function postArcaComment(payload = {}) {
   }
 
   const upstreamError = upstreamCommentError(response, responseBody);
+  const after = await readArticleComments({ url: url.toString() });
+  const createdComment = findCreatedArcaComment(before, after, comment);
   if (response.status >= 400 || upstreamError) {
+    if (createdComment) {
+      return {
+        ok: true,
+        accepted: true,
+        verified: true,
+        recoveredFromRejectedResponse: true,
+        status: response.status,
+        createdCommentId: createdComment.id,
+        comments: after.comments || [],
+        commenting: after.commenting || before.commenting,
+        fetchedAt: after.fetchedAt || new Date().toISOString(),
+      };
+    }
     return {
       ok: false,
       status: response.status,
@@ -1708,19 +1818,11 @@ async function postArcaComment(payload = {}) {
     };
   }
 
-  const after = await readArticleComments({ url: url.toString() });
-  const beforeIds = new Set((before.comments || []).map((item) => item.id));
-  const createdComment = (after.comments || []).find((item) => {
-    if (beforeIds.has(item.id) || String(item.parentId || "") !== String(comment.parentId || "")) return false;
-    if (comment.contentType === "text") return item.text.trim() === comment.content;
-    const postedIds = comment.emoticons.map((emoticon) => emoticon.attachmentId);
-    const renderedIds = (item.emoticons || []).map((media) => media.attachmentId);
-    return postedIds.length === renderedIds.length && postedIds.every((id, index) => id === renderedIds[index]);
-  });
-
   return {
     ok: true,
+    accepted: true,
     verified: Boolean(createdComment),
+    status: response.status,
     createdCommentId: createdComment?.id || "",
     comments: after.comments || before.comments || [],
     commenting: after.commenting || before.commenting,
@@ -1744,6 +1846,16 @@ async function publishAxiosArticle(payload = {}) {
     };
   }
 
+  const beforeIndex = payload.dryRun !== true && payload.confirm === true
+    ? await listChannelArticles(
+      {
+        channel: publication.channel,
+        category: publication.category,
+        page: 1,
+      },
+      { timeoutMs: ARCA_PUBLISH_INDEX_TIMEOUT_MS }
+    )
+    : { ok: false };
   const writeUrl = new URL(`/b/${publication.channel}/write`, config.baseUrl);
   let pageResponse;
   let pageHtml = "";
@@ -1816,11 +1928,7 @@ async function publishAxiosArticle(payload = {}) {
   try {
     response = await fetchWithTimeout(contract.actionUrl, {
       method: "POST",
-      headers: {
-        ...buildHeaders({ referer: writeUrl.toString() }),
-        accept: "application/json,text/html;q=0.9,*/*;q=0.8",
-        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      },
+      headers: buildArcaWriteHeaders({ referer: writeUrl.toString(), baseUrl: config.baseUrl }),
       body: buildArcaArticleFormData(publication, contract),
       redirect: "manual",
     });
@@ -1833,7 +1941,22 @@ async function publishAxiosArticle(payload = {}) {
   }
 
   const upstreamError = upstreamCommentError(response, responseBody);
-  if (response.status >= 400 || upstreamError) {
+  const requestRejected = response.status >= 400 || Boolean(upstreamError);
+  let articleUrl = createdArcaArticleUrl(response, responseBody, { baseUrl: config.baseUrl });
+  let verificationSource = articleUrl ? "response" : "";
+  if (!articleUrl && beforeIndex.ok) {
+    const afterIndex = await listChannelArticles(
+      {
+        channel: publication.channel,
+        category: publication.category,
+        page: 1,
+      },
+      { timeoutMs: ARCA_PUBLISH_INDEX_TIMEOUT_MS }
+    );
+    articleUrl = recoveredArcaArticleUrl(beforeIndex, afterIndex, publication);
+    if (articleUrl) verificationSource = "channel-index";
+  }
+  if (requestRejected && !articleUrl) {
     return {
       ok: false,
       status: response.status,
@@ -1844,8 +1967,6 @@ async function publishAxiosArticle(payload = {}) {
       )],
     };
   }
-
-  const articleUrl = createdArcaArticleUrl(response, responseBody, { baseUrl: config.baseUrl });
   if (!articleUrl) {
     return {
       ok: false,
@@ -1862,8 +1983,9 @@ async function publishAxiosArticle(payload = {}) {
   const verification = await readArticleDetail({ url: articleUrl });
   const verified = Boolean(
     verification.ok &&
-    verification.article?.title?.trim() === publication.title &&
-    verification.article?.url
+    verifiesArcaPublication(verification.article, publication, {
+      requireLead: verificationSource === "channel-index",
+    })
   );
   return {
     ok: verified,
@@ -1873,6 +1995,9 @@ async function publishAxiosArticle(payload = {}) {
     title: publication.title,
     channel: publication.channel,
     category: publication.category,
+    verificationSource,
+    recoveredFromRejectedResponse: requestRejected && verified,
+    status: response.status,
     zwjReplacementCount: publication.zwjReplacementCount,
     fetchedAt: verification.fetchedAt || new Date().toISOString(),
     issues: verified

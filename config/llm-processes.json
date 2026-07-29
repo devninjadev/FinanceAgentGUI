@@ -4,6 +4,9 @@
   "policy": "required-when-installed",
   "failClosedWhenInstalledObserverUnavailable": true,
   "directExecutionWhen": ["unsupported-platform", "not-installed", "installation-indeterminate"],
+  "unseenRegistration": "reject-and-use-exact-pid-wait-while-gated",
+  "registryCapacityFallback": "exact-pid-wait-while-gated",
+  "postLaunchRetry": "forbidden",
   "auditLog": "logs/llm-observation.jsonl",
   "processes": [
     {
@@ -62,21 +65,21 @@
     },
     {
       "id": "magazine-simple-writer",
-      "providers": ["codex-cli"],
+      "providers": ["codex-cli", "antigravity-cli"],
       "entrypoint": "scripts/magazine_generate_simple.mjs",
       "launcher": "spawnObservedLlm"
     },
     {
       "id": "magazine-simple-topic-selector",
-      "providers": ["codex-cli"],
+      "providers": ["codex-cli", "antigravity-cli"],
       "entrypoint": "scripts/magazine_generate_simple.mjs",
       "launcher": "spawnObservedLlm"
     },
     {
       "id": "magazine-article-count-decision",
-      "providers": ["codex-cli"],
+      "providers": ["codex-cli", "antigravity-cli"],
       "entrypoint": "web/server/magazineApi.mjs",
-      "launcher": "runIsolatedCodexJsonPrompt"
+      "launcher": "runIsolatedMagazineJsonPrompt"
     }
   ]
 }

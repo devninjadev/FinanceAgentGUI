@@ -2,6 +2,7 @@ import React from "react";
 import Activity from "lucide-react/dist/esm/icons/activity.js";
 import AlertTriangle from "lucide-react/dist/esm/icons/alert-triangle.js";
 import CheckCircle2 from "lucide-react/dist/esm/icons/circle-check-big.js";
+import CircleHelp from "lucide-react/dist/esm/icons/circle-help.js";
 import ChevronsRight from "lucide-react/dist/esm/icons/chevrons-right.js";
 import Circle from "lucide-react/dist/esm/icons/circle.js";
 import Database from "lucide-react/dist/esm/icons/database.js";
@@ -128,8 +129,20 @@ function WorldMemoryRichReport({ report, agentIcon = "", agentAskLabel = "Codex�
               return (
                 <article className={`world-memory-signal ${worldMemorySignalToneClass(signal.tone)}`} key={`${signal.label}-${index}`}>
                   <div className="world-memory-signal-head">
-                    <strong>{signal.label}</strong>
-                    <span>{score}</span>
+                    <div className="world-memory-signal-label">
+                      <strong>{signal.label}</strong>
+                      {signal.methodology ? (
+                        <span
+                          className="world-memory-signal-methodology"
+                          title={signal.methodology}
+                          aria-label={`방법론: ${signal.methodology}`}
+                          tabIndex={0}
+                        >
+                          <CircleHelp size={14} strokeWidth={2} aria-hidden="true" />
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="world-memory-signal-score">{score}</span>
                   </div>
                   <div className="world-memory-signal-bar">
                     <i style={{ width: `${score}%` }} />

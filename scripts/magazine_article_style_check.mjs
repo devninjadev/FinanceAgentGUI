@@ -1258,15 +1258,6 @@ async function main() {
         message: "issue slate has no low-level-signal, data-anomaly, or human-drama article",
       });
     }
-    const hasExternal = (angleCounts.get("external-research") || 0) > 0;
-    if (!hasExternal) {
-      slateIssues.push({
-        articleId: "__issue_slate__",
-        level: "warn",
-        code: "no-external-research-angle",
-        message: "issue slate has no external-research article; World Memory should not be the only doorway",
-      });
-    }
   }
   slateIssues.push(...duplicateNoveltyIssues(results, baselineRecords));
 

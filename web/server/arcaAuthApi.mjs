@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -71,6 +72,19 @@ function readSessionSecret() {
   }
 }
 
+function writeSessionSecret(session) {
+  ensureRuntimeDirs();
+  const temporaryPath = `${SESSION_PATH}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporaryPath, SESSION_PATH);
+  } finally {
+    if (existsSync(temporaryPath)) {
+      unlinkSync(temporaryPath);
+    }
+  }
+}
+
 function websocketDataToString(data) {
   if (typeof data === "string") return data;
   if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
@@ -95,6 +109,166 @@ function cookieHeaderFromCookies(cookies) {
     .sort((left, right) => String(left.name).localeCompare(String(right.name)))
     .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join("; ");
+}
+
+function splitCombinedSetCookieHeader(value) {
+  const source = String(value || "");
+  if (!source) return [];
+  const cookies = [];
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] !== ",") continue;
+    const next = source.slice(index + 1);
+    if (!/^\s*[^=;,\s]+\s*=/.test(next)) continue;
+    cookies.push(source.slice(start, index).trim());
+    start = index + 1;
+  }
+  cookies.push(source.slice(start).trim());
+  return cookies.filter(Boolean);
+}
+
+function defaultCookiePath(requestUrl) {
+  const pathname = requestUrl.pathname || "/";
+  if (!pathname.startsWith("/") || pathname === "/") return "/";
+  const lastSlash = pathname.lastIndexOf("/");
+  return lastSlash <= 0 ? "/" : pathname.slice(0, lastSlash);
+}
+
+function normalizedCookieDomain(value) {
+  return String(value || "").trim().replace(/^\./, "").toLowerCase();
+}
+
+function cookieIdentity(cookie) {
+  return [
+    String(cookie?.name || ""),
+    normalizedCookieDomain(cookie?.domain),
+    String(cookie?.path || "/"),
+  ].join("\n");
+}
+
+function parsedSetCookie(value, requestUrl, nowMs) {
+  const parts = String(value || "").split(";").map((part) => part.trim());
+  const first = parts.shift() || "";
+  const separator = first.indexOf("=");
+  if (separator <= 0) return null;
+  const name = first.slice(0, separator).trim();
+  const cookieValue = first.slice(separator + 1);
+  if (!name || /[\s,;]/.test(name)) return null;
+
+  const attributes = new Map();
+  for (const part of parts) {
+    const attributeSeparator = part.indexOf("=");
+    const key = (attributeSeparator >= 0 ? part.slice(0, attributeSeparator) : part).trim().toLowerCase();
+    const attributeValue = attributeSeparator >= 0 ? part.slice(attributeSeparator + 1).trim() : true;
+    if (key) attributes.set(key, attributeValue);
+  }
+
+  const requestHostname = requestUrl.hostname.toLowerCase();
+  const domain = normalizedCookieDomain(attributes.get("domain") || requestHostname);
+  if (domain !== requestHostname && !requestHostname.endsWith(`.${domain}`)) return null;
+
+  const configuredHostname = new URL(baseUrl()).hostname.toLowerCase();
+  if (domain !== configuredHostname && !domain.endsWith(`.${configuredHostname}`)) return null;
+
+  const maxAge = attributes.has("max-age")
+    ? Number.parseInt(String(attributes.get("max-age")), 10)
+    : null;
+  const expiresAt = attributes.has("expires")
+    ? Date.parse(String(attributes.get("expires")))
+    : Number.NaN;
+  const deleteCookie =
+    (Number.isFinite(maxAge) && maxAge <= 0) ||
+    (Number.isFinite(expiresAt) && expiresAt <= nowMs);
+  const expirationSeconds = Number.isFinite(maxAge)
+    ? Math.floor((nowMs + maxAge * 1000) / 1000)
+    : Number.isFinite(expiresAt)
+      ? Math.floor(expiresAt / 1000)
+      : 0;
+  const sameSiteRaw = String(attributes.get("samesite") || "").toLowerCase();
+  const sameSite = sameSiteRaw === "strict"
+    ? "Strict"
+    : sameSiteRaw === "lax"
+      ? "Lax"
+      : sameSiteRaw === "none"
+        ? "None"
+        : undefined;
+
+  return {
+    cookie: {
+      name,
+      value: cookieValue,
+      domain,
+      path: String(attributes.get("path") || defaultCookiePath(requestUrl)),
+      expires: expirationSeconds,
+      httpOnly: attributes.has("httponly"),
+      secure: attributes.has("secure"),
+      ...(sameSite ? { sameSite } : {}),
+    },
+    deleteCookie,
+  };
+}
+
+export function mergeArcaSetCookieHeaders(
+  cookies,
+  setCookieHeaders,
+  { requestUrl = DEFAULT_BASE_URL, nowMs = Date.now() } = {}
+) {
+  let parsedRequestUrl;
+  try {
+    parsedRequestUrl = new URL(String(requestUrl));
+  } catch {
+    return { cookies: Array.isArray(cookies) ? cookies : [], changed: false };
+  }
+  if (!["http:", "https:"].includes(parsedRequestUrl.protocol)) {
+    return { cookies: Array.isArray(cookies) ? cookies : [], changed: false };
+  }
+
+  const originalCookies = Array.isArray(cookies) ? cookies : [];
+  const merged = new Map(originalCookies.map((cookie) => [cookieIdentity(cookie), cookie]));
+  let changed = false;
+  for (const value of Array.isArray(setCookieHeaders) ? setCookieHeaders : []) {
+    const parsed = parsedSetCookie(value, parsedRequestUrl, nowMs);
+    if (!parsed) continue;
+    const identity = cookieIdentity(parsed.cookie);
+    if (parsed.deleteCookie) {
+      changed = merged.delete(identity) || changed;
+      continue;
+    }
+    const existing = merged.get(identity);
+    const nextCookie = { ...(existing || {}), ...parsed.cookie };
+    if (JSON.stringify(existing) !== JSON.stringify(nextCookie)) {
+      merged.set(identity, nextCookie);
+      changed = true;
+    }
+  }
+  return {
+    cookies: [...merged.values()],
+    changed,
+  };
+}
+
+function responseSetCookieHeaders(response) {
+  if (typeof response?.headers?.getSetCookie === "function") {
+    return response.headers.getSetCookie();
+  }
+  return splitCombinedSetCookieHeader(response?.headers?.get?.("set-cookie"));
+}
+
+export function updateArcaSessionCookiesFromResponse(response, requestUrl) {
+  const setCookieHeaders = responseSetCookieHeaders(response);
+  if (!setCookieHeaders.length) return false;
+  const secret = readSessionSecret();
+  if (!secret || secret.invalid) return false;
+  const merged = mergeArcaSetCookieHeaders(secret.cookies, setCookieHeaders, { requestUrl });
+  if (!merged.changed) return false;
+  const now = new Date().toISOString();
+  writeSessionSecret({
+    ...secret,
+    cookieHeader: cookieHeaderFromCookies(merged.cookies),
+    cookies: merged.cookies,
+    updatedAt: now,
+  });
+  return true;
 }
 
 function summarizeCookies(cookies = []) {
@@ -425,6 +599,57 @@ async function cdpCall(webSocketDebuggerUrl, method, params = {}, timeoutMs = CD
   });
 }
 
+export function selectArcaCookieCdpTarget(targets, { configuredBaseUrl = DEFAULT_BASE_URL } = {}) {
+  let configuredHostname;
+  try {
+    configuredHostname = new URL(normalizeBaseUrl(configuredBaseUrl)).hostname;
+  } catch {
+    return null;
+  }
+  return (Array.isArray(targets) ? targets : []).find((target) => {
+    if (target?.type !== "page" || !target.webSocketDebuggerUrl) return false;
+    try {
+      const hostname = new URL(String(target.url || "")).hostname;
+      return hostname === configuredHostname || hostname.endsWith(`.${configuredHostname}`);
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+async function waitForArcaCookieCdpTarget(port, timeoutMs = CDP_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  let lastError = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`, 1600);
+      const target = selectArcaCookieCdpTarget(targets, { configuredBaseUrl: baseUrl() });
+      if (target) return target;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(lastError?.message || "아카라이브 브라우저 탭의 DevTools 대상이 준비되지 않았습니다.");
+}
+
+async function captureCookiesFromArcaPageTarget(port, version) {
+  let target;
+  try {
+    target = await waitForArcaCookieCdpTarget(port, 1200);
+  } catch {
+    await cdpCall(version.webSocketDebuggerUrl, "Target.createTarget", { url: baseUrl() });
+    target = await waitForArcaCookieCdpTarget(port);
+  }
+  return cdpCall(target.webSocketDebuggerUrl, "Network.getCookies", {
+    urls: [
+      `${baseUrl()}/`,
+      `${baseUrl()}/b/stock`,
+      loginUrl(),
+    ],
+  });
+}
+
 async function startHandoff() {
   ensureRuntimeDirs();
   const runningHandoff = activeHandoff && processAlive(activeHandoff.pid) ? activeHandoff : discoverRunningHandoff();
@@ -462,6 +687,9 @@ async function startHandoff() {
 
 async function captureSession() {
   if (!activeHandoff?.port) {
+    activeHandoff = discoverRunningHandoff();
+  }
+  if (!activeHandoff?.port) {
     throw new Error("진행 중인 아카라이브 로그인 핸드오프가 없습니다.");
   }
 
@@ -470,9 +698,11 @@ async function captureSession() {
   try {
     result = await cdpCall(version.webSocketDebuggerUrl, "Network.getAllCookies");
   } catch {
-    result = await cdpCall(version.webSocketDebuggerUrl, "Storage.getCookies", {
-      urls: [baseUrl()],
-    });
+    try {
+      result = await cdpCall(version.webSocketDebuggerUrl, "Storage.getCookies");
+    } catch {
+      result = await captureCookiesFromArcaPageTarget(activeHandoff.port, version);
+    }
   }
   const arcaCookies = (result.cookies || []).filter(isArcaCookie).filter((cookie) => !isExpiredCookie(cookie));
   const cookieHeader = cookieHeaderFromCookies(arcaCookies);
@@ -481,7 +711,6 @@ async function captureSession() {
     throw new Error("전용 브라우저 프로필에서 arca.live 쿠키를 찾지 못했습니다. 열린 브라우저에서 로그인을 완료한 뒤 다시 저장하세요.");
   }
 
-  ensureRuntimeDirs();
   const now = new Date().toISOString();
   const session = {
     schemaVersion: SESSION_SCHEMA_VERSION,
@@ -497,7 +726,7 @@ async function captureSession() {
       profileDir: relativeAppPath(PROFILE_DIR),
     },
   };
-  writeFileSync(SESSION_PATH, `${JSON.stringify(session, null, 2)}\n`, { mode: 0o600 });
+  writeSessionSecret(session);
 
   return publicSessionStatus({
     lastAction: "session-captured",

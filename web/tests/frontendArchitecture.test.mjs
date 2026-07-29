@@ -76,6 +76,10 @@ const magazineWorkspaceSource = readFileSync(
   new URL("../src/magazine/MagazineWorkspace.jsx", import.meta.url),
   "utf8"
 );
+const magazineStylesSource = readFileSync(
+  new URL("../src/magazine/magazine.css", import.meta.url),
+  "utf8"
+);
 const portfolioCanvasControllerSource = readFileSync(
   new URL("../src/portfolio/usePortfolioCanvasController.js", import.meta.url),
   "utf8"
@@ -94,6 +98,10 @@ const portfolioStylesSource = readFileSync(
 );
 const transactionStatusStylesSource = readFileSync(
   new URL("../src/transactions/transaction-status.css", import.meta.url),
+  "utf8"
+);
+const stockChannelStylesSource = readFileSync(
+  new URL("../src/arca/stock-channel.css", import.meta.url),
   "utf8"
 );
 const mobileTransactionStatusStylesSource = transactionStatusStylesSource.slice(
@@ -280,6 +288,24 @@ test("Feature styles stay with their owning modules instead of the global cascad
   ]) {
     assert.doesNotMatch(globalStylesSource, new RegExp(`\\${selector}\\b`));
   }
+});
+
+test("Arca notification modal keeps optional status content from displacing the list and footer rows", () => {
+  assert.match(
+    stockChannelStylesSource,
+    /\.arca-notification-modal\s*\{[^}]*grid-template-areas:\s*"header"\s*"status"\s*"list"\s*"footer";/s
+  );
+  assert.match(stockChannelStylesSource, /\.arca-notification-modal-header\s*\{[^}]*grid-area:\s*header;/s);
+  assert.match(stockChannelStylesSource, /\.arca-notification-modal-error\s*\{[^}]*grid-area:\s*status;/s);
+  assert.match(stockChannelStylesSource, /\.arca-notification-list\s*\{[^}]*grid-area:\s*list;/s);
+  assert.match(stockChannelStylesSource, /\.arca-notification-modal-footer\s*\{[^}]*grid-area:\s*footer;/s);
+});
+
+test("collapsed agent sidebar releases the reserved edge of every Magazine overlay", () => {
+  assert.match(
+    magazineStylesSource,
+    /\.mockup-stage\.is-agent-sidebar-collapsed \.magazine-topic-modal,\s*\.mockup-stage\.is-agent-sidebar-collapsed \.magazine-reader-modal,\s*\.mockup-stage\.is-agent-sidebar-collapsed \.magazine-reader-delete-overlay\s*\{[^}]*right:\s*0;/s,
+  );
 });
 
 test("responsive feature rules stay out of the always-loaded agent shell stylesheet", () => {

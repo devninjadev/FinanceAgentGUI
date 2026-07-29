@@ -11,13 +11,15 @@ import {
   articleMarkdownToHtml,
   discoverSimpleTopicFromAllCandidates,
   generateSimpleDraftFromLockedTopic,
+  loadWorldMemoryCandidateRows,
+  loadSimpleEditorialExemplars,
+  selectWorldMemoryEvidence,
 } from "./magazine_generate_simple.mjs";
 
 const SCRIPT_DIR = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const GUIBUILD_ROOT = resolve(SCRIPT_DIR, "..");
 const ARTICLES_DIR = join(GUIBUILD_ROOT, "data", "magazine", "articles");
 const MAGAZINE_DATA_DIR = join(GUIBUILD_ROOT, "data", "magazine");
-const NEWS_FEED_STORE_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const WORLD_MEMORY_STATE_PATH = join(GUIBUILD_ROOT, "data", "world-memory", "collector-state.json");
 const LOCK_PATH = join(GUIBUILD_ROOT, "data", "magazine", ".generation.lock");
 const CODEX_PROVIDER_ID = "codex-cli";
@@ -27,6 +29,7 @@ const MAGAZINE_RESEARCH_MODES = new Set([
   "external-research",
   "external-first",
   "mixed-research",
+  "world-memory-first",
   "news-feed-first",
   "news-feed-with-world-memory-backup",
 ]);
@@ -41,7 +44,6 @@ const COVER_REBUILD_MODE = "recent-cover-rebuild";
 const LEGACY_HARNESS_PROFILE = "legacy";
 const DEFAULT_HARNESS_PROFILE = "v2";
 const EDITORIAL_REVIEW_POLICY = "magazine-editorial-review-v2";
-const EDITORIAL_EXEMPLAR_CONFIG_PATH = join(GUIBUILD_ROOT, "config", "magazine-editorial-exemplars.json");
 const CHATGPT_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 
 function argValue(name, fallback = "") {
@@ -135,51 +137,21 @@ function readJsonFile(path) {
 }
 
 export function approvedEditorialExemplars() {
-  const config = readJsonFile(EDITORIAL_EXEMPLAR_CONFIG_PATH) || {};
-  if (config.enabled === false) return [];
-  const configuredRoot = String(config.root || "data/magazine/editorial-exemplars").trim();
-  const root = resolve(GUIBUILD_ROOT, configuredRoot);
-  if (!root.startsWith(`${GUIBUILD_ROOT}/`) || !existsSync(root)) return [];
-  const maxExemplars = Math.max(0, Math.min(6, Number.parseInt(config.maxExemplars, 10) || 3));
-  const maxArticleChars = Math.max(2000, Math.min(30000, Number.parseInt(config.maxArticleChars, 10) || 18000));
-  const maxEditorialMapChars = Math.max(1000, Math.min(12000, Number.parseInt(config.maxEditorialMapChars, 10) || 6000));
-  return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => {
-      const exemplarDir = join(root, entry.name);
-      const metadata = readJsonFile(join(exemplarDir, "metadata.json"));
-      const editorialMap = readJsonFile(join(exemplarDir, "editorial-map.json"));
-      const articlePath = join(exemplarDir, "article.md");
-      if (!metadata?.approved || !editorialMap || !existsSync(articlePath)) return null;
-      const article = readFileSync(articlePath, "utf8").trim();
-      if (!article) return null;
-      return {
-        id: entry.name,
-        title: String(metadata.title || entry.name).trim(),
-        article: article.slice(0, maxArticleChars),
-        editorialMap: JSON.stringify(editorialMap, null, 2).slice(0, maxEditorialMapChars),
-      };
-    })
-    .filter(Boolean)
-    .slice(0, maxExemplars);
+  return loadSimpleEditorialExemplars();
 }
 
 function editorialExemplarWriterPrompt() {
   const exemplars = approvedEditorialExemplars();
   if (!exemplars.length) return "- 승인된 로컬 한국어 퓨샷이 없다. 장문 편집 표준만 따른다.";
   return [
-    "아래 글은 FinanceAgentGUI 안에서 독립적으로 작성·승인한 한국어 편집 퓨샷이다.",
+    "아래 카드는 FinanceAgentGUI 안에서 독립적으로 승인한 한국어 기사의 압축 편집 지도다.",
     "새 기사에 이전할 것은 논증의 이동, 근거의 기능 분담, 문단 리듬, 반론 처리, 결말의 변형 방식뿐이다.",
     "퓨샷의 문구, 비유, 제목 구문, 고유명사, 사실, 출처, 주제를 복제하거나 새 기사의 근거로 사용하지 않는다.",
     "새 기사와 퓨샷의 문장·섹션 순서를 대응시키지 말고, 현재 소재가 요구하는 독자적인 구조를 만든다.",
     ...exemplars.flatMap((exemplar, index) => [
       "",
-      `=== 승인 퓨샷 ${index + 1}: ${exemplar.id} / ${exemplar.title} ===`,
-      "[편집 지도]",
-      exemplar.editorialMap,
-      "[한국어 기사 본문]",
-      exemplar.article,
+      `=== 승인 스타일 카드 ${index + 1}: ${exemplar.id} / ${exemplar.title} ===`,
+      exemplar.styleCard,
     ]),
   ].join("\n");
 }
@@ -189,7 +161,7 @@ function editorialExemplarReviewPrompt() {
   if (!exemplars.length) return "승인된 로컬 한국어 퓨샷 편집 지도가 없다.";
   return [
     "아래 편집 지도는 문구 유사도를 채점하기 위한 것이 아니다. 새 기사가 그와 동등한 수준의 장거리 논증을 독자적인 구조로 수행하는지만 비교한다.",
-    ...exemplars.map((exemplar, index) => `\n[승인 퓨샷 편집 지도 ${index + 1}: ${exemplar.title}]\n${exemplar.editorialMap}`),
+    ...exemplars.map((exemplar, index) => `\n[승인 스타일 카드 ${index + 1}: ${exemplar.title}]\n${exemplar.styleCard}`),
   ].join("\n");
 }
 
@@ -213,72 +185,17 @@ function worldMemoryLastSuccessfulAt() {
   return { iso: "", timestamp: 0 };
 }
 
-function newsFeedItemTimestamp(item = {}) {
-  for (const field of ["sourcePublishedAt", "publishedAt", "fetchedAt", "translatedAt"]) {
-    const timestamp = parseTimestamp(item[field]);
-    if (timestamp) return { field, timestamp, iso: new Date(timestamp).toISOString() };
-  }
-  return { field: "", timestamp: 0, iso: "" };
-}
-
 function compactPromptText(value, limit = 180) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > limit ? `${text.slice(0, limit - 1)}...` : text;
 }
 
-function postWorldMemoryNewsFeedSummary({ limit = 0 } = {}) {
-  const cutoff = worldMemoryLastSuccessfulAt();
-  if (!cutoff.timestamp) {
-    return [
-      "- 기준 업데이트 시각을 찾지 못했다.",
-      "- 최근 확인된 보도 후보는 기준 업데이트 이후 항목만 사용할 수 있으므로 이번 생성에서는 기사 소재 후보로 쓰지 않는다.",
-    ].join("\n");
+function worldMemoryAngleCandidateSummary(limit = 36) {
+  try {
+    return JSON.stringify(loadWorldMemoryCandidateRows({ days: 45, limit }), null, 2);
+  } catch (error) {
+    return `- World Memory angle candidates unavailable: ${compactPromptText(error.message, 800)}`;
   }
-
-  const store = readJsonFile(NEWS_FEED_STORE_PATH);
-  const items = Array.isArray(store?.items) ? store.items : [];
-  if (!items.length) {
-    return [
-      `- worldMemoryLastSuccessfulAt=${cutoff.iso}`,
-      "- data/news-feed.json에 최근 확인된 보도 항목이 없다.",
-    ].join("\n");
-  }
-
-  const eligibleCandidates = items
-    .map((item) => ({ item, itemTime: newsFeedItemTimestamp(item) }))
-    .filter(({ itemTime }) => itemTime.timestamp > cutoff.timestamp)
-    .sort((a, b) => b.itemTime.timestamp - a.itemTime.timestamp || String(a.item.id || "").localeCompare(String(b.item.id || "")));
-
-  if (!eligibleCandidates.length) {
-    return [
-      `- worldMemoryLastSuccessfulAt=${cutoff.iso}`,
-      `- 확인된 보도 ${items.length}개 중 기준 업데이트 이후 항목이 없다.`,
-      "- 이 경우 로컬 보도 데이터를 기사 소재 후보로 쓰지 말고 World Memory와 외부 리서치로 소재를 고른다.",
-    ].join("\n");
-  }
-
-  const candidates = limit > 0 ? eligibleCandidates.slice(0, limit) : eligibleCandidates;
-
-  return [
-    `- policy=post-world-memory-update-only / worldMemoryLastSuccessfulAt=${cutoff.iso} / availableAfterCutoff=${eligibleCandidates.length} / included=${candidates.length}`,
-    limit > 0
-      ? `- 아래 목록은 기준 업데이트 이후 보도 중 최신 ${candidates.length}개 후보이며, 더 오래된 후보가 필요하면 data/news-feed.json에서 직접 확인한다.`
-      : "- 아래 목록은 기준 업데이트 이후 확인된 전체 보도 후보다.",
-    ...candidates.map(({ item, itemTime }) => {
-      const title = compactPromptText(item.translatedTitle || item.translatedText || item.title || item.originalText, 220);
-      const original = compactPromptText(item.originalText && item.originalText !== title ? item.originalText : "", 160);
-      return [
-        `- ${item.id || item.sourceFingerprint || "collected-news-item"}`,
-        `time=${itemTime.iso}`,
-        `timeField=${itemTime.field}`,
-        `source=${item.feedTitle || item.feedId || ""}`,
-        `title=${title}`,
-        original ? `original=${original}` : "",
-      ]
-        .filter(Boolean)
-        .join(" / ");
-    }),
-  ].join("\n");
 }
 
 function worldMemoryCurrentSignalSummary(limit = 8) {
@@ -339,11 +256,6 @@ function identityList(values = []) {
   return Array.from(new Set(values.map(cleanIdentityText).filter(Boolean)));
 }
 
-function metadataNewsFeedIds(metadata = {}) {
-  const items = Array.isArray(metadata.newsFeed?.items) ? metadata.newsFeed.items : [];
-  return identityList(items.map((item) => item?.id || item?.sourceFingerprint));
-}
-
 function metadataWorldMemoryEventIds(metadata = {}) {
   const hits = Array.isArray(metadata.worldMemory?.vectorSearch?.hits) ? metadata.worldMemory.vectorSearch.hits : [];
   return identityList(
@@ -372,7 +284,6 @@ function recentArticleWindowSummary(limit = 5) {
       const uploadedAt = timestamp ? new Date(timestamp).toISOString() : "";
       const publishedAt = metadata.publishedAt || "";
       const topics = Array.isArray(metadata.topics) ? metadata.topics.join(", ") : metadata.topic || "";
-      const newsFeedIds = metadataNewsFeedIds(metadata).slice(0, 6).join(", ");
       const worldMemoryEventIds = metadataWorldMemoryEventIds(metadata).slice(0, 6).join(", ");
       return [
         `- ${articleId}`,
@@ -382,7 +293,6 @@ function recentArticleWindowSummary(limit = 5) {
         topics ? `topics=${topics}` : "",
         metadata.storyFamily ? `storyFamily=${metadata.storyFamily}` : "",
         metadata.editorialAngle ? `editorialAngle=${metadata.editorialAngle}` : "",
-        newsFeedIds ? `newsFeedIds=${newsFeedIds}` : "",
         worldMemoryEventIds ? `worldMemoryEventIds=${worldMemoryEventIds}` : "",
         metadata.isCoverStory ? "isCoverStory=true" : "isCoverStory=false",
       ]
@@ -1199,17 +1109,19 @@ async function collectEditorialReviewDecisions({ provider, codex, approval, sand
   return { decisions, sessionId: reviewerSessionId };
 }
 
-function buildHeroImageWorkerPrompt({ articleId, articleDir, metadata, bodyText, diagnostic = "" }) {
+export function buildHeroImageWorkerPrompt({ articleId, articleDir, metadata, bodyText, diagnostic = "" }) {
   return [
     "너는 FinanceAgentGUI Magazine v2의 히어로 이미지 소싱 전담 worker다.",
     "기사 본문과 metadata.json은 절대 수정하지 않는다.",
     "무료/오픈 이미지, 공식 이미지, 개인 열람용 공개 보도사진 순으로 후보를 검토한다.",
     "검색은 최대 2회로 제한한다. 실제 관련성이 있는 후보를 찾으면 즉시 원본 이미지 확보와 검증으로 넘어간다.",
+    "Chrome, BrowserMCP, 브라우저 확장, GUI 브라우저 자동화는 사용하지 않는다. 이 worker는 사용자 브라우저 설정과 분리되어 실행된다.",
+    "검색과 소스 확인은 HTTP 검색/API, 원출처 URL, curl 같은 비대화형 네트워크 요청만 사용한다. 사용자 브라우저 탭을 열거나 재사용하지 않는다.",
     "jpg, jpeg, png, webp만 허용한다. SVG, AVIF, 생성 이미지, placeholder, HTML 응답을 이미지 확장자로 저장한 파일은 금지한다.",
     "다운로드 뒤 file, byte size, 이미지 치수를 확인한다. 최소 10KiB, 320x180 이상이어야 한다.",
     "credit, http(s) sourceUrl 또는 pageUrl, license/rights/usagePolicy/usageNote 중 하나를 실제 근거대로 기록한다. 추측하지 않는다.",
     "개인 열람용 보도사진이면 usageNote에 editorial-private-use; local personal reading only와 원출처를 남긴다.",
-    "hero-image.json 형식은 {\"heroImage\":{\"src\":\"assets/file.jpg\",\"alt\":\"...\",\"credit\":\"...\",\"sourceUrl\":\"https://...\",\"license\":\"...\"},\"selection\":{\"query\":\"...\",\"rationale\":\"...\"}} 이다.",
+    "hero-image.json 형식은 {\"heroImage\":{\"src\":\"assets/file.jpg\",\"alt\":\"...\",\"credit\":\"...\",\"sourceUrl\":\"https://...\",\"license\":\"...\"},\"selection\":{\"query\":\"...\",\"rationale\":\"...\"},\"browserCleanup\":{\"used\":false,\"openedTabCount\":0,\"closedTabCount\":0,\"remainingOwnedTabCount\":0}} 이다.",
     "성공하지 못하면 빈 파일이나 가짜 메타데이터를 만들지 말고 오류를 최종 답변에 보고한다.",
     `작업 대상 article-id는 ${articleId}이고 고정 기사 디렉터리는 ${articleDir} 이다.`,
     `이미지 파일은 ${join(articleDir, "assets")} 아래에만 저장한다.`,
@@ -1232,7 +1144,7 @@ function buildHeroImageWorkerPrompt({ articleId, articleDir, metadata, bodyText,
   ].filter(Boolean).join("\n");
 }
 
-function validateHeroImagePatch(articleDir, patch) {
+export function validateHeroImagePatch(articleDir, patch) {
   const heroImage = patch?.heroImage && typeof patch.heroImage === "object" && !Array.isArray(patch.heroImage)
     ? patch.heroImage
     : null;
@@ -1252,6 +1164,34 @@ function validateHeroImagePatch(articleDir, patch) {
   if (!/^https?:\/\//i.test(sourceUrl)) return "heroImage.sourceUrl or pageUrl must be http(s)";
   if (!String(heroImage.license || heroImage.rights || heroImage.usagePolicy || heroImage.usageNote || "").trim()) {
     return "heroImage rights or usage metadata is required";
+  }
+  const browserCleanup = patch?.browserCleanup && typeof patch.browserCleanup === "object" && !Array.isArray(patch.browserCleanup)
+    ? patch.browserCleanup
+    : null;
+  if (!browserCleanup || typeof browserCleanup.used !== "boolean") {
+    return "browserCleanup with boolean used is required";
+  }
+  const openedTabCount = Number(browserCleanup.openedTabCount);
+  const closedTabCount = Number(browserCleanup.closedTabCount);
+  const remainingOwnedTabCount = Number(browserCleanup.remainingOwnedTabCount);
+  if (
+    !Number.isInteger(openedTabCount) ||
+    !Number.isInteger(closedTabCount) ||
+    !Number.isInteger(remainingOwnedTabCount) ||
+    openedTabCount < 0 ||
+    closedTabCount < 0 ||
+    remainingOwnedTabCount < 0
+  ) {
+    return "browserCleanup tab counts must be non-negative integers";
+  }
+  if (browserCleanup.used && openedTabCount < 1) {
+    return "browserCleanup.used requires at least one worker-opened tab";
+  }
+  if (!browserCleanup.used && (openedTabCount || closedTabCount || remainingOwnedTabCount)) {
+    return "browserCleanup counts must be zero when no browser was used";
+  }
+  if (closedTabCount !== openedTabCount || remainingOwnedTabCount !== 0) {
+    return "hero image worker must close every worker-opened browser tab";
   }
   return "";
 }
@@ -1293,6 +1233,7 @@ async function collectHeroImagePatches({ provider, codex, approval, sandbox, mod
         prompt: buildHeroImageWorkerPrompt({ articleId, articleDir, metadata, bodyText, diagnostic }),
         timeoutMs,
         tempDir,
+        isolateInteractiveBrowser: true,
       });
       patch = readJsonFile(sidecarPath);
       diagnostic = validateHeroImagePatch(articleDir, patch);
@@ -1394,20 +1335,27 @@ export function normalizeLockedTopic(source = {}) {
   const topic = source && typeof source === "object" && !Array.isArray(source) ? source : {};
   const title = compactPromptText(topic.title || topic.angle || "", 220);
   if (!title) return null;
-  const newsFeedCutoffTimestamp = parseTimestamp(
-    topic.newsFeedCutoff || topic.worldMemoryLastSuccessfulAt || "",
+  const worldMemoryEventIds = identityList(
+    Array.isArray(topic.worldMemoryEventIds)
+      ? topic.worldMemoryEventIds
+      : topic.eventIds || topic.sourceIds || [],
   );
+  const worldMemoryEvidence = Array.isArray(topic.worldMemoryEvidence)
+    ? topic.worldMemoryEvidence.filter((entry) => entry && typeof entry === "object")
+    : [];
   return {
     title,
     reason: compactPromptText(topic.reason || topic.rationale || "", 500),
     storyFamily: compactPromptText(topic.storyFamily || "", 160),
     editorialAngle: compactPromptText(topic.editorialAngle || "", 120),
     primaryEvent: compactPromptText(topic.primaryEvent || topic.event || "", 300),
-    newsFeedIds: identityList(Array.isArray(topic.newsFeedIds) ? topic.newsFeedIds : topic.sourceIds || []),
+    worldMemoryEventIds,
+    worldMemoryEvidence,
+    worldMemoryQuery: compactPromptText(
+      topic.worldMemoryQuery || topic.researchQueries?.[0] || topic.editorialAngle || title,
+      300,
+    ),
     researchQueries: identityList(Array.isArray(topic.researchQueries) ? topic.researchQueries : []).slice(0, 5),
-    ...(newsFeedCutoffTimestamp
-      ? { newsFeedCutoff: new Date(newsFeedCutoffTimestamp).toISOString() }
-      : {}),
   };
 }
 
@@ -1421,28 +1369,18 @@ function lockedTopicFromEnvironment() {
   }
 }
 
-function selectedNewsFeedEvidenceSummary(newsFeedIds = [], newsFeedCutoff = "") {
-  const ids = new Set(identityList(newsFeedIds));
-  if (!ids.size) return "- 확정 소재에 고정된 로컬 보도 id가 없다. 필요한 근거는 공식/외부 출처로 조사한다.";
-  const frozenCutoffTimestamp = parseTimestamp(newsFeedCutoff);
-  const cutoff = frozenCutoffTimestamp
-    ? { iso: new Date(frozenCutoffTimestamp).toISOString(), timestamp: frozenCutoffTimestamp }
-    : worldMemoryLastSuccessfulAt();
-  const store = readJsonFile(NEWS_FEED_STORE_PATH);
-  const items = Array.isArray(store?.items) ? store.items : [];
-  const selected = items.filter((item) => ids.has(String(item.id || item.sourceFingerprint || "")));
-  const invalid = selected.filter((item) => newsFeedItemTimestamp(item).timestamp <= cutoff.timestamp);
-  if (invalid.length) throw new Error(`locked topic contains ineligible local evidence id(s): ${invalid.map((item) => item.id).join(", ")}`);
-  const foundIds = new Set(selected.map((item) => String(item.id || item.sourceFingerprint || "")));
-  const missing = [...ids].filter((id) => !foundIds.has(id));
-  if (missing.length) throw new Error(`locked topic contains unknown local evidence id(s): ${missing.join(", ")}`);
-  return [
-    `- worldMemoryLastSuccessfulAt=${cutoff.iso}`,
-    ...selected.map((item) => {
-      const itemTime = newsFeedItemTimestamp(item);
-      return `- ${item.id} / time=${itemTime.iso} / source=${item.feedTitle || item.feedId || ""} / title=${compactPromptText(item.translatedTitle || item.translatedText || item.title || item.originalText, 260)}`;
-    }),
-  ].join("\n");
+function selectedWorldMemoryEvidenceSummary(topic = {}) {
+  const normalized = normalizeLockedTopic(topic);
+  if (!normalized?.worldMemoryEventIds.length) {
+    throw new Error("locked topic contains no World Memory event ids");
+  }
+  const provided = normalized.worldMemoryEvidence;
+  const providedIds = new Set(provided.map((row) => cleanIdentityText(row.eventId || row.event_id || row.id)));
+  const missingIds = normalized.worldMemoryEventIds.filter((id) => !providedIds.has(id));
+  const fallbackRows = missingIds.length
+    ? selectWorldMemoryEvidence(loadWorldMemoryCandidateRows({ days: 365, limit: 1_000 }), missingIds)
+    : [];
+  return JSON.stringify([...provided, ...fallbackRows], null, 2);
 }
 
 function buildV2TopicPreflightPrompt() {
@@ -1454,7 +1392,8 @@ function buildV2TopicPreflightPrompt() {
     "config/magazine-longform-editorial-standard.prompt.md 수준의 장문 논증을 지탱할 소재만 고른다. 단일 속보를 반복 설명하는 것 외에 역사·인센티브·반론·구체적 결과로 확장할 근거가 없으면 skip한다.",
     "researchQueries는 같은 헤드라인을 다시 찾는 질의가 아니라 원문/공식자료, 규모를 보여줄 데이터, 역사적 비교, 가장 강한 반론, 영향을 받는 사람·기업·기관의 구체적 결과를 조사하는 서로 다른 질의로 구성한다.",
     "최근 기사와 같은 사건이면 제외한다. 공통 기준 URL만 같고 primary event가 다르면 중복으로 보지 않는다.",
-    "status는 selected 또는 skip이다. selected라면 실제 후보에 존재하는 newsFeedIds만 반환한다.",
+    "status는 selected 또는 skip이다. selected라면 실제 후보에 존재하는 worldMemoryEventIds만 반환한다.",
+    "속보 피드나 외부 검색 결과를 새 기사 각도 후보로 사용하지 않는다.",
     "반드시 JSON 객체 하나만 출력한다.",
     JSON.stringify({
       status: "selected | skip",
@@ -1463,13 +1402,14 @@ function buildV2TopicPreflightPrompt() {
       storyFamily: "예상 storyFamily",
       editorialAngle: "예상 editorialAngle",
       primaryEvent: "primary event 한 문장",
-      newsFeedIds: ["nf_..."],
+      worldMemoryEventIds: ["World Memory eventId"],
+      worldMemoryQuery: "후속 semantic-search 질의",
       researchQueries: ["공식·외부 리서치 질의"],
     }, null, 2),
     extraPrompt ? `\n[상위 스케줄러/사용자 후보 지시]\n${extraPrompt}` : "",
     "",
-    "[eligible local candidates]",
-    postWorldMemoryNewsFeedSummary({ limit: 24 }),
+    "[World Memory angle candidates]",
+    worldMemoryAngleCandidateSummary(36),
     "",
     "[current market signals]",
     worldMemoryCurrentSignalSummary(8),
@@ -1480,7 +1420,6 @@ function buildV2TopicPreflightPrompt() {
 }
 
 async function selectV2LockedTopic({ provider, codex, approval, model, speed, timeoutMs, tempDir, agentLabel }) {
-  const selectionCutoff = worldMemoryLastSuccessfulAt();
   const outputPath = join(tempDir, `${provider}-topic-preflight.json`);
   console.log("\nRunning Magazine v2 topic preflight...");
   await runAgentPrompt({
@@ -1502,10 +1441,9 @@ async function selectV2LockedTopic({ provider, codex, approval, model, speed, ti
   }
   const lockedTopic = normalizeLockedTopic({
     ...decision,
-    newsFeedCutoff: selectionCutoff.iso,
   });
   if (!lockedTopic) throw new Error(`${agentLabel} v2 topic preflight returned no usable title`);
-  selectedNewsFeedEvidenceSummary(lockedTopic.newsFeedIds, lockedTopic.newsFeedCutoff);
+  selectedWorldMemoryEvidenceSummary(lockedTopic);
   return lockedTopic;
 }
 
@@ -1514,10 +1452,7 @@ export function buildV2Prompt({ count, replace, articleDirectory, staged, agentL
   const recentArticles = recentArticleWindowSummary(8);
   const normalizedLockedTopic = normalizeLockedTopic(lockedTopic);
   if (!normalizedLockedTopic) throw new Error("Magazine v2 writer requires a locked topic from preflight");
-  const newsFeedCandidates = selectedNewsFeedEvidenceSummary(
-    normalizedLockedTopic.newsFeedIds,
-    normalizedLockedTopic.newsFeedCutoff,
-  );
+  const worldMemoryEvidence = selectedWorldMemoryEvidenceSummary(normalizedLockedTopic);
   const worldMemorySignals = worldMemoryCurrentSignalSummary(8);
   return [
     `너는 FinanceAgentGUI 배포본 안에서 실행되는 ${agentLabel} 금융 매거진 기자 겸 편집자다.`,
@@ -1557,7 +1492,7 @@ export function buildV2Prompt({ count, replace, articleDirectory, staged, agentL
     "- 결말은 남은 긴장, 조건, 시나리오, 앞으로 나올 증거를 설명할 수 있다. 독자에게 일반적인 숙제 목록을 주지는 않는다.",
     "- 최근 기사와 공통 통계·IR·공식 페이지 URL을 참고했다는 이유만으로 중복이라 보지 않는다. primary event와 독립 델타를 기준으로 판단한다.",
     "- metadata.eventSignature에는 primary event claimlet 하나를 저장하고, noveltyNote에는 최근 기사 이후 새로 생긴 근거와 달라진 메커니즘을 명시한다.",
-    "- 로컬 보도 항목을 썼다면 아래 eligibility boundary 이후 item만 쓰고 metadata.newsFeed에 실제 id와 시각을 남긴다.",
+    "- 새 기사 각도는 확정 소재의 World Memory eventId에서만 유지한다. 웹 검색은 원출처 확인과 근거 보강에만 쓰고 다른 주제로 갈아타지 않는다.",
     "- 독자-facing 문장에는 World Memory, 월드 메모리, News Feed, 뉴스 피드, 로컬 저장소, cutoff, semantic-search, vector search, 하네스 같은 내부 생산 용어를 노출하지 않는다. 실제 출처와 사건명으로 쓴다.",
     "- 내부 저장소와 검색 결과는 매체가 아니다. 저장 항목을 실제 출판사·기관·문서·데이터셋·공시·책·논문·발언자로 환원해 확인하고 그 원출처만 귀속한다. 원출처를 확인할 수 없으면 저장소를 출처처럼 인용하지 말고 해당 사실을 본문에서 제외한다.",
     "- writer는 이미지 검색이나 다운로드를 하지 않는다. 대신 metadata.heroImageRequest에 subject, query, preferredSourceType, rationale를 짧게 남긴다. 별도 image worker가 본문 작성과 분리되어 실제 이미지를 확보한다.",
@@ -1581,7 +1516,7 @@ export function buildV2Prompt({ count, replace, articleDirectory, staged, agentL
     JSON.stringify(normalizedLockedTopic, null, 2),
     "",
     "참고 근거 묶음:",
-    newsFeedCandidates,
+    worldMemoryEvidence,
     "",
     worldMemorySignals,
     "",
@@ -1597,7 +1532,7 @@ export function buildV2Prompt({ count, replace, articleDirectory, staged, agentL
 function buildLegacyPrompt({ count, replace, articleDirectory, staged, agentLabel = "Codex CLI" }) {
   const extraPrompt = String(process.env.MAGAZINE_EXTRA_PROMPT || process.env.MAGAZINE_CODEX_EXTRA_PROMPT || "").trim();
   const recentArticles = recentArticleWindowSummary(12);
-  const newsFeedCandidates = postWorldMemoryNewsFeedSummary();
+  const worldMemoryAngleCandidates = worldMemoryAngleCandidateSummary(36);
   const worldMemorySignals = worldMemoryCurrentSignalSummary(8);
   const existingArticleCount = replace ? 0 : articleCountIn(ARTICLES_DIR);
   const firstGeneratedTotalCount = existingArticleCount + 1;
@@ -1626,18 +1561,15 @@ function buildLegacyPrompt({ count, replace, articleDirectory, staged, agentLabe
     "- 아래 '참고 근거 묶음'은 기사 소재와 커버스토리 판단에 사용할 고정 입력이다. 없는 중요/최신 이슈를 지어내지 않는다.",
     "- 소재를 고르기 전에 참고 근거 묶음을 먼저 검토한다.",
     "- 내부 근거의 저장 위치나 검색 경로를 기사 문장 안에서 구분하지 않는다. 독자에게는 출처 계층이 아니라 사건, 수치, 발언, 가격 반응, 공식/외부 출처만 보이게 쓴다.",
-    "- 보도 후보는 data/world-memory/collector-state.json의 collector.lastSuccessfulAt 이후 항목만 사용할 수 있다. 그 이전 항목은 기사 소재로 쓰지 않는다.",
-    "- 최근 확인된 보도 중 속보성, 시장 충격, 정책/기업/거시 메커니즘이 강한 항목이 있으면 그쪽을 기사 주제로 삼을 수 있다. 이 판단은 LLM 편집 판단으로 하며 키워드 매칭 규칙을 만들지 않는다.",
-    "- 최근 보도를 주근거로 쓰는 경우에도 연속성 검색을 실행한다. 내부 근거가 약하면 외부 리서치로 보강한다.",
-    "- 감사용 메타데이터에는 metadata.newsFeed={\"selectionPolicy\":\"post-world-memory-update-only\",\"worldMemoryLastSuccessfulAt\":\"ISO timestamp\",\"items\":[{\"id\":\"...\",\"feedId\":\"...\",\"feedTitle\":\"...\",\"title\":\"...\",\"publishedAt\":\"...\",\"fetchedAt\":\"...\",\"translatedAt\":\"...\"}]}를 저장한다. 단, 이 필드명과 레이어 구분을 deck, summary, article.html, noveltyNote, coverDecision.rationale, sourceBasis prose에 쓰지 않는다.",
-    "- 같은 metadata.newsFeed.items[].id를 이미 최근 업로드 기사가 사용했다면 같은 뉴스다. 제목·표현·storyFamily를 바꿔도 새 기사로 쓰지 않는다.",
-    "- metadata.eventSignature를 반드시 저장한다. 형식: {\"role\":\"primary\",\"actor\":\"주체\",\"action\":\"무엇을 했다\",\"object\":[\"대상/수치\"],\"time\":\"대표 발생/보도 시각\",\"marketMechanism\":\"시장에 작동하는 메커니즘\",\"sourceIds\":[\"nf_...\"]}. 이것은 기사 전체 요약이 아니라 사건 claimlet이다.",
+    "- 새 기사 각도는 아래 World Memory 후보에서만 고른다. 속보 피드나 외부 검색 결과를 새 주제 후보로 사용하지 않는다.",
+    "- 외부 리서치는 선택된 각도의 원출처 확인과 근거 보강에만 사용한다.",
+    "- metadata.eventSignature를 반드시 저장한다. 형식: {\"role\":\"primary\",\"actor\":\"주체\",\"action\":\"무엇을 했다\",\"object\":[\"대상/수치\"],\"time\":\"대표 발생/보도 시각\",\"marketMechanism\":\"시장에 작동하는 메커니즘\",\"sourceIds\":[\"World Memory eventId\"]}. 이것은 기사 전체 요약이 아니라 사건 claimlet이다.",
     "- 복수 사건을 엮는 기사라면 metadata.eventSignatures[]를 사용할 수 있다. 단, role='primary' 카드는 정확히 하나여야 하고, supporting 카드는 배경·비교·연쇄 효과만 담는다.",
     "- 직접 연속성 검색을 실행한다: python3 scripts/world_memory_cli.py semantic-search \"질의\" --limit 8 --format json",
-    "- 검색 결과가 강하면 감사용 metadata.worldMemory.retrievalPolicy='mandatory-vector-search'와 query, engine, model, hits를 저장한다.",
+    "- 감사용 metadata.worldMemory.retrievalPolicy='mandatory-vector-search'와 query, engine, model, 실제 hits를 저장한다.",
     "- 검색 결과가 약하거나 주제 밖이면 스킵하지 말고 external-first/external-research로 보강한다.",
     "- 최근 업로드 기사와 primary worldMemory eventId가 같다는 사실만으로 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
-    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 보도 id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했음을 metadata.noveltyNote와 metadata.eventSignature에 명시하고 그 근거를 metadata.newsFeed.items 또는 sourceBasis/worldMemory.hits에 남긴다.",
+    "- 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다. 새 World Memory 사건/상태, 새 공식·외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했음을 metadata.noveltyNote와 metadata.eventSignature에 명시하고 그 근거를 sourceBasis와 worldMemory.hits에 남긴다.",
     "- 최근 기사와 같은 이슈처럼 보이면 내부적으로 LLM novelty judge를 수행한다: same_event이면 쓰지 않고, independent_followup이면 새 근거 앵커와 달라진 메커니즘을 metadata에 남기며, unrelated이면 별도 기사로 둔다. 사진, 제목, storyFamily 변경만으로 independent_followup이라고 판단하지 않는다.",
     "- 최근 업로드 기사와 storyFamily 및 editorialAngle이 모두 같으면 중복 위험이 높다. follow-up이라도 noveltyNote에 무엇이 새로 생겼는지 명시할 수 없으면 생성하지 않는다.",
     "- metadata.topics는 config/magazine-topics.json의 topics[].label 중 1~3개만 사용한다. 1개 주 토픽은 반드시 고르고, 보조 토픽은 정말 강할 때만 최대 2개까지 붙인다. 3개는 목표가 아니라 상한이다.",
@@ -1677,7 +1609,7 @@ function buildLegacyPrompt({ count, replace, articleDirectory, staged, agentLabe
       : "- 이미 같은 issue 안에 생성된 기사와 storyFamily, editorialAngle, 제목 구도가 겹치지 않게 한다.",
     "",
     "참고 근거 묶음:",
-    newsFeedCandidates,
+    worldMemoryAngleCandidates,
     "",
     worldMemorySignals,
     "",
@@ -1732,7 +1664,7 @@ function buildV2RepairPrompt({ count, checkOutput, articleDirectory, staged, age
 
 function buildLegacyRepairPrompt({ count, checkOutput, articleDirectory, staged, agentLabel = "Codex CLI" }) {
   const recentArticles = recentArticleWindowSummary(12);
-  const newsFeedCandidates = postWorldMemoryNewsFeedSummary();
+  const worldMemoryAngleCandidates = worldMemoryAngleCandidateSummary(36);
   const worldMemorySignals = worldMemoryCurrentSignalSummary(8);
   return [
     `너는 FinanceAgentGUI 배포본 안에서 실행되는 ${agentLabel} 기사 보강 작업자다.`,
@@ -1784,7 +1716,7 @@ function buildLegacyRepairPrompt({ count, checkOutput, articleDirectory, staged,
     "- 생성 뒤 node scripts/magazine_article_style_check.mjs --strict 를 실행하고 warning 0개가 될 때까지 수정한다.",
     "",
     "참고 근거 묶음:",
-    newsFeedCandidates,
+    worldMemoryAngleCandidates,
     "",
     worldMemorySignals,
     "",
@@ -1888,11 +1820,23 @@ async function runEventSignatureEmbeddingCheck({ articleDirectory, staged, exist
   });
 }
 
-export function buildCodexArgs({ approval, sandbox, model, reasoning, speed = "standard", outputPath, prompt, persistSession = false, jsonEvents = false }) {
+export function buildCodexArgs({
+  approval,
+  sandbox,
+  model,
+  reasoning,
+  speed = "standard",
+  outputPath,
+  prompt,
+  persistSession = false,
+  jsonEvents = false,
+  isolateInteractiveBrowser = false,
+}) {
   return [
     "--ask-for-approval",
     approval,
     "exec",
+    ...(isolateInteractiveBrowser ? ["--ignore-user-config", "--ignore-rules"] : []),
     "--skip-git-repo-check",
     ...(persistSession ? [] : ["--ephemeral"]),
     "-C",
@@ -1903,6 +1847,18 @@ export function buildCodexArgs({ approval, sandbox, model, reasoning, speed = "s
     model,
     "-c",
     `model_reasoning_effort="${reasoning}"`,
+    ...(isolateInteractiveBrowser
+      ? [
+          "-c",
+          "features.browser_use=false",
+          "-c",
+          "features.browser_use_external=false",
+          "-c",
+          "features.browser_use_full_cdp_access=false",
+          "-c",
+          "features.in_app_browser=false",
+        ]
+      : []),
     ...codexServiceTierArgs(speed),
     ...(jsonEvents ? ["--json"] : []),
     "-o",
@@ -1971,11 +1927,35 @@ export function extractCodexTokenUsage({ stdout = "" } = {}) {
   return usage;
 }
 
-async function runCodexPrompt({ codex, approval, sandbox, model, reasoning, speed, outputPath, prompt, timeoutMs, persistSession = false, resumeSessionId = "" }) {
+async function runCodexPrompt({
+  codex,
+  approval,
+  sandbox,
+  model,
+  reasoning,
+  speed,
+  outputPath,
+  prompt,
+  timeoutMs,
+  persistSession = false,
+  resumeSessionId = "",
+  isolateInteractiveBrowser = false,
+}) {
   const jsonEvents = true;
   const args = resumeSessionId
     ? buildCodexResumeArgs({ sessionId: resumeSessionId, model, reasoning, speed, outputPath, prompt, jsonEvents })
-    : buildCodexArgs({ approval, sandbox, model, reasoning, speed, outputPath, prompt, persistSession, jsonEvents });
+    : buildCodexArgs({
+        approval,
+        sandbox,
+        model,
+        reasoning,
+        speed,
+        outputPath,
+        prompt,
+        persistSession,
+        jsonEvents,
+        isolateInteractiveBrowser,
+      });
   const commandResult = await runCommand(codex, args, {
     cwd: GUIBUILD_ROOT,
     timeoutMs,
@@ -2567,33 +2547,18 @@ function writeSimpleDraftPackage({
   const articleId = availableSimpleArticleId(article.articleId, stagingArticlesDir);
   const articleDir = join(stagingArticlesDir, articleId);
   mkdirSync(articleDir, { recursive: true });
-  const frozenCutoffTimestamp = parseTimestamp(lockedTopic.newsFeedCutoff);
-  const cutoff = frozenCutoffTimestamp
-    ? { iso: new Date(frozenCutoffTimestamp).toISOString(), timestamp: frozenCutoffTimestamp }
-    : worldMemoryLastSuccessfulAt();
   const metadata = {
     title: article.title,
     deck: article.deck,
     summary: article.summary,
     topics: article.topics,
     articleType: article.articleType,
-    researchMode: "news-feed-first",
+    researchMode: "world-memory-first",
     storyFamily: article.storyFamily,
     editorialAngle: article.editorialAngle,
     noveltyNote: lockedTopic.reason || lockedTopic.primaryEvent || article.summary,
     eventSignature: article.eventSignature,
-    newsFeed: {
-      selectionPolicy: "post-world-memory-update-only",
-      worldMemoryLastSuccessfulAt: cutoff.iso,
-      items: draft.evidence.map((item) => ({
-        id: item.id,
-        feedTitle: item.source,
-        title: item.headline,
-        publishedAt: item.publishedAt,
-        sourceUrl: item.url,
-      })),
-    },
-    worldMemory: null,
+    worldMemory: draft.worldMemory,
     sourceBasis: article.sourceBasis,
     chartBlocks: [],
     followupOptions: [],
@@ -2662,6 +2627,8 @@ async function runSimpleProductionPipeline({
   let discoveryTelemetry = null;
   if (!lockedTopic) {
     const discovery = await discoverSimpleTopicFromAllCandidates({
+      provider,
+      approval,
       model,
       reasoning,
       speed,
@@ -2674,25 +2641,23 @@ async function runSimpleProductionPipeline({
       storyFamily: discovery.topic.storyFamily,
       editorialAngle: discovery.topic.editorialAngle,
       primaryEvent: discovery.topic.eventSignature?.action,
-      newsFeedIds: discovery.topic.newsFeedIds,
+      worldMemoryEventIds: discovery.topic.worldMemoryEventIds,
+      worldMemoryEvidence: discovery.topic.worldMemoryEvidence,
+      worldMemoryQuery: discovery.topic.worldMemoryQuery,
       researchQueries: [],
-      newsFeedCutoff: discovery.cutoff,
     });
     discoveryTelemetry = {
       ...discoveryTelemetry,
       excludedRecentIdentityCount: discovery.excludedRecentIdentityCount,
     };
-  } else if (!lockedTopic.newsFeedCutoff) {
-    lockedTopic = normalizeLockedTopic({
-      ...lockedTopic,
-      newsFeedCutoff: worldMemoryLastSuccessfulAt().iso,
-    });
   }
   if (!lockedTopic) throw new Error("simple Magazine production pipeline could not lock a topic");
-  selectedNewsFeedEvidenceSummary(lockedTopic.newsFeedIds, lockedTopic.newsFeedCutoff);
+  selectedWorldMemoryEvidenceSummary(lockedTopic);
 
   const writerPromise = generateSimpleDraftFromLockedTopic({
     topic: lockedTopic,
+    provider,
+    approval,
     model,
     reasoning,
     speed,
@@ -2991,14 +2956,13 @@ async function main() {
   const pipelineMode = cleanCliValue(
     argValue(
       "--pipeline",
-      process.env.MAGAZINE_PIPELINE || (antigravity ? "agentic" : "simple"),
+      process.env.MAGAZINE_PIPELINE || "simple",
     ),
-    antigravity ? "agentic" : "simple",
+    "simple",
     /^(?:simple|agentic)$/,
   );
   const simpleProductionPipeline =
     harnessProfile === DEFAULT_HARNESS_PROFILE &&
-    !antigravity &&
     pipelineMode === "simple";
   const sequential = !hasArg("--batch") && process.env.MAGAZINE_CODEX_BATCH !== "1";
   const codex = antigravity ? "" : findCodexCommand();

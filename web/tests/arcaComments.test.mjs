@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   arcaMediaProxyPath,
   buildArcaCommentFormData,
+  buildArcaWriteHeaders,
   extractArcaCommentsFromHtml,
+  findCreatedArcaComment,
   normalizeArcaCommentWrite,
   upstreamCommentError,
 } from "../server/arcaApi.mjs";
@@ -231,6 +233,43 @@ test("일반 아카콘 폼은 단일 ID 필드를 사용한다", () => {
   assert.equal(formData.get("emoticonId"), "10");
   assert.equal(formData.get("attachmentId"), "101");
   assert.equal(formData.has("combolist"), false);
+});
+
+test("댓글·게시글 쓰기 요청은 공식 브라우저의 same-origin XHR 헤더를 사용한다", () => {
+  const headers = buildArcaWriteHeaders({
+    referer: "https://arca.live/b/stock/123",
+    baseUrl: "https://arca.live",
+  });
+
+  assert.equal(headers.origin, "https://arca.live");
+  assert.equal(headers.referer, "https://arca.live/b/stock/123");
+  assert.equal(headers["x-requested-with"], "XMLHttpRequest");
+  assert.equal(headers.accept, "application/json, text/javascript, */*; q=0.01");
+  assert.equal(headers["content-type"], "application/x-www-form-urlencoded;charset=UTF-8");
+});
+
+test("400 응답이어도 작성 전후 비교에서 현재 사용자의 새 댓글이 확인되면 반영으로 판정한다", () => {
+  const before = {
+    commenting: { currentUser: "조선닌자핫토리" },
+    comments: [{ id: "100", parentId: null, author: "다른 사용자", text: "기존 댓글", emoticons: [] }],
+  };
+  const after = {
+    comments: [
+      ...before.comments,
+      { id: "101", parentId: null, author: "조선닌자핫토리", text: "새 댓글", emoticons: [] },
+      { id: "102", parentId: null, author: "다른 사용자", text: "새 댓글", emoticons: [] },
+    ],
+  };
+
+  assert.equal(
+    findCreatedArcaComment(before, after, {
+      contentType: "text",
+      content: "새 댓글",
+      parentId: null,
+      emoticons: [],
+    })?.id,
+    "101"
+  );
 });
 
 test("HTML 오류 응답의 페이지 스크립트를 사용자 오류로 노출하지 않는다", () => {

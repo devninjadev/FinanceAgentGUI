@@ -1,4 +1,4 @@
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -6,7 +6,7 @@ import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getCodexOptions, runCodexChat, sendJson } from "./codexProbe.mjs";
 import { spawnObservedLlm, waitForLlmObservation } from "./llmProcessObserver.mjs";
-import { runIsolatedCodexJsonPrompt } from "../../scripts/magazine_generate_simple.mjs";
+import { runIsolatedMagazineJsonPrompt } from "../../scripts/magazine_generate_simple.mjs";
 import {
   isMagazineEnabled,
   publicMagazineSettingsSnapshot,
@@ -31,7 +31,6 @@ const MAGAZINE_ARTICLE_COUNT_SCHEMA_PATH = join(
   "magazine-article-count-decision.schema.json",
 );
 const MAGAZINE_CODEX_GENERATOR = join(GUIBUILD_ROOT, "scripts", "magazine_generate_with_codex.mjs");
-const NEWS_FEED_STORE_PATH = join(GUIBUILD_ROOT, "data", "news-feed.json");
 const WORLD_MEMORY_STATE_PATH = join(GUIBUILD_ROOT, "data", "world-memory", "collector-state.json");
 const AGENT_SETTINGS_DEFAULT_PATH = join(GUIBUILD_ROOT, "config", "agent-settings.defaults.json");
 const AGENT_SETTINGS_USER_PATH = join(GUIBUILD_ROOT, "config", "agent-settings.user.json");
@@ -70,7 +69,6 @@ const MAGAZINE_SCHEDULER_ENV_MAX_PER_CYCLE =
 const MAGAZINE_ARTICLE_TOPIC_LIMIT = 3;
 const MAGAZINE_SCHEDULER_MAX_MANUAL_DELAY_MS = 24 * 60 * 60 * 1000;
 const MAGAZINE_SCHEDULER_RUNTIME_KEY = Symbol.for("finance-agent-gui.magazineSchedulerRuntime");
-const MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY = 0.12;
 const MAGAZINE_WORLD_MEMORY_SCOUT_DAYS = 45;
 const MAGAZINE_WORLD_MEMORY_SCOUT_READ_LIMIT = 120;
 const MAGAZINE_WORLD_MEMORY_SCOUT_CANDIDATE_LIMIT = 36;
@@ -1689,39 +1687,20 @@ function activeMagazineGenerationLock() {
   return null;
 }
 
-function newsFeedItemTimestamp(item = {}) {
-  for (const field of ["sourcePublishedAt", "publishedAt", "fetchedAt", "translatedAt"]) {
-    const timestamp = parseTimestamp(item[field]);
-    if (timestamp) return { timestamp, field, iso: nowIso(new Date(timestamp)) };
-  }
-  return { timestamp: 0, field: "", iso: "" };
-}
-
 function normalizeMagazineTopicDiscoveryLane(value = {}) {
   const source = value && typeof value === "object" ? value : { id: value };
-  const id = cleanText(source.id || source.lane || "");
-  const isScout = id === "world-memory-scout";
   return {
-    id: isScout ? "world-memory-scout" : "news-feed-primary",
-    label: isScout ? "비주류 후보 발굴" : "기본 후보 발굴",
-    probability: isScout ? MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY : 1 - MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY,
-    randomRoll:
-      Number.isFinite(Number(source.randomRoll)) && Number(source.randomRoll) >= 0
-        ? Number(source.randomRoll)
-        : null,
-    policy: isScout
-      ? "true-random-12-percent-world-memory-under-radar-topic-discovery"
-      : "default-news-feed-primary-topic-discovery",
+    id: "world-memory-only",
+    label: "월드 메모리 기반 각도 발굴",
+    probability: 1,
+    randomRoll: null,
+    policy: "world-memory-only-topic-discovery",
+    migratedFrom: cleanText(source.id || source.lane || ""),
   };
 }
 
-export function chooseMagazineTopicDiscoveryLane(options = {}) {
-  const rawRoll = options.roll === undefined || options.roll === null ? randomInt(100) : Number(options.roll);
-  const roll = clampInteger(rawRoll, 0, 99, 99);
-  return normalizeMagazineTopicDiscoveryLane({
-    id: roll < MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY * 100 ? "world-memory-scout" : "news-feed-primary",
-    randomRoll: roll,
-  });
+export function chooseMagazineTopicDiscoveryLane() {
+  return normalizeMagazineTopicDiscoveryLane({ id: "world-memory-only" });
 }
 
 function hasMagazineTopicDiscoveryLane(value) {
@@ -1736,11 +1715,10 @@ export function buildMagazineTopicDiscoverySlots(targetCount = 0, options = {}) 
   const forcedLane = hasMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     ? normalizeMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     : null;
-  const rolls = Array.isArray(options.rolls) ? options.rolls : [];
   return Array.from({ length: count }, (_, index) => {
     const lane = forcedLane
       ? normalizeMagazineTopicDiscoveryLane(forcedLane)
-      : chooseMagazineTopicDiscoveryLane({ roll: rolls[index] });
+      : chooseMagazineTopicDiscoveryLane();
     return {
       index: index + 1,
       topicDiscoveryLane: lane,
@@ -1768,40 +1746,6 @@ function normalizeMagazineTopicDiscoverySlots(value = [], targetCount = 0, optio
     });
   }
   return slots;
-}
-
-function compactNewsFeedItemForDecision(item = {}) {
-  const time = newsFeedItemTimestamp(item);
-  return {
-    id: truncateSchedulerText(item.id || item.sourceFingerprint || "", 80),
-    source: truncateSchedulerText(item.feedTitle || item.feedId || "", 80),
-    sourceUrl: truncateSchedulerText(item.sourceUrl || item.url || "", 500),
-    title: truncateSchedulerText(item.translatedTitle || item.title || item.translatedText || item.originalText, 220),
-    original: truncateSchedulerText(
-      item.originalText && item.originalText !== item.translatedTitle ? item.originalText : "",
-      160
-    ),
-    time: time.iso,
-    timeField: time.field,
-  };
-}
-
-function compactArticleNewsFeedIds(metadata = {}) {
-  const items = Array.isArray(metadata.newsFeed?.items) ? metadata.newsFeed.items : [];
-  return Array.from(new Set(
-    items
-      .map((item) => truncateSchedulerText(item?.id || item?.sourceFingerprint || "", 80))
-      .filter(Boolean)
-  )).slice(0, 8);
-}
-
-function compactArticleNewsFeedUrls(metadata = {}) {
-  const items = Array.isArray(metadata.newsFeed?.items) ? metadata.newsFeed.items : [];
-  return Array.from(new Set(
-    items
-      .map((item) => truncateSchedulerText(item?.sourceUrl || item?.url || "", 500))
-      .filter(Boolean)
-  )).slice(0, 8);
 }
 
 function compactArticleWorldMemoryEventIds(metadata = {}) {
@@ -1866,8 +1810,6 @@ async function compactRecentArticlesForDecision(limit = 8) {
       storyFamily: truncateSchedulerText(metadata.storyFamily || "", 120),
       editorialAngle: truncateSchedulerText(metadata.editorialAngle || "", 140),
       noveltyNote: truncateSchedulerText(metadata.noveltyNote || "", 180),
-      newsFeedIds: compactArticleNewsFeedIds(metadata),
-      newsFeedUrls: compactArticleNewsFeedUrls(metadata),
       worldMemoryEventIds: compactArticleWorldMemoryEventIds(metadata),
       primaryWorldMemoryEventId: compactArticleWorldMemoryEventIds(metadata)[0] || "",
       timestamp,
@@ -1880,9 +1822,8 @@ async function compactRecentArticlesForDecision(limit = 8) {
 }
 
 async function buildMagazineArticleCountDecisionContext(options = {}) {
-  const [worldState, newsStore, preferenceStore, biasStore, recentArticleWindow] = await Promise.all([
+  const [worldState, preferenceStore, biasStore, recentArticleWindow] = await Promise.all([
     readJsonFile(WORLD_MEMORY_STATE_PATH),
-    readJsonFile(NEWS_FEED_STORE_PATH),
     readPreferenceStore(),
     readBiasStore(),
     compactRecentArticlesForDecision(12),
@@ -1891,32 +1832,7 @@ async function buildMagazineArticleCountDecisionContext(options = {}) {
   const topicDiscoveryLane = hasMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     ? normalizeMagazineTopicDiscoveryLane(options.topicDiscoveryLane)
     : null;
-  const perArticleSlotMode = Boolean(options.perArticleSlotMode || !topicDiscoveryLane);
-  const cutoffMs = parseTimestamp(worldState?.collector?.lastSuccessfulAt);
-  const newsItems = Array.isArray(newsStore?.items) ? newsStore.items : [];
-  const allPostCutoffNewsItems = compactPostCutoffNewsFeedItemsForDecision(newsItems, cutoffMs, {
-    excludedNewsFeedIds: recentArticleWindow.flatMap((article) => article.newsFeedIds || []),
-    excludedSourceUrls: recentArticleWindow.flatMap((article) => article.newsFeedUrls || []),
-  });
-  const unfilteredPostCutoffCount = compactPostCutoffNewsFeedItemsForDecision(newsItems, cutoffMs).length;
-  const shouldBuildScoutContext = perArticleSlotMode || topicDiscoveryLane?.id === "world-memory-scout";
-  const scoutContext =
-    shouldBuildScoutContext
-      ? await buildWorldMemoryScoutContextForDecision(recentArticles)
-      : {
-          policy: "world-memory-under-radar-scout-v1",
-          method: "structured-world-memory-candidates-plus-llm-editorial-selection",
-          days: MAGAZINE_WORLD_MEMORY_SCOUT_DAYS,
-          readLimit: MAGAZINE_WORLD_MEMORY_SCOUT_READ_LIMIT,
-          candidateLimit: MAGAZINE_WORLD_MEMORY_SCOUT_CANDIDATE_LIMIT,
-          sourceRowCount: 0,
-          candidateCount: 0,
-          candidates: [],
-          skippedReason: "topic discovery lane did not select scout mode",
-          error: "",
-        };
-  const newsFeedExcludedFromTopicDiscovery = topicDiscoveryLane?.id === "world-memory-scout";
-  const postCutoffNewsItems = newsFeedExcludedFromTopicDiscovery ? [] : allPostCutoffNewsItems;
+  const angleContext = await buildWorldMemoryScoutContextForDecision(recentArticles);
   const preferenceSnapshot = publicPreferenceSnapshot(preferenceStore);
   const biasSnapshot = publicBiasSnapshot(biasStore);
   const maxTargetCount = clampInteger(options.maxTargetCount, 0, 3, magazineSchedulerMaxPerCycle());
@@ -1926,35 +1842,20 @@ async function buildMagazineArticleCountDecisionContext(options = {}) {
     maxTargetCount,
     maxTargetPolicy: "user-configured-upper-bound-not-guaranteed-count",
     now: nowIso(),
-    topicDiscoveryPolicy: perArticleSlotMode
-      ? {
-          id: "per-article-slot-random",
-          label: "기사 슬롯별 후보 발굴",
-          scoutProbability: MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY,
-          policy: "roll-a-fresh-12-percent-under-radar-branch-for-each-article-slot-after-target-count",
-        }
-      : {
-          id: "fixed-lane",
-          label: "고정 후보 발굴",
-          policy: "use-the-server-selected-lane-for-this-topic-decision",
-        },
-    ...(topicDiscoveryLane ? { topicDiscoveryLane } : {}),
+    topicDiscoveryPolicy: {
+      id: "world-memory-only",
+      label: "월드 메모리 기반 각도 발굴",
+      policy: "all-new-article-angles-must-be-selected-from-world-memory-candidates",
+    },
+    topicDiscoveryLane: normalizeMagazineTopicDiscoveryLane(topicDiscoveryLane || "world-memory-only"),
     worldMemory: {
       ...compactWorldMemoryReportForDecision(worldState || {}),
-      scout: scoutContext,
-    },
-    newsFeed: {
-      storeUpdatedAt: truncateSchedulerText(newsStore?.updatedAt || "", 80),
-      totalCount: newsItems.length,
-      worldMemoryLastSuccessfulAt: truncateSchedulerText(worldState?.collector?.lastSuccessfulAt || "", 80),
-      postCutoffCount: postCutoffNewsItems.length,
-      postCutoffItems: postCutoffNewsItems,
-      eligiblePostCutoffCount: allPostCutoffNewsItems.length,
-      excludedRecentIdentityCount: Math.max(0, unfilteredPostCutoffCount - allPostCutoffNewsItems.length),
-      excludedFromTopicDiscovery: newsFeedExcludedFromTopicDiscovery,
-      cutoffPolicy: cutoffMs
-        ? "use only items after worldMemory.collector.lastSuccessfulAt"
-        : "world memory eligibility boundary missing; do not count local evidence items as fresh input",
+      angleDiscovery: {
+        ...angleContext,
+        policy: "world-memory-angle-discovery-v1",
+        method: "structured-world-memory-candidates-plus-llm-editorial-selection",
+      },
+      angleCandidates: angleContext.candidates,
     },
     recentArticles,
     editorialPreferences: {
@@ -2016,35 +1917,6 @@ export function reuseMagazineArticleCountDecision(cache = null, evidenceFingerpr
   };
 }
 
-function normalizedDecisionSourceUrl(value) {
-  return truncateSchedulerText(value || "", 500).replace(/#.*$/, "").replace(/\/$/, "");
-}
-
-export function compactPostCutoffNewsFeedItemsForDecision(newsItems = [], cutoffMs = 0, options = {}) {
-  if (!cutoffMs) return [];
-  const items = Array.isArray(newsItems) ? newsItems : [];
-  const excludedNewsFeedIds = new Set(
-    (Array.isArray(options.excludedNewsFeedIds) ? options.excludedNewsFeedIds : [])
-      .map((id) => truncateSchedulerText(id || "", 80))
-      .filter(Boolean)
-  );
-  const excludedSourceUrls = new Set(
-    (Array.isArray(options.excludedSourceUrls) ? options.excludedSourceUrls : [])
-      .map(normalizedDecisionSourceUrl)
-      .filter(Boolean)
-  );
-  return items
-    .map((item) => ({ item, itemTime: newsFeedItemTimestamp(item) }))
-    .filter(({ itemTime }) => itemTime.timestamp > cutoffMs)
-    .filter(({ item }) => {
-      const id = truncateSchedulerText(item.id || item.sourceFingerprint || "", 80);
-      const url = normalizedDecisionSourceUrl(item.sourceUrl || item.url);
-      return !excludedNewsFeedIds.has(id) && !(url && excludedSourceUrls.has(url));
-    })
-    .sort((a, b) => b.itemTime.timestamp - a.itemTime.timestamp || String(a.item.id || "").localeCompare(String(b.item.id || "")))
-    .map(({ item }) => compactNewsFeedItemForDecision(item));
-}
-
 function compactWorldMemoryArray(value = [], limit = 8) {
   return Array.isArray(value)
     ? value.map((item) => cleanText(typeof item === "string" ? item : item?.name || item?.label || "")).filter(Boolean).slice(0, limit)
@@ -2068,7 +1940,7 @@ function worldMemoryScoutRowScore(row = {}, nowMs = Date.now()) {
   const ageDays = timestamp ? Math.max(0, (nowMs - timestamp) / (24 * 60 * 60 * 1000)) : 45;
   const recencyScore = Math.max(0, 3 - ageDays / 10);
   const importance = cleanText(row.importance || "").toLowerCase();
-  const importanceScore = importance === "medium" ? 3 : importance === "low" ? 2.2 : importance === "high" ? 0.7 : 1.2;
+  const importanceScore = importance === "high" ? 3 : importance === "medium" ? 2.2 : importance === "low" ? 1.3 : 1;
   const entryModeScore = cleanText(row.entry_mode || "") === "brief" ? 1.2 : 0.4;
   const structuredScore =
     (compactWorldMemoryArray(row.industries, 4).length ? 0.8 : 0) +
@@ -2089,8 +1961,7 @@ export function compactWorldMemoryScoutCandidatesForDecision(rows = [], recentAr
   );
   const seen = new Set();
   const sourceRows = (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === "object");
-  const underRadarRows = sourceRows.filter((row) => cleanText(row.importance || "").toLowerCase() !== "high");
-  return (underRadarRows.length ? underRadarRows : sourceRows)
+  return sourceRows
     .filter((row) => {
       const eventId = cleanText(row.event_id || row.eventId || "");
       return !eventId || !recentEventIds.has(eventId);
@@ -2120,8 +1991,13 @@ export function compactWorldMemoryScoutCandidatesForDecision(rows = [], recentAr
         industries: compactWorldMemoryArray(row.industries, 6),
         subjects: compactWorldMemoryArray(row.subjects, 6),
         eventKind: truncateSchedulerText(row.event_kind || "", 100),
-        sourceNames: Array.isArray(row.sources)
-          ? row.sources.map((source) => truncateSchedulerText(source?.name || "", 80)).filter(Boolean).slice(0, 6)
+        sources: Array.isArray(row.sources)
+          ? row.sources.slice(0, 8).map((source) => ({
+              name: truncateSchedulerText(source?.name || "", 100),
+              url: truncateSchedulerText(source?.url || "", 500),
+              publishedAt: truncateSchedulerText(source?.published_at || source?.publishedAt || "", 80),
+              note: truncateSchedulerText(source?.note || "", 220),
+            })).filter((source) => source.name || source.url)
           : [],
         scoutScore: Math.round(score * 100) / 100,
       };
@@ -2244,20 +2120,19 @@ export function buildMagazineArticleCountDecisionPrompt(context) {
     `이번 자동 생성 주기에서 새 매거진 기사를 몇 개 쓸지 0~${maxTargetCount} 사이 정수로 결정한다.`,
     "도구, 웹 검색, 파일 읽기, 추가 조사를 하지 말고 이 한 번의 답변으로 끝낸다.",
     `사용자 설정 maxTargetCount=${maxTargetCount}는 확정 생성 수가 아니라 상한이다. 충분한 독립 신규 각도가 없으면 이보다 적게 선택한다.`,
-    "topicDiscoveryPolicy.id가 'per-article-slot-random'이면 서버는 targetCount가 정해진 뒤 실제 기사 슬롯마다 독립적으로 12% 비주류 후보 발굴 분기를 굴린다. 이 단계에서는 기사 수와 후보 풀의 품질만 판단한다.",
-    "topicDiscoveryLane이 있으면 서버가 이미 정한 특정 기사 슬롯의 주제 후보판이다. 모델은 이 값을 바꾸지 말고, 그 후보판 안에서 후보 품질만 의미적으로 판단한다.",
+    "모든 새 기사 각도는 worldMemory.angleCandidates에서만 고른다. 속보 피드, 최근 보도 목록, 외부 검색 결과를 새 각도 후보로 사용하지 않는다.",
+    "기사 수와 각도를 한 번에 판단하되, candidateAngles에는 실제 worldMemory.angleCandidates에 존재하는 eventId를 하나 이상 남긴다.",
     "기사 수와 후보 품질 판단에서는 무작위 선택, 텍스트 매칭 규칙, 키워드 카운팅을 금지한다. 아래 컨텍스트의 의미, 최신성, 중복도, 독자 편집 신호를 종합해 LLM 편집 판단으로 결정한다.",
     "0건은 허용되지만, '쓸 만한 신규 각도가 명확히 없다'고 판단될 때만 선택한다. 단순히 데이터가 조금 적다는 이유로 0건을 고르지 않는다.",
     "1건은 새 각도가 하나 있거나 기존 이슈의 의미 있는 후속 업데이트가 하나 있을 때 선택한다.",
     "2건은 maxTargetCount가 2 이상이고 서로 다른 storyFamily/editorialAngle로 쓸 수 있는 신호가 두 개 이상 있을 때만 선택한다.",
     "3건은 maxTargetCount가 3이고 강한 신규 신호가 세 개 이상이며 최근 기사와 충분히 다른 각도를 만들 수 있을 때만 선택한다.",
     "최근 기사와 제목 구도, storyFamily, editorialAngle이 겹치면 후보 수를 줄인다. 독자 선호와 bias 신호는 신선한 시장 신호보다 우선하지 말고 보조 가중치로만 쓴다.",
-    "최근 기사와 같은 metadata.newsFeed.items[].id를 재사용하는 후보는 같은 뉴스로 본다. primary continuity eventId가 같다는 사실만으로는 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
-    "같은 사건을 다른 제목으로 다시 쓰는 후보는 targetCount에 세지 않는다. 독립 델타는 기사 전체 임베딩 거리가 아니라 새 근거 앵커다: 새 보도 id, 새 공식/외부 출처 URL, 새 수치, 새 정책 집행, 새 가격 반응, 새 기업 행동 중 적어도 하나가 이전 기사 이후 발생했을 때만 follow-up 후보로 남긴다.",
+    "primary continuity eventId가 같다는 사실만으로는 중복 판정하지 않는다. 그 eventId는 연속성 맥락일 수 있고, 하드 veto가 아니다.",
+    "같은 사건을 다른 제목으로 다시 쓰는 후보는 targetCount에 세지 않는다. 독립 델타는 기사 전체 임베딩 거리가 아니라 월드 메모리에 기록된 새 사건·수치·정책 집행·가격 반응·기업 행동 가운데 하나가 이전 기사 이후 발생했을 때만 인정한다.",
     "candidateAngles.title/reason과 reason에는 내부 출처명, 저장소명, 레인명, 도구명을 쓰지 않는다. 독자용 기사 문장처럼 자연스럽게 풀어 쓴다. 예: 'Bloomberg가 전한 장중 보도', '같은 날 나온 ISNA 인용 발언', '새 가격 반응', '새 기업 공시'.",
     "비슷한 후보는 same_event / independent_followup / unrelated로 의미 판정한다. same_event이면 제외하고, independent_followup이면 어떤 새 근거 앵커와 메커니즘이 생겼는지 candidateAngles.reason에 적는다. 제목, 사진, storyFamily 변경만으로 independent_followup이라고 보지 않는다.",
-    "topicDiscoveryLane.id가 'world-memory-scout'이면 이 기사 슬롯의 주제 선정은 worldMemory.scout.candidates에서만 한다. newsFeed.postCutoffItems는 의도적으로 비워 둔 것으로 해석하고, News Feed 단문을 주제 선정 후보로 삼지 않는다.",
-    "비주류 후보 발굴 분기는 Reports 화면의 '심심해요' 방법론을 따른다. 메인 뉴스에 가려져 아직 조용하지만 점차 중요해질 수 있는 분야/이슈를 의미 기반으로 고르고, 중복 기사 규칙은 동일하게 적용한다.",
+    "중요도 high만 자동 우선하지 않는다. 메인 이슈와 조용한 하위 신호를 모두 의미적으로 비교하되, 장문 논증을 지탱할 근거 밀도와 시장 메커니즘을 우선한다.",
     "출력은 JSON 객체 하나만 반환한다. 마크다운 코드펜스, 설명 문장, 추가 텍스트는 금지한다.",
     "반환 스키마:",
     JSON.stringify(
@@ -2273,7 +2148,7 @@ export function buildMagazineArticleCountDecisionPrompt(context) {
             storyFamily: "예상 storyFamily",
             editorialAngle: "예상 editorialAngle",
             primaryEvent: "primary event 한 문장",
-            newsFeedIds: ["컨텍스트에 실제 존재하는 nf_..."],
+            worldMemoryEventIds: ["worldMemory.angleCandidates에 실제 존재하는 eventId"],
             researchQueries: ["공식·외부 리서치 질의"],
           },
         ],
@@ -2321,8 +2196,47 @@ function normalizeMagazineDecisionAngle(value) {
     storyFamily: scrubMagazineDecisionText(source.storyFamily || "", 160),
     editorialAngle: scrubMagazineDecisionText(source.editorialAngle || "", 120),
     primaryEvent: scrubMagazineDecisionText(source.primaryEvent || source.event || "", 300),
-    newsFeedIds: uniqueStrings(source.newsFeedIds || source.sourceIds || []).filter((id) => /^nf_[A-Za-z0-9]+$/.test(id)),
+    worldMemoryEventIds: uniqueStrings(source.worldMemoryEventIds || source.eventIds || source.sourceIds || []),
     researchQueries: uniqueStrings(source.researchQueries || []).map((query) => truncateSchedulerText(query, 180)).slice(0, 5),
+  };
+}
+
+export function bindMagazineDecisionAnglesToWorldMemory(decision = {}, candidates = []) {
+  const byEventId = new Map(
+    (Array.isArray(candidates) ? candidates : [])
+      .map((candidate) => [cleanText(candidate?.eventId || candidate?.event_id || candidate?.id || ""), candidate])
+      .filter(([eventId]) => eventId),
+  );
+  const candidateAngles = (Array.isArray(decision.candidateAngles) ? decision.candidateAngles : [])
+    .map((angle) => {
+      const worldMemoryEventIds = uniqueStrings(angle?.worldMemoryEventIds || [])
+        .filter((eventId) => byEventId.has(eventId));
+      if (!worldMemoryEventIds.length) return null;
+      return {
+        ...angle,
+        worldMemoryEventIds,
+        worldMemoryEvidence: worldMemoryEventIds.map((eventId) => byEventId.get(eventId)),
+        worldMemoryQuery:
+          truncateSchedulerText(angle?.researchQueries?.[0] || angle?.editorialAngle || angle?.title || "", 220),
+      };
+    })
+    .filter(Boolean);
+  const targetCount = Math.min(
+    clampInteger(decision.targetCount, 0, 3, 0),
+    candidateAngles.length,
+  );
+  return {
+    ...decision,
+    targetCount,
+    candidateAngles: candidateAngles.slice(0, targetCount),
+    ...(targetCount < Number(decision.targetCount || 0)
+      ? {
+          reason: [
+            cleanText(decision.reason || ""),
+            "월드 메모리 eventId로 검증되지 않은 후보는 생성 대상에서 제외했습니다.",
+          ].filter(Boolean).join(" "),
+        }
+      : {}),
   };
 }
 
@@ -2357,10 +2271,8 @@ export function normalizeMagazineArticleCountDecision(parsed = {}, options = {})
         : options.topicDiscoveryPolicy && typeof options.topicDiscoveryPolicy === "object"
           ? options.topicDiscoveryPolicy
           : {
-              id: hasMagazineTopicDiscoveryLane(options.topicDiscoveryLane || source.topicDiscoveryLane)
-                ? "fixed-lane"
-                : "per-article-slot-random",
-              scoutProbability: MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY,
+              id: "world-memory-only",
+              policy: "all-new-article-angles-must-be-selected-from-world-memory-candidates",
             },
     ...(hasMagazineTopicDiscoveryLane(options.topicDiscoveryLane || source.topicDiscoveryLane)
       ? { topicDiscoveryLane: normalizeMagazineTopicDiscoveryLane(options.topicDiscoveryLane || source.topicDiscoveryLane) }
@@ -2376,14 +2288,14 @@ export function normalizeMagazineArticleCountDecision(parsed = {}, options = {})
 
 export function fallbackMagazineArticleCountDecision(options = {}) {
   const maxCount = clampInteger(options.maxCount, 0, 3, 3);
-  const targetCount = maxCount > 0 ? Math.min(1, maxCount) : 0;
+  const targetCount = 0;
   return normalizeMagazineArticleCountDecision(
     {
       targetCount,
       confidence: 0,
       reason:
-        targetCount > 0
-          ? "기사 수 산정 모델 호출이 실패해 이번 주기를 조용히 건너뛰지 않고 보수적으로 1건 생성으로 전환합니다."
+        maxCount > 0
+          ? "기사 수 산정 모델 호출이 실패해 검증된 월드 메모리 각도를 확보하지 못했으므로 이번 주기는 생성하지 않습니다."
           : "maxPerCycle 설정이 0이므로 이번 주기에는 새 기사를 생성하지 않습니다.",
       candidateAngles: [],
     },
@@ -2405,9 +2317,10 @@ async function decideScheduledMagazineArticleCount({ scheduledAt = "", topicDisc
   const normalizedTopicDiscoveryLane = hasMagazineTopicDiscoveryLane(topicDiscoveryLane)
     ? normalizeMagazineTopicDiscoveryLane(topicDiscoveryLane)
     : null;
-  const topicDiscoveryPolicy = normalizedTopicDiscoveryLane
-    ? { id: "fixed-lane", scoutProbability: MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY }
-    : { id: "per-article-slot-random", scoutProbability: MAGAZINE_WORLD_MEMORY_SCOUT_PROBABILITY };
+  const topicDiscoveryPolicy = {
+    id: "world-memory-only",
+    policy: "all-new-article-angles-must-be-selected-from-world-memory-candidates",
+  };
   if (maxCount <= 0) {
     return {
       agent,
@@ -2450,65 +2363,38 @@ async function decideScheduledMagazineArticleCount({ scheduledAt = "", topicDisc
           reasoning: agent.reasoning,
         },
       });
-    const result =
-      agent.provider === MAGAZINE_CODEX_PROVIDER_ID
-        ? await runIsolatedCodexJsonPrompt({
-            prompt: decisionPrompt,
-            outputSchemaPath: MAGAZINE_ARTICLE_COUNT_SCHEMA_PATH,
-            feature: "magazine-article-count-decision",
-            model: agent.model,
-            reasoning: agent.reasoning,
-            speed: agent.speed,
-            timeoutMs: 10 * 60 * 1_000,
-            label: "Magazine 전체 후보 기사 수·소재 선정기",
-          })
-        : await runCodexChat({
-            provider: agent.provider,
-            model: agent.model,
-            reasoning: agent.reasoning,
-            speed: agent.speed,
-            approval: agent.approval,
-            personaMode: "none",
-            prompt: decisionPrompt,
-            messages: [],
-            screen: "magazine",
-            includeSharedMemory: false,
-            includeWorldMemoryContext: false,
-            includeWorldMemorySearchContext: false,
-            includeNewsFeedContext: false,
-            includeNewsFeedSearchContext: false,
-            requireWebSearch: false,
-            observationFeature: "magazine-article-count-decision",
-          });
-    const parsedDecision =
-      agent.provider === MAGAZINE_CODEX_PROVIDER_ID
-        ? result.value
-        : parseJsonObjectFromText(result.answer || "");
-    const normalizedDecision = normalizeMagazineArticleCountDecision(parsedDecision, {
-      maxCount,
-      provider: agent.provider,
+    const result = await runIsolatedMagazineJsonPrompt({
+      prompt: decisionPrompt,
+      outputSchemaPath: MAGAZINE_ARTICLE_COUNT_SCHEMA_PATH,
+      feature: "magazine-article-count-decision",
       model: agent.model,
       reasoning: agent.reasoning,
-      elapsedMs: result.telemetry?.durationMs ?? result.elapsedMs,
-      topicDiscoveryLane: normalizedTopicDiscoveryLane,
-      topicDiscoveryPolicy,
+      speed: agent.speed,
+      timeoutMs: 10 * 60 * 1_000,
+      label: "Magazine 전체 후보 기사 수·소재 선정기",
+      provider: agent.provider,
+      approval: agent.approval,
+      webSearchMode: "disabled",
+      antigravityAgent: "magazine-selector",
     });
-    const newsFeedCutoff = truncateSchedulerText(
-      context.newsFeed?.worldMemoryLastSuccessfulAt || "",
-      80,
+    const parsedDecision = result.value;
+    const normalizedDecision = bindMagazineDecisionAnglesToWorldMemory(
+      normalizeMagazineArticleCountDecision(parsedDecision, {
+        maxCount,
+        provider: agent.provider,
+        model: agent.model,
+        reasoning: agent.reasoning,
+        elapsedMs: result.telemetry?.durationMs ?? result.elapsedMs,
+        topicDiscoveryLane: normalizedTopicDiscoveryLane || "world-memory-only",
+        topicDiscoveryPolicy,
+      }),
+      context.worldMemory?.angleCandidates,
     );
     const decision = {
       ...normalizedDecision,
-      candidateAngles: normalizedDecision.candidateAngles.map((angle) => ({
-        ...angle,
-        ...(newsFeedCutoff ? { newsFeedCutoff } : {}),
-      })),
       cacheHit: false,
       evidenceFingerprint,
-      selectionPipeline:
-        agent.provider === MAGAZINE_CODEX_PROVIDER_ID
-          ? "isolated-one-turn-all-candidates"
-          : "provider-chat",
+      selectionPipeline: "isolated-one-turn-all-candidates",
       ...(result.telemetry
         ? {
             turnCount: result.telemetry.turnCount,
@@ -2544,6 +2430,10 @@ async function decideScheduledMagazineArticleCount({ scheduledAt = "", topicDisc
   }
 }
 
+export function normalizeMagazineGeneratorPipeline(value = "") {
+  return safeGeneratorCliValue(value || "simple", "simple", /^(?:simple|agentic)$/);
+}
+
 function runMagazineGenerator(body = {}, action = "generateWithCodex") {
   ensureMagazineDirs();
   const provider =
@@ -2560,11 +2450,7 @@ function runMagazineGenerator(body = {}, action = "generateWithCodex") {
   const approval = safeGeneratorCliValue(body.approval || (useAntigravity ? "turbo" : "never"), useAntigravity ? "turbo" : "never", /^[A-Za-z-]+$/);
   const speed = safeGeneratorCliValue(body.speed || "standard", "standard", /^[A-Za-z-]+$/);
   const harness = safeGeneratorCliValue(body.harness || "v2", "v2", /^(?:v2|legacy)$/);
-  const pipeline = safeGeneratorCliValue(
-    body.pipeline || (useAntigravity ? "agentic" : "simple"),
-    useAntigravity ? "agentic" : "simple",
-    /^(?:simple|agentic)$/,
-  );
+  const pipeline = normalizeMagazineGeneratorPipeline(body.pipeline);
   const extraPrompt = cleanText(body.prompt || body.extraPrompt || "");
   const lockedTopic = body.lockedTopic && typeof body.lockedTopic === "object" && !Array.isArray(body.lockedTopic)
     ? body.lockedTopic
@@ -2957,10 +2843,7 @@ function fallbackMagazineCandidateAngleForSlot(cycle = {}, index = 0) {
 
 export async function decideMagazineArticleSlotTopic({ cycle, index, slot } = {}) {
   const topicDiscoveryLane = normalizeMagazineTopicDiscoveryLane(slot?.topicDiscoveryLane);
-  const fallbackAngle =
-    topicDiscoveryLane.id === "news-feed-primary"
-      ? fallbackMagazineCandidateAngleForSlot(cycle, index)
-      : null;
+  const fallbackAngle = fallbackMagazineCandidateAngleForSlot(cycle, index);
   if (fallbackAngle) {
     return {
       agent: cycle?.agent || null,
@@ -2984,9 +2867,7 @@ export async function decideMagazineArticleSlotTopic({ cycle, index, slot } = {}
   const candidateAngle =
     decision?.targetCount > 0 && Array.isArray(decision.candidateAngles) && decision.candidateAngles[0]
       ? decision.candidateAngles[0]
-      : topicDiscoveryLane.id === "news-feed-primary"
-        ? fallbackAngle
-        : null;
+      : fallbackAngle;
   return {
     agent: result.agent,
     decision,
@@ -3095,10 +2976,10 @@ async function runScheduledMagazineCycle(trigger = "timer", options = {}) {
       slot.topicDiscoveryLane = slotTopic.topicDiscoveryLane;
       slot.topicDecision = slotTopic.decision;
       slot.candidateAngle = slotTopic.candidateAngle || null;
-      if (!slot.candidateAngle && slot.topicDiscoveryLane.id === "world-memory-scout") {
+      if (!slot.candidateAngle) {
         slot.status = "canceled";
         slot.finishedAt = nowIso();
-        slot.skipReason = "no independent under-radar topic selected for this slot";
+        slot.skipReason = "no verified World Memory angle selected for this slot";
         cycle.canceledCount += 1;
         await writeMagazineSchedulerState();
         continue;

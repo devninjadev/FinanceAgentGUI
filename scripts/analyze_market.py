@@ -31,6 +31,11 @@ RSS_FEEDS: list[tuple[str, str, int]] = [
 
 FRED_GRAPH_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_START_DATE = "2024-01-01"
+FRED_NET_LIQUIDITY_SERIES = {
+    "WALCL": "연준 총자산",
+    "WDTGAL": "미 재무부 일반계정(TGA)",
+    "RRPONTSYD": "연준 익일물 역레포(RRP)",
+}
 
 MARKET_TICKERS = [
     "SPY",
@@ -507,6 +512,73 @@ def _point_delta(series: pd.Series, periods: int) -> float | None:
     return float(s.iloc[-1] - s.iloc[-1 - periods])
 
 
+def _build_us_net_liquidity_summary(
+    walcl: pd.Series,
+    wdtgal: pd.Series,
+    rrpontsyd: pd.Series,
+) -> dict[str, float | str | None]:
+    """Build a weekly, Wednesday-aligned U.S. net-liquidity proxy.
+
+    WALCL and WDTGAL are published in USD millions. RRPONTSYD is published in
+    USD billions, so it is multiplied by 1,000 before subtraction.
+    """
+    if walcl.empty or wdtgal.empty or rrpontsyd.empty:
+        return {}
+
+    aligned = (
+        pd.concat(
+            {
+                "WALCL": walcl.astype(float),
+                "WDTGAL": wdtgal.astype(float),
+                "RRPONTSYD": rrpontsyd.astype(float) * 1_000.0,
+            },
+            axis=1,
+            sort=False,
+        )
+        .sort_index()
+        .ffill()
+    )
+    walcl_dates = pd.DatetimeIndex(walcl.dropna().index)
+    weekly = aligned.loc[aligned.index.intersection(walcl_dates)].dropna()
+    if weekly.empty:
+        return {}
+
+    net_liquidity = weekly["WALCL"] - weekly["WDTGAL"] - weekly["RRPONTSYD"]
+    latest_components = weekly.iloc[-1]
+    delta_1w_millions = _point_delta(net_liquidity, 1)
+    delta_4w_millions = _point_delta(net_liquidity, 4)
+    delta_13w_millions = _point_delta(net_liquidity, 13)
+
+    if delta_4w_millions is None:
+        trend_4w = "UNKNOWN"
+    elif delta_4w_millions > 0:
+        trend_4w = "INJECTING"
+    elif delta_4w_millions < 0:
+        trend_4w = "DRAINING"
+    else:
+        trend_4w = "FLAT"
+
+    return {
+        "formula": "WALCL - WDTGAL - (RRPONTSYD × 1000)",
+        "unit": "USD millions",
+        "date": net_liquidity.index[-1].strftime("%Y-%m-%d"),
+        "last_usd_trillions": float(net_liquidity.iloc[-1] / 1_000_000.0),
+        "delta_1w_usd_billions": (
+            float(delta_1w_millions / 1_000.0) if delta_1w_millions is not None else None
+        ),
+        "delta_4w_usd_billions": (
+            float(delta_4w_millions / 1_000.0) if delta_4w_millions is not None else None
+        ),
+        "delta_13w_usd_billions": (
+            float(delta_13w_millions / 1_000.0) if delta_13w_millions is not None else None
+        ),
+        "trend_4w": trend_4w,
+        "walcl_usd_trillions": float(latest_components["WALCL"] / 1_000_000.0),
+        "tga_usd_billions": float(latest_components["WDTGAL"] / 1_000.0),
+        "rrp_usd_billions": float(latest_components["RRPONTSYD"] / 1_000.0),
+    }
+
+
 def _extract_close_series(df: pd.DataFrame, ticker: str) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=float)
@@ -629,11 +701,15 @@ def fetch_fred_snapshot() -> dict[str, object]:
     indicators: dict[str, dict[str, float | str | int | None]] = {}
     errors: list[str] = []
 
-    try:
-        nfcirisk = _fetch_fred_series("NFCIRISK")
-    except Exception as exc:
-        errors.append(f"NFCIRISK fetch failed: {exc}")
-        nfcirisk = pd.Series(dtype=float)
+    fetched: dict[str, pd.Series] = {}
+    for series_id in ("NFCIRISK", *FRED_NET_LIQUIDITY_SERIES):
+        try:
+            fetched[series_id] = _fetch_fred_series(series_id)
+        except Exception as exc:
+            errors.append(f"{series_id} fetch failed: {exc}")
+            fetched[series_id] = pd.Series(dtype=float)
+
+    nfcirisk = fetched["NFCIRISK"]
 
     if not nfcirisk.empty:
         st = _close_only_supertrend(nfcirisk, atr_window=10, multiplier=3.0)
@@ -655,6 +731,22 @@ def fetch_fred_snapshot() -> dict[str, object]:
                 float(close - st_value) if pd.notna(close) and pd.notna(st_value) else None
             ),
         }
+
+    net_liquidity = _build_us_net_liquidity_summary(
+        fetched["WALCL"],
+        fetched["WDTGAL"],
+        fetched["RRPONTSYD"],
+    )
+    if net_liquidity:
+        indicators["US_NET_LIQUIDITY"] = net_liquidity
+    else:
+        missing = [
+            series_id
+            for series_id in FRED_NET_LIQUIDITY_SERIES
+            if fetched[series_id].empty
+        ]
+        if missing:
+            errors.append(f"US_NET_LIQUIDITY unavailable: missing {', '.join(missing)}")
 
     return {"indicators": indicators, "errors": errors}
 
@@ -735,6 +827,18 @@ def _fmt_point(value: float | None, digits: int = 3) -> str:
     return f"{value:+.{digits}f}pt"
 
 
+def _fmt_usd_billions(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+,.1f}B"
+
+
+def _fmt_usd_trillions(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:,.3f}T"
+
+
 def _fmt_nfcirisk_trend(summary: dict[str, float | str | int | None]) -> str:
     direction = str(summary.get("supertrend_dir") or "UNKNOWN")
     trend_weeks = summary.get("trend_weeks")
@@ -768,12 +872,16 @@ def build_regime_summary(snapshot: dict[str, object]) -> dict[str, object]:
     oil = stats.get("CL=F", {})
     hyg_lqd = ratios.get("HYG/LQD", {})
     nfcirisk = {}
+    us_net_liquidity = {}
     if isinstance(fred, dict):
         indicators = fred.get("indicators", {})
         if isinstance(indicators, dict):
             maybe_nfcirisk = indicators.get("NFCIRISK", {})
             if isinstance(maybe_nfcirisk, dict):
                 nfcirisk = maybe_nfcirisk
+            maybe_us_net_liquidity = indicators.get("US_NET_LIQUIDITY", {})
+            if isinstance(maybe_us_net_liquidity, dict):
+                us_net_liquidity = maybe_us_net_liquidity
 
     risk_off_score = 0
     rule_hits: list[tuple[str, int]] = []
@@ -846,6 +954,35 @@ def build_regime_summary(snapshot: dict[str, object]) -> dict[str, object]:
             ),
         ),
         ("NFCIRISK Supertrend(10,3)", _fmt_nfcirisk_trend(nfcirisk) if nfcirisk else "n/a"),
+        (
+            "미국 순유동성",
+            (
+                f"{_fmt_usd_trillions(_num(us_net_liquidity, 'last_usd_trillions'))} "
+                f"({us_net_liquidity.get('date')}, WALCL−TGA−RRP)"
+                if us_net_liquidity
+                else "n/a"
+            ),
+        ),
+        (
+            "미국 순유동성 1/4/13주 변화",
+            (
+                f"{_fmt_usd_billions(_num(us_net_liquidity, 'delta_1w_usd_billions'))} / "
+                f"{_fmt_usd_billions(_num(us_net_liquidity, 'delta_4w_usd_billions'))} / "
+                f"{_fmt_usd_billions(_num(us_net_liquidity, 'delta_13w_usd_billions'))}"
+                if us_net_liquidity
+                else "n/a"
+            ),
+        ),
+        (
+            "미국 순유동성 구성",
+            (
+                f"WALCL={_fmt_usd_trillions(_num(us_net_liquidity, 'walcl_usd_trillions'))}, "
+                f"TGA=${_fmt_num(_num(us_net_liquidity, 'tga_usd_billions'), 1)}B, "
+                f"RRP=${_fmt_num(_num(us_net_liquidity, 'rrp_usd_billions'), 1)}B"
+                if us_net_liquidity
+                else "n/a"
+            ),
+        ),
         ("DXY 5일 변화율", _fmt_pct(_num(dxy, "d5_pct"))),
         ("WTI 5일 변화율", _fmt_pct(_num(oil, "d5_pct"))),
     ]
@@ -985,14 +1122,20 @@ def build_report(
     timeline_items: int,
     news_language: str,
     show_original_title: bool,
+    market_only: bool = False,
 ) -> str:
     now_kst = _now_kst()
     lines: list[str] = []
 
     lines.append(f"### 시장 상황 + 뉴스레터 브리핑 (기준 시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')})")
-    lines.append(
-        "데이터 성격: yfinance(일봉) + FRED NFCIRISK(주간) + 지정 FEED(CSV 2종 + 텔레그램 3종). 장중/지연 데이터가 혼재할 수 있습니다."
-    )
+    if market_only:
+        lines.append(
+            "데이터 성격: yfinance(일봉) + FRED NFCIRISK 및 미국 순유동성 구성요소(주간). 이번 실행은 보고서 갱신용 시장 스냅샷이며 FEED는 새로 수집하지 않았습니다."
+        )
+    else:
+        lines.append(
+            "데이터 성격: yfinance(일봉) + FRED NFCIRISK 및 미국 순유동성 구성요소(주간) + 지정 FEED. 장중/지연 데이터가 혼재할 수 있습니다."
+        )
     lines.append("")
 
     if snapshot is not None:
@@ -1107,6 +1250,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="출력 파일 경로 (.md)",
     )
+    p.add_argument(
+        "--market-only",
+        action="store_true",
+        help="FEED를 조회하지 않고 시장·금융여건·미국 순유동성 스냅샷만 생성",
+    )
     return p.parse_args(argv)
 
 
@@ -1120,12 +1268,18 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         snapshot_error = f"시장 스냅샷 조회 실패: {exc}"
 
-    news_items, news_errors = fetch_news(timeout=max(5, args.timeout), max_items=max(20, args.max_news_items))
-    localize_news_titles(
-        news_items,
-        timeout=max(5, args.timeout),
-        target_language=args.news_language,
-    )
+    if args.market_only:
+        news_items, news_errors = [], []
+    else:
+        news_items, news_errors = fetch_news(
+            timeout=max(5, args.timeout),
+            max_items=max(20, args.max_news_items),
+        )
+        localize_news_titles(
+            news_items,
+            timeout=max(5, args.timeout),
+            target_language=args.news_language,
+        )
     if snapshot_error:
         news_errors.append(snapshot_error)
 
@@ -1138,6 +1292,7 @@ def main(argv: list[str] | None = None) -> int:
         timeline_items=max(5, args.timeline_items),
         news_language=args.news_language,
         show_original_title=args.show_original_title,
+        market_only=args.market_only,
     )
     _write_output(report, args.out)
     return 0

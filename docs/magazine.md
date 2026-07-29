@@ -32,7 +32,7 @@ The canonical topic catalog lives in `config/magazine-topics.json`. Each article
 - `isCoverStory`, `coverRegisteredAt`
 - `sourceBasis`
 - `worldMemory`
-- `newsFeed`
+- `newsFeed` for legacy/historical article provenance only; new angle selection does not read it
 - `researchMode`, `editorialAngle`, `storyFamily`, `noveltyNote`
 - `chartBlocks` for data-heavy analysis articles
 - `followupOptions` for reader-facing "what should we cover next?" choices
@@ -127,40 +127,37 @@ When an article uses World Memory, vector search evidence is mandatory. Store it
 
 The magazine API returns `worldMemoryIssues` for any World Memory based article missing the query, engine/model, or semantic-search hits.
 
-Treat local context, recent items, continuity search, and external research as one evidence bundle for article judgment. Internal storage fields can still record where evidence came from, but article prose should not explain those layers to the reader. If semantic hits are sparse, noisy, or outside the requested field, do not skip the article automatically. Use external research and declare the source mix with `researchMode: "external-research"`, `"external-first"`, or `"mixed-research"` in `metadata.json`.
+Treat World Memory candidates, semantic continuity search, recent-article comparison, and external research as one evidence bundle for article judgment. Internal storage fields can still record where evidence came from, but article prose should not explain those layers to the reader. Every new article angle must originate in structured World Memory. News Feed items and web-search results may verify an already selected angle or supply an original source, contradiction check, number, or quote, but they must not introduce or replace the subject.
 
-The local `data/news-feed.json` items may be used for urgent or unusually article-worthy subjects, but only for items after the latest successful internal collection/import update. The internal eligibility boundary is `data/world-memory/collector-state.json` `collector.lastSuccessfulAt`; report generation timestamps such as `report.generatedAt` are not eligible cutoffs. If `collector.lastSuccessfulAt` is missing, those items must not be used as a subject source for that generation run.
+Article-count decisions and topic preflight read bounded, structured World Memory rows with event ids, source records, story metadata, and market-mechanism fields. The LLM makes the editorial judgment semantically; keyword or regex matching is not an angle-selection mechanism. If no candidate supports a worthwhile independent angle, `targetCount=0` is correct.
 
-Article-count decisions and article-generation prompts should include all eligible post-update News Feed items, not an arbitrary fixed sample such as the latest 18 or 24 rows. A busy six-hour window can contain hundreds of short squawk items; the model should make the editorial judgment from the full eligible set, then ignore weak, promotional, duplicative, or off-domain items semantically rather than because they fell outside a prompt cap.
-
-When an article uses this local evidence, store the specific eligible evidence:
+Store the selected and semantically retrieved evidence:
 
 ```json
 {
-  "researchMode": "news-feed-with-world-memory-backup",
-  "newsFeed": {
-    "selectionPolicy": "post-world-memory-update-only",
-    "worldMemoryLastSuccessfulAt": "ISO timestamp",
-    "items": [
-      {
-        "id": "nf_...",
-        "feedId": "first-squawk",
-        "feedTitle": "First Squawk",
-        "title": "피드 제목",
-        "publishedAt": "ISO timestamp",
-        "fetchedAt": "ISO timestamp",
-        "translatedAt": "ISO timestamp"
-      }
-    ]
+  "researchMode": "world-memory-first",
+  "worldMemory": {
+    "retrievalPolicy": "mandatory-vector-search",
+    "query": "선택된 각도의 연속성 질의",
+    "vectorSearch": {
+      "engine": "sentence-transformers",
+      "model": "ibm-granite/granite-embedding-97m-multilingual-r2",
+      "hits": [
+        {
+          "eventId": "world-memory-event-id",
+          "title": "근거 사건"
+        }
+      ]
+    }
   }
 }
 ```
 
-Use `researchMode: "news-feed-first"` when the local item is the main source and continuity search is unavailable or weak; prefer `"news-feed-with-world-memory-backup"` when continuity search adds useful context. Do not use keyword or regex matching to decide whether an item is article-worthy; the generator should make an editorial LLM judgment from the eligible item, timing, market mechanism, source, and context.
+Use `researchMode: "world-memory-first"` when the selected World Memory packet remains the principal evidence. Use `"mixed-research"`, `"external-first"`, or `"external-research"` only when original-source research materially expands or corrects it; the selected World Memory angle remains locked in every case.
 
-Before generating a new magazine issue, create an editorial slate. A normal five-article issue should not be five versions of the highest-ranked story family. Mix major trend follow-ups, lower-level signals, company or sector mechanics, and at least occasional external-research stories. For recurring mega-trends, write from the latest delta rather than reintroducing the issue from scratch. Use `editorialAngle`, `storyFamily`, and `noveltyNote` in metadata to make that decision auditable.
+Before generating a new magazine issue, create an editorial slate. A normal five-article issue should not be five versions of the highest-ranked story family. Mix major trend follow-ups, lower-level signals, company or sector mechanics, and World Memory angles that benefit from deeper official or external verification. External research can deepen a selected angle but cannot create an outside-World-Memory subject. For recurring mega-trends, write from the latest delta rather than reintroducing the issue from scratch. Use `editorialAngle`, `storyFamily`, and `noveltyNote` in metadata to make that decision auditable.
 
-Scheduled topic discovery normally uses the eligible post-update News Feed set as the main candidate lane. After the model decides the cycle's `targetCount`, the server makes an independent true-random 12% lane roll for each actual article slot. A slot that rolls into the under-radar World Memory scout pass excludes News Feed items as subject candidates for that slot and instead evaluates recent World Memory rows using a "심심해요"-style method: look for quieter medium/low-importance, industry, company, subject, or mechanism signals that may become article-worthy, while still applying the same recent-article and event-anchor duplicate checks. This lane only changes topic discovery; once a subject is selected, article writing must continue to use the normal magazine writing harness, style rules, evidence requirements, continuity search, external research, image rules, title pass, and strict checks.
+Scheduled topic discovery has one lane: `world-memory-only`. The server evaluates recent structured World Memory rows across all importance levels, removes recent article event anchors, and asks the editorial LLM to choose only event ids present in that candidate set. The selected event rows are copied into the locked topic packet, then semantic search supplies continuity evidence before writing. There is no News Feed topic lane and no random scout branch.
 
 Store `metadata.eventSignature` for new articles as a primary event-card claimlet, not a prose summary: `role:"primary"`, `actor`, `action`, `object[]`, `time`, `marketMechanism`, and `sourceIds[]`. For articles that intentionally connect several facts, `metadata.eventSignatures[]` may contain exactly one `role:"primary"` card plus zero or more `role:"supporting"` cards. The primary event signature is the text that should be embedded for duplicate discovery; do not embed the whole article body for novelty checks.
 
@@ -170,23 +167,25 @@ Novelty is enforced before publish, not only by prompt wording. Scheduled/staged
 
 ## Article Writing Harness
 
-The default profile is `v2`, defined in `config/magazine-article-style-v2.prompt.md` and checked by `scripts/magazine_article_quality_check.mjs`. It keeps publication integrity, evidence, exact-event novelty, files, topics, and image rights as blocking gates. Length, paragraph count, H2 rhythm, optional wit, quotation count, five-source density, and issue-slate mix are advisory signals and do not automatically trigger a rewrite. The writer receives at most the newest 24 eligible local news candidates in its initial prompt and can inspect the local store when older context is needed.
+The default profile is `v2`, defined in `config/magazine-article-style-v2.prompt.md` and checked by `scripts/magazine_article_quality_check.mjs`. It keeps publication integrity, evidence, exact-event novelty, files, topics, and image rights as blocking gates. Length, paragraph count, H2 rhythm, optional wit, quotation count, five-source density, and issue-slate mix are advisory signals and do not automatically trigger a rewrite. The writer receives one locked World Memory angle plus its selected event rows and semantic-search evidence.
 
 Magazine v2's default commission is the original Korean longform standard in `config/magazine-longform-editorial-standard.prompt.md`. It targets the argumentative and reporting depth of a substantial weekend essay or reported review: an early contestable thesis, evidence with distinct functions, a serious counterargument, historical or institutional context where useful, concrete consequences, deliberately uneven section rhythm, and an ending that sharpens rather than repeats the opening. The usual Korean scope is roughly 5,500-8,500 non-space characters, but the reviewer must never turn that range into a character-count gate. A materially thin brief can fail only when semantic review identifies the missing argumentative work in the actual article.
 
 Natural Korean is part of publication integrity, not an optional polish pass. After research, the writer first converts evidence into a Korean semantic map of confirmed facts, actors, actions, causal links, counterargument, uncertainty, and conclusion, then drafts from that map without preserving source-language sentence order or rhetorical images. Repeated abstract personification, noun-phrase chains, omitted semantic relations used only for symmetry, manufactured aphorisms, and headlines that require mental back-translation are a blocking `pervasive-unidiomatic-korean` failure when they shape the article as a whole. The repair path is a full rewrite from the semantic map, not keyword replacement or sentence-by-sentence humanizing. A separate generic Korean-humanize layer is not part of Magazine generation. Clear, restrained explanatory Korean is valid Magazine prose; report-like cadence, limited warmth, missing scenes, or consolidatable repetition remain advisory unless unsupported padding prevents the argument from advancing.
 
-Approved Korean few-shot exemplars are local runtime assets under `data/magazine/editorial-exemplars/<exemplar-id>/`. Each exemplar contains `article.md`, `metadata.json`, and `editorial-map.json`; only metadata with `approved:true` is eligible. `config/magazine-editorial-exemplars.json` controls the root, count, and prompt-size limits. The default Codex writer receives exactly three approved article bodies, not their editorial maps or repository instructions. Exemplar facts and source lists are never evidence for a new article, and the writer is explicitly prohibited from copying their wording, metaphors, title patterns, named entities, or section order. The active exemplar ids are recorded in `metadata.generationAgent.editorialExemplars`. The runtime directory remains gitignored because these exemplars may be derived from the user's private World Memory and are not release assets by default.
+Approved Korean exemplars are local runtime assets under `data/magazine/editorial-exemplars/<exemplar-id>/`. Each exemplar contains `article.md`, `metadata.json`, and `editorial-map.json`; only metadata with `approved:true` is eligible. `config/magazine-editorial-exemplars.json` controls the root, count, and style-card size. At prompt construction time, the writer reduces each editorial map to one 2,000-3,000-character style card and excludes the full article body. The three cards retain thesis movement, paragraph rhythm, evidence function, counterargument handling, and ending transformation without turning exemplar facts into evidence. Wording, metaphors, title patterns, named entities, facts, and section order remain non-transferable. The active exemplar ids are recorded in `metadata.generationAgent.editorialExemplars`, while `generation-telemetry.json` records both included style-card characters and excluded full-article characters. The runtime directory remains gitignored because these exemplars may be derived from the user's private World Memory and are not release assets by default.
 
 Run `node scripts/magazine_editorial_exemplar_check.mjs --strict` before setting or retaining `approved:true`. The checker verifies the local package contract and reports the longform scope as an advisory; factual accuracy, argumentative quality, and originality still require semantic editorial review.
 
 The previous exhaustive contract remains unchanged as the `legacy` profile in `config/magazine-article-style.prompt.md` and `scripts/magazine_article_style_check.mjs`. Use `--harness legacy` or `MAGAZINE_HARNESS_PROFILE=legacy` for compatibility or comparison runs. Legacy reader-tone and quote-flow self-classification metadata remains readable but is not required by v2.
 
-The default Codex writer performs its semantic editorial check inside the same structured one-shot response. It stores `metadata.editorialReviewDecision` with `policy:"magazine-editorial-review-v2"`, `method:"LLM_INTEGRATED_ONE_SHOT_REVIEW"`, `publicationReady`, and concrete `issues[]`. A false readiness value or any blocking issue stops the cycle without an LLM repair call. Advisory findings remain visible without forcing repair. The opt-in agentic comparison path retains the independent `method:"LLM_SEMANTIC_REVIEW"` reviewer.
+The default Codex and Antigravity writers perform their semantic editorial check inside the same structured one-shot response. They store `metadata.editorialReviewDecision` with `policy:"magazine-editorial-review-v2"`, `method:"LLM_INTEGRATED_ONE_SHOT_REVIEW"`, `publicationReady`, and concrete `issues[]`. A false readiness value or any blocking issue stops the cycle without an LLM repair call. Advisory findings remain visible without forcing repair. The opt-in agentic comparison path retains the independent `method:"LLM_SEMANTIC_REVIEW"` reviewer.
 
-The default Codex v2 path separates editorial work from operations without changing the prose contract. The scheduler sends every eligible post-update News Feed candidate to one isolated structured decision turn; there is no candidate-count cap. That decision chooses the cycle count and locked article angles. Each actual writer receives only its locked topic, all semantically selected evidence ids, and exactly three approved prose exemplars in one isolated turn. The writer cannot use tools or load repository instructions. For a one-article generator run, the existing image worker starts from the locked topic at the same time as the writer. If early image preparation fails, only the image worker retries after writing.
+The default v2 path separates editorial work from operations without changing the prose contract. The scheduler sends structured World Memory angle candidates to one isolated decision turn. That decision chooses the cycle count and locked article angles using real event ids. Each actual writer receives only its locked topic, selected World Memory rows, semantic-search evidence, and exactly three approved style cards in one isolated invocation. Skills, apps, plugins, MCP, interactive browsers, file/shell tools, project instructions, and subagents are removed from the writer context. Live web search remains available only for bounded freshness, contradiction, and original-source verification; it may not replace the supplied angle or introduce a new subject. For a one-article generator run, the existing image worker starts from the locked topic at the same time as the writer. If early image preparation fails, only the image worker retries after writing.
 
-The default Codex v2 writer is ephemeral and must complete in exactly one turn with zero tool calls. It never uses `codex exec resume`, `--last`, an independent reviewer, or a writer repair loop. Local quality, novelty, embedding, or integrated-review failures stop the cycle; only image failure may retry the image worker. The previous multi-turn implementation remains available only for an explicit comparison run with `--pipeline agentic`.
+The default Codex v2 writer is ephemeral and must complete in exactly one turn. It permits at most two `web_search` items and rejects every other tool item. It never uses `codex exec resume`, `--last`, an independent reviewer, or a writer repair loop. The Codex invocation explicitly disables project docs, skills, apps, browser/computer tools, shell tools, plugins, memories, workspace dependencies, and multi-agent tools while setting `web_search="live"`. Local quality, novelty, embedding, JSON Schema, evidence-id, or integrated-review failures stop the cycle; only image failure may retry the image worker. The previous multi-turn implementation remains available only for an explicit comparison run with `--pipeline agentic`.
+
+Antigravity uses the same simple writer by default instead of its historical repository-editing agentic path. Each call copies `config/antigravity-agents/magazine-writer/agent.md` or `magazine-selector/agent.md` into a new temporary workspace and starts a fresh `agy -p` session with `--new-project --agent`. The new project makes the temporary custom agent discoverable while preventing the previous article's project/session context from carrying over. The writer agent exposes only `search_web` and `read_url_content`; the selector exposes no tools. Both declare empty skills, plugins, and MCP servers and disable subagent invocation and command execution. Because Antigravity CLI does not accept Codex's `--output-schema`, its JSON is parsed and validated locally against the same checked-in schema before semantic normalization and publication gates run.
 
 Codex Magazine passes request JSON events and log the prompt character/byte count plus provider-reported input, cached-input, and output token usage when the CLI exposes it. This telemetry is diagnostic only and never changes the editorial decision or article contract.
 
@@ -216,6 +215,7 @@ Magazine article prose should feel edited, not templated.
 - Hero images must be real article-related images, not generated SVG/vector mockups. Prefer free/open images and official source images when they carry the story well. For local private reading, public news/photos can be used when they are materially more accurate for a person, company, or specific event; record a clear `usageNote` such as `editorial-private-use; local personal reading only`.
 - Store local hero assets as bitmap files under `assets/` and record `credit`, `sourceUrl` or `pageUrl`, and license/rights/usage notes in `metadata.heroImage`. Wikimedia Commons files can be downloaded with `Special:FilePath`; official or news photos should use the original/representative image URL when available. Verify local assets with `file`, `ls -lh`, and the strict checker instead of creating placeholders.
 - Image search should be bounded. After at most three `search_web` calls, either download a viable candidate or report the failed URLs/commands. Do not keep searching while leaving the article without a real local bitmap.
+- The image worker runs without inherited interactive-browser or browser-MCP configuration. It must use bounded HTTP/API requests for source verification, never open or reuse the user's browser tabs, and record zeroed `browserCleanup` counts in `hero-image.json`.
 - Use direct quote blocks when a statement meaningfully frames the article, sharpens a market disagreement, or gives the reader a voice from the field. Keep quotes short and source-backed. Prefer one or two high-signal quote blocks over many decorative quotes. A quote block can use this HTML shape inside `article.html`:
 
 ```html
@@ -261,15 +261,16 @@ Run the unchanged legacy checker only for a legacy comparison:
 node scripts/magazine_article_style_check.mjs --strict
 ```
 
-Generate a fresh issue through the connected Codex CLI. `simple` is the default:
+Generate a fresh issue through the connected Codex or Antigravity CLI. `simple` is the default for both providers:
 
 ```bash
 node scripts/magazine_generate_with_codex.mjs --count 1 --harness v2 --pipeline simple
+node scripts/magazine_generate_with_codex.mjs --provider antigravity-cli --count 1 --harness v2 --pipeline simple
 ```
 
 The generator edits only local Magazine runtime folders. The default path locks the topic, runs one-turn structured writing and existing image sourcing concurrently, installs the verified bitmap and rights metadata, applies the existing cover classifier, then runs `node scripts/magazine_article_quality_check.mjs --strict` and the event-signature embedding check. It does not run an independent title, review, or repair LLM. The scheduler invokes one generator process per article. Use `--pipeline agentic` only for a deliberate legacy-cost comparison; `--harness legacy` retains the older legacy contract.
 
-For a non-publishing comparison, `scripts/magazine_generate_simple.mjs` runs the same isolated structured writer without image, cover, quality, embedding, or publish finalizers. Any tool call or stage turn count other than one fails the experiment. It writes `article.md`, `metadata.json`, and `generation-telemetry.json` below `data/magazine/simple-tests/`:
+For a non-publishing comparison, `scripts/magazine_generate_simple.mjs` runs the same isolated structured writer without image, cover, quality, embedding, or publish finalizers. Codex rejects non-web tools, more than two web searches, or a stage turn count other than one. Antigravity is constrained by the explicit custom-agent tool allowlist and local schema validation. It writes `article.md`, `metadata.json`, and `generation-telemetry.json` below `data/magazine/simple-tests/`:
 
 ```bash
 node scripts/magazine_generate_simple.mjs \
@@ -279,7 +280,7 @@ node scripts/magazine_generate_simple.mjs \
   --reasoning medium
 ```
 
-Use `--discover-all` instead of `--topic-file` to test the complete candidate path. This reads every News Feed item after `data/world-memory/collector-state.json` `collector.lastSuccessfulAt` without a candidate-count cap, submits the complete compact candidate set to one semantic LLM selection turn, and passes only the selected evidence ids to the one-turn three-exemplar writer. Telemetry records the eligibility cutoff, complete candidate count, selected evidence count, and both stages separately:
+Use `--discover-all` instead of `--topic-file` to test the complete candidate path. This reads structured World Memory candidates, excludes recent article event anchors, submits the compact set to one semantic LLM selection turn, runs semantic continuity search for the selected event ids, and passes that evidence to the one-turn three-style-card writer. Telemetry records the candidate count, selected evidence count, and both stages separately:
 
 ```bash
 node scripts/magazine_generate_simple.mjs \
@@ -323,7 +324,7 @@ Default behavior:
 - retry window: if a cycle still cannot complete before its next regular update slot, that cycle is closed and no longer carries work forward
 - deadline policy: if a cycle reaches the next regular update slot before its planned article count is filled, the article already being generated may finish, but any not-yet-started articles are canceled; the next new writing attempt waits 15 minutes after the slot or after the in-flight article is sent
 
-The scheduler asks the selected local agent provider for an `articleCountDecision` JSON object before a new regular cycle starts. The decision must include `targetCount`, `confidence`, `reason`, and optional `candidateAngles`. `targetCount=0` is valid only when the model judges that there is no clearly article-worthy new angle after checking the evidence bundle, recent magazine articles, and reader preference/bias signals. `targetCount` must not exceed the configured maximum article count, but that maximum never forces the scheduler to create that many articles. A successful non-fallback decision is reused only when a SHA-256 fingerprint of the complete decision evidence and selected agent settings is identical; the volatile wall-clock field is excluded, while News Feed items, World Memory/scout context, recent articles, preferences, bias, lane, maximum count, provider, model, reasoning, and speed remain part of the fingerprint. Any evidence or agent change invalidates the cache. Failed/fallback decisions are never cached. If the count-decision model call fails, the scheduler records a fallback decision and conservatively attempts one article rather than silently skipping the cycle.
+The scheduler asks the selected local agent provider for an `articleCountDecision` JSON object before a new regular cycle starts. The decision must include `targetCount`, `confidence`, `reason`, and optional `candidateAngles`; every nonzero angle must include at least one event id from the provided World Memory candidate set. `targetCount=0` is valid when the model finds no clearly article-worthy independent angle after checking those candidates, recent magazine articles, and reader preference/bias signals. `targetCount` must not exceed the configured maximum article count, but that maximum never forces the scheduler to create that many articles. A successful non-fallback decision is reused only when a SHA-256 fingerprint of the complete World Memory evidence and selected agent settings is identical; the volatile wall-clock field is excluded. Any evidence or agent change invalidates the cache. Failed/fallback decisions are never cached. If the decision call fails or its event ids cannot be bound back to live World Memory candidates, the scheduler records `targetCount=0` rather than falling through to a News Feed subject.
 
 Runtime scheduler state is stored in:
 
@@ -353,7 +354,7 @@ POST /api/magazine/read-state
 
 `PATCH /api/magazine/settings` also accepts `{"schedulerMaxArticlesPerCycle":2}`. The value is stored in `config/magazine.user.json`, defaults to `2`, and is clamped to the Settings UI range of 1-3 articles. This setting is the maximum the model may choose for a cycle; the decision harness can still select fewer articles, including `targetCount=0`, when the evidence does not support more.
 
-`PATCH /api/magazine/settings` also accepts `{"writingProvider":"codex-cli","writingModel":"gpt-5.6-sol","writingReasoning":"max","writingSpeed":"priority"}`. These values stay independent from the default chat agent and drive article-count judgment, article generation, every title/classification/repair pass, Magazine comments, and the Magazine sidebar runtime. The Settings page orders the controls as provider, model, model-specific reasoning, then speed only when that model/reasoning combination advertises a real speed tier. Codex `priority` is executed as `-c service_tier="priority"`; unsupported or stale speed values fall back to `standard`. The local CLI model catalog can be reloaded on demand. Antigravity CLI 1.1.1 exposes neither a reasoning flag nor a speed flag: entries such as `Gemini 3.5 Flash (High)` and `Claude Sonnet 4.6 (Thinking)` are complete model variants, so the separate reasoning and speed selectors stay hidden.
+`PATCH /api/magazine/settings` also accepts `{"writingProvider":"codex-cli","writingModel":"gpt-5.6-sol","writingReasoning":"max","writingSpeed":"priority"}`. These values stay independent from the default chat agent and drive article-count judgment, article generation, every title/classification/repair pass, Magazine comments, and the Magazine sidebar runtime. The Settings page orders the controls as provider, model, model-specific reasoning, then speed only when that model/reasoning combination advertises a real speed tier. Codex `priority` is executed as `-c service_tier="priority"`; unsupported or stale speed values fall back to `standard`. The local CLI model catalog can be reloaded on demand. Antigravity model entries such as `Gemini 3.5 Flash (High)` and `Claude Sonnet 4.6 (Thinking)` are complete variants, so separate reasoning and speed selectors stay hidden. Selecting Antigravity no longer changes the default pipeline back to `agentic`; `agentic` requires an explicit comparison request.
 
 `POST /api/magazine/status` accepts `{"action":"runNow"}` to request an immediate manual scheduler cycle. The cycle still runs the article-count decision harness first, so a valid result can be `targetCount=0` with a reader-visible reason instead of forcing an article. The API starts the cycle in the background, returns the refreshed status snapshot, and rejects the request while a scheduler or generation cycle is already active.
 

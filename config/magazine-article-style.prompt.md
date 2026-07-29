@@ -7,13 +7,13 @@ Use `config/magazine-topics.json` as the only topic catalog. `metadata.topics` m
 ## Source Policy
 
 - Treat all available inputs as one evidence bundle for article judgment. Do not explain internal source layers to readers.
-- Before choosing an article subject, inspect the local `data/news-feed.json` item window that starts after the latest successful internal collection/import update. Use `data/world-memory/collector-state.json` `collector.lastSuccessfulAt` as the internal eligibility boundary. Report generation timestamps such as `report.generatedAt` are not valid substitutes. Items at or before `collector.lastSuccessfulAt` must not be used as article subjects.
+- Before choosing an article subject, inspect structured World Memory candidates and select only actual event ids present in that set. News Feed items and external search results must not introduce or replace the subject.
 - If an eligible recent item is urgent or unusually article-worthy, it can drive the article. Use continuity search and external research as ordinary supporting evidence, not as a separate reader-facing layer.
 - Do not classify item importance with keyword or regex matching. Make an editorial LLM judgment from the item, market mechanism, source, timing, and available context.
-- For auditability, store local item evidence in `metadata.newsFeed.selectionPolicy: "post-world-memory-update-only"`, `worldMemoryLastSuccessfulAt`, and the specific `items[]` used. Each item timestamp must be after the internal eligibility boundary. Do not mention these field names or layer distinctions in prose fields.
+- For auditability, store `metadata.worldMemory.retrievalPolicy: "mandatory-vector-search"`, the semantic query, engine/model, and actual event hits used. Do not mention these field names or layer distinctions in prose fields.
 - If continuity search has strong semantic hits, store `worldMemory.retrievalPolicy: "mandatory-vector-search"` with query, engine, model, and hits in `metadata.json`. This is an audit record, not a reader-facing source layer.
-- If local context is sparse, noisy, or off-topic, do not skip the article. Switch to external research, official data, primary sources, earnings releases, filings, central-bank/statistical releases, reputable media, or market data. Set `researchMode: "external-research"` or `researchMode: "external-first"` in metadata and explain the source mix through actual source names.
-- If the user requested a field that is not well represented in local context, treat that absence as an editorial discovery opportunity. The article can still be valid when supported by external sources.
+- If the selected World Memory angle needs stronger evidence, keep that angle locked and use official data, primary sources, earnings releases, filings, central-bank/statistical releases, reputable media, or market data to verify and deepen it. External research may expand or correct the evidence, but it must not supply a replacement subject.
+- If no structured World Memory candidate can support the requested field or an article-worthy angle, skip that slot. Do not manufacture an outside-World-Memory subject to fill the issue.
 - Do not generate every issue from only the highest-ranked story family. Mix:
   - major regime stories,
   - second-order follow-through stories,
@@ -29,7 +29,7 @@ Before writing articles, create a short issue slate. The slate should prevent th
   - one or two mega-trend follow-ups,
   - one under-covered or low-level signal,
   - one company/sector/market-mechanism story,
-  - one external-research or outside-World-Memory story when useful.
+  - one World Memory angle whose mechanism benefits from deeper official or external verification when useful.
 - For ongoing mega-trends, do not reintroduce the whole issue each time. Write from the latest delta:
   - what changed since the previous article,
   - what the market newly learned,
@@ -138,6 +138,7 @@ Write like a magazine editor walking through the issue with the reader, not a tu
 - Image sourcing should not be Wikimedia-only. Check free/open images, official images, and public news/photo images. Use open or official images when they carry the story well; use a private-use news photo when an event/person image is materially more accurate.
 - Use at most three `search_web` calls for image sourcing. Once a candidate source page is found, stop searching and move to the actual image URL, download, and validation. If open images are not accurate enough, switch to official or private-use news/photo candidates instead of looping.
 - When a Wikimedia Commons file is selected, download via `Special:FilePath` or `upload.wikimedia.org`. For official or news photos, download the original/representative image URL with `curl -L --fail --show-error -A 'FinanceAgentGUI/1.0'`. Then verify with `file`, `ls -lh`, and the strict checker.
+- The image worker must not inherit or use Chrome, BrowserMCP, a browser extension, or other interactive browser automation. Verify image sources through bounded HTTP/API requests, keep user tabs untouched, and record zeroed browser-use counts in `hero-image.json`.
 - If image download fails, do not create a 1px placeholder or empty bitmap. Report the URL, command, and error so the runtime issue can be fixed.
 
 ## Reader-Facing Red Lines
